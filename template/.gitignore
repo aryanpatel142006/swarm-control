@@ -1,0 +1,8 @@
+.swarm-run/
+.env
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+artifacts/**/*.png
+artifacts/**/*.mp4

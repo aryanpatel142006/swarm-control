@@ -1,0 +1,107 @@
+# swarm-control project config. Committed; both laptops share it.
+# Secrets (NOTION_TOKEN, provider keys) live in each laptop's environment. SWARM_HOST names the laptop.
+# Notion ids are written to .swarm/notion.yaml by `swarm init`.
+
+project: my-hackathon-project
+repo: github-owner/my-hackathon-project
+main_branch: main
+worktree_root: ../my-hackathon-project-wt   # sibling directory, outside the repo
+
+event:
+  start: "2026-10-10T12:00:00-04:00"
+  end:   "2026-10-11T12:00:00-04:00"
+
+poll_seconds: 15          # per laptop, all agents in one query; idle_poll_seconds after 5 idle minutes
+idle_poll_seconds: 30
+heartbeat_seconds: 60
+serve_seconds: 30
+review_policy: high_and_above   # all | high_and_above | critical_only | none   (switch to `all` at T-4h)
+max_review_rounds: 2
+max_attempts: 3
+heartbeat_stale_minutes: 10
+max_queue_depth: 4        # beyond this, non-critical tasks spill to the next-best agent
+
+verify:
+  setup_worktree: scripts/setup_worktree.sh
+  fast: scripts/verify_fast.sh      # ≤ 60 s; run after every task
+  full: scripts/verify_full.sh      # run by the reviewer
+
+task_limits:
+  S: { turns: 30,  minutes: 20, budget_usd: 3 }
+  M: { turns: 60,  minutes: 40, budget_usd: 8 }
+  L: { turns: 120, minutes: 75, budget_usd: 20 }
+
+hosts:
+  laptop-a: { max_parallel: { claude: 3, codex: 3, antigravity: 2, grok: 1, generic: 2 } }
+  laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, generic: 2 } }
+
+routing:
+  importance_to_tier: { critical: best, high: high, normal: mid, low: low }
+  best_tier_only_when: { importance: critical }     # the `best` tier is never used below critical
+  type_model_overrides:
+    # Evidence-based exception: WebDev Arena (Sep 25 2026, ~795k votes) ranks Opus 5.5 #1 for frontend,
+    # GPT-6 Astra #2, Fable 5.1 #3. So critical frontend runs Opus, and Fable is kept for long-horizon work.
+    claude: { frontend: { best: opus } }
+
+docs_by_type:               # what gets inlined into a worker's prompt; everything else is referenced by path
+  _all:        [PLAN.md#summary, AGENTS.md]
+  frontend:    [docs/DESIGN.md, docs/CONTRACTS.md]
+  backend:     [docs/CONTRACTS.md, docs/ARCHITECTURE.md]
+  realtime:    [docs/CONTRACTS.md, docs/ARCHITECTURE.md]
+  ml_audio:    [docs/ARCHITECTURE.md#ml, docs/CONTRACTS.md#events]
+  ml_vision:   [docs/ARCHITECTURE.md#ml, docs/CONTRACTS.md#events]
+  ml_fusion:   [docs/ARCHITECTURE.md#ml, docs/CONTRACTS.md#events]
+  integration: [docs/ARCHITECTURE.md, docs/CONTRACTS.md]
+  eval:        [docs/ARCHITECTURE.md#ml]
+  docs:        [docs/ARCHITECTURE.md, docs/DESIGN.md]
+
+# Strength scores (1 weak … 5 strongest) are opinions to edit, seeded from evidence gathered Sep 26 2026:
+# - Claude: WebDev Arena #1 (Opus 5.5); practitioner reviews agree on design + multi-file agentic work;
+#   Terminal-Bench 2.1 top entry is Fable 5.1 (long-horizon terminal/agentic work).
+# - Codex: reviews agree it "does what you said" on backend; strong at PR-review bug catching; GPT-6 Astra #2 on WebDev.
+# - Gemini/Antigravity: native video/audio input, cheapest bulk option (3.8 Flash); MLE-bench within 1.3 pts of Opus.
+agents:
+  claude-a:
+    provider: claude
+    host: laptop-a
+    parallel: 2
+    models: { best: fable, high: opus, mid: sonnet, low: haiku }
+    effort: { best: high, high: high, mid: medium, low: low }
+    strengths: { frontend: 5, backend: 4, realtime: 4, ml_audio: 4, ml_vision: 4, ml_fusion: 4,
+                 eval: 4, tests: 4, docs: 5, research: 5, bugfix: 5, integration: 5, infra: 4 }
+    soft_cap_5h_usd: 40           # above 80% of this, the agent stops receiving normal/low work
+  codex-a:
+    provider: codex
+    host: laptop-a
+    parallel: 2
+    models: { best: gpt-6-astra, high: gpt-6-astra, mid: gpt-6-sol, low: gpt-6-luna }
+    effort: { best: xhigh, high: high, mid: medium, low: low }
+    strengths: { frontend: 3, backend: 5, realtime: 5, ml_audio: 3, ml_vision: 3, ml_fusion: 3,
+                 eval: 4, tests: 5, docs: 3, research: 3, bugfix: 4, integration: 4, infra: 5 }
+    sandbox: workspace-write      # danger-full-access if tests need network
+  codex-b:
+    provider: codex
+    host: laptop-b
+    parallel: 2
+    models: { best: gpt-6-astra, high: gpt-6-astra, mid: gpt-6-sol, low: gpt-6-luna }
+    effort: { best: xhigh, high: high, mid: medium, low: low }
+    strengths: { frontend: 3, backend: 5, realtime: 5, ml_audio: 3, ml_vision: 3, ml_fusion: 3,
+                 eval: 4, tests: 5, docs: 3, research: 3, bugfix: 4, integration: 4, infra: 5 }
+    sandbox: workspace-write
+  agy-b:
+    provider: antigravity
+    host: laptop-b
+    parallel: 1
+    models: { best: gemini-3.1-pro, high: gemini-3.1-pro, mid: gemini-3.8-flash, low: gemini-3.8-flash }
+    strengths: { frontend: 3, backend: 3, realtime: 2, ml_audio: 3, ml_vision: 4, ml_fusion: 3,
+                 eval: 4, tests: 3, docs: 4, research: 4, bugfix: 3, integration: 2, infra: 3 }
+    experimental: true            # headless flags are third-party sourced; `swarm doctor --smoke agy-b` must pass
+
+reviewer:                          # a different model family than most authors
+  agent: codex-a
+  model: gpt-6-sol
+  effort: medium
+planner:
+  agent: claude-a
+  model: opus
+  effort: high
