@@ -87,3 +87,16 @@ def test_cut_warns_about_dependents(project_dir):
     cli_mod.make_board = lambda cfg, memory=False: board
     r = runner.invoke(app, base + ["cut", "T-001"])
     assert r.exit_code == 0 and "T-002" in r.output and "depend" in r.output
+
+
+def test_assign_defaults_model_to_the_tasks_tier(project_dir):
+    from swarm import cli as cli_mod
+    from swarm.board.memory import InMemoryBoard
+    from swarm.config import load_config
+    from swarm.models import Status, Task
+    board = InMemoryBoard()
+    board.create_task(Task(id="T-001", title="hi", status=Status.READY, importance="high", type="backend"))
+    cli_mod.state.cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    cli_mod.make_board = lambda cfg, memory=False: board
+    r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "assign", "T-001", "--agent", "codex-a"])
+    assert r.exit_code == 0 and board.get_task("T-001").model == "gpt-6-astra" and board.get_task("T-001").effort == "high"

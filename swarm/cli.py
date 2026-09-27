@@ -194,9 +194,11 @@ def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str =
         raise typer.Exit(code=_fail(f"{task_id} not found"))
     if agent not in _cfg().agents:
         raise typer.Exit(code=_fail(f"unknown agent {agent}"))
+    from .router import model_for, tier_for
     t.agent = agent
-    t.model = model or _cfg().agents[agent].models["mid"]
-    t.effort = effort or _cfg().agents[agent].effort.get("mid")
+    default_model, default_effort = model_for(_cfg().agents[agent], tier_for(t, _cfg()), t.type, _cfg())
+    t.model = model or default_model
+    t.effort = effort or default_effort
     board.update_task(t, ["agent", "model", "effort"])
     console.print(f"{t.id} → {t.agent} / {t.model} / {t.effort}")
 
