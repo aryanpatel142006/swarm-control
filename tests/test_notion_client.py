@@ -141,7 +141,7 @@ def _board_with_fake_notion():
         if req.method == "POST" and path == "/v1/pages":
             counter["n"] += 1
             ds = body["parent"]["data_source_id"]
-            page = {"id": f"pg{counter['n']}", "properties": body["properties"],
+            page = {"id": f"pg{counter['n']}", "properties": body["properties"], "icon": body.get("icon"),
                     "last_edited_time": "2026-10-10T16:00:00.000Z"}
             store[ds][page["id"]] = page
             return httpx.Response(200, json=page)
@@ -274,3 +274,12 @@ def test_retry_after_http_date_is_honored():
     client, sleeps = make_client(handler)
     assert client.request("GET", "/users/me") == {"ok": True}
     assert len(sleeps) == 1 and 4 <= sleeps[0] <= 8
+
+
+def test_rows_are_created_with_icons():
+    board, store = _board_with_fake_notion()
+    t = board.create_task(Task(id="", title="ui", type="frontend"))
+    q = board.create_question(Question(id="", text="why?", kind="fyi", task_id=t.id))
+    a = board.upsert_agent(AgentRow(name="claude-a", provider="claude"))
+    icons = {pid: (page.get("icon") or {}).get("emoji") for ds in ("ds-tasks", "ds-q", "ds-agents") for pid, page in store[ds].items()}
+    assert icons[t.page_id] == "🎨" and icons[q.page_id] == "💡" and icons[a.page_id] == "🤖"

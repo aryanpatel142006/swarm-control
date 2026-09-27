@@ -103,10 +103,12 @@ class NotionClient:
                 return out
             cursor = data.get("next_cursor")
 
-    def create_page(self, ds_id: str, props: dict, children: list | None = None) -> dict:
-        body = {"parent": {"type": "data_source_id", "data_source_id": ds_id}, "properties": props}
+    def create_page(self, ds_id: str, props: dict, children: list | None = None, icon: str | None = None) -> dict:
+        body: dict = {"parent": {"type": "data_source_id", "data_source_id": ds_id}, "properties": props}
         if children:
             body["children"] = children[:100]
+        if icon:
+            body["icon"] = {"type": "emoji", "emoji": icon}
         return self.request("POST", "/pages", json=body)
 
     def create_child_page(self, parent_page_id: str, title: str, children: list | None = None) -> dict:
@@ -273,6 +275,13 @@ def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_
     return failed
 
 
+# Row icons so cards read at a glance on the board.
+TYPE_ICON = {"frontend": "🎨", "backend": "⚙️", "realtime": "⚡", "ml_audio": "🔊", "ml_vision": "👁️", "ml_fusion": "🔗",
+             "eval": "📏", "tests": "🧪", "docs": "📝", "research": "🔍", "bugfix": "🐛", "integration": "🧩", "infra": "🛠️"}
+QUESTION_ICON = {"blocking": "❓", "fyi": "💡"}
+AGENT_ICON = "🤖"
+
+
 # ---------- board ----------
 def _sel_filter(prop: str, values: Iterable[str]) -> dict:
     vals = list(values)
@@ -295,7 +304,7 @@ class NotionBoard:
         if not task.id:
             task.id = self.next_task_id()
         children = markdown_to_blocks(task.description) if task.description else None
-        page = self.c.create_page(self.ids.tasks_ds, np.task_to_props(task), children)
+        page = self.c.create_page(self.ids.tasks_ds, np.task_to_props(task), children, icon=TYPE_ICON.get(task.type))
         task.page_id = page["id"]
         return task
 
@@ -337,7 +346,8 @@ class NotionBoard:
         if q.task_id:
             t = self.get_task(q.task_id)
             task_page = t.page_id if t else None
-        page = self.c.create_page(self.ids.questions_ds, np.question_to_props(q, task_page_id=task_page))
+        page = self.c.create_page(self.ids.questions_ds, np.question_to_props(q, task_page_id=task_page),
+                                  icon=QUESTION_ICON.get(q.kind, "❓"))
         q.page_id = page["id"]
         return q
 
@@ -362,7 +372,8 @@ class NotionBoard:
             self.c.update_page(page["id"], np.agent_to_props(row))
             row.page_id = page["id"]
         else:
-            created = self.c.create_page(self.ids.agents_ds, np.agent_to_props(row))
+            created = self.c.create_page(self.ids.agents_ds, np.agent_to_props(row),
+                                         icon="🛰️" if row.name == "serve" else AGENT_ICON)
             row.page_id = created["id"]
         return row
 
