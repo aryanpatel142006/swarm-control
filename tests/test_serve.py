@@ -43,11 +43,14 @@ def test_lock(cfg, git_repo, tmp_path):
     srv, board, clock = make(cfg, git_repo, tmp_path)
     assert srv.acquire_lock() is True
     assert srv.acquire_lock() is True  # re-acquiring my own lock is fine
-    srv2, _, _ = make(cfg, git_repo, tmp_path, board=board, now=clock["now"])
-    assert srv2.acquire_lock() is False
+    other, _, _ = make(cfg, git_repo, tmp_path, board=board, now=clock["now"])
+    other.host = "laptop-b"
+    assert other.acquire_lock() is False  # another laptop while the heartbeat is fresh
+    restarted, _, _ = make(cfg, git_repo, tmp_path, board=board, now=clock["now"])
+    assert restarted.acquire_lock() is True  # same laptop: a restart takes over immediately
     clock["now"] += timedelta(minutes=30)
-    srv2.now = lambda: clock["now"]
-    assert srv2.acquire_lock() is True
+    other.now = lambda: clock["now"]
+    assert other.acquire_lock() is True  # stale heartbeat: anyone may take over
 
 
 def test_reap_stale_running(cfg, git_repo, tmp_path):
@@ -176,7 +179,7 @@ def test_reap_orphan_with_fresh_heartbeat(cfg, git_repo, tmp_path):
     now = clock["now"]
     board.upsert_agent(AgentRow(name="codex-a", last_heartbeat=now, current_task=""))
     t = board.create_task(Task(id="", title="orphan", status=Status.RUNNING, agent="codex-a",
-                               started=now - timedelta(minutes=5)))
+                               started=now - timedelta(minutes=15)))
     fresh = board.create_task(Task(id="", title="just started", status=Status.RUNNING, agent="codex-a",
                                    started=now - timedelta(seconds=30)))
     assert srv.reap() == 1
@@ -232,7 +235,7 @@ def test_reap_orphan_rule_is_immune_to_clock_skew(cfg, git_repo, tmp_path):
     """Timestamps written by another laptop are compared against that laptop's own heartbeat, never serve's clock."""
     srv, board, clock = make(cfg, git_repo, tmp_path)
     now = clock["now"]
-    their_now = now + timedelta(minutes=7)   # the other laptop's clock runs 7 minutes ahead
+    their_now = now - timedelta(minutes=7)   # the other laptop's clock runs 7 minutes behind
     board.upsert_agent(AgentRow(name="codex-a", last_heartbeat=their_now, current_task=""))
     live = board.create_task(Task(id="", title="live", status=Status.RUNNING, agent="codex-a",
                                   started=their_now - timedelta(seconds=30)))

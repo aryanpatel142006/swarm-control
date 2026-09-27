@@ -35,9 +35,12 @@ class Server:
         now = self.now()
         row = self.board.get_agent("serve")
         stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
-        if row and row.last_heartbeat and (now - row.last_heartbeat) < stale and not self._holds_lock:
+        if (row and row.last_heartbeat and (now - row.last_heartbeat) < stale and not self._holds_lock
+                and row.host != self.host):
             self.log(f"another serve is alive on {row.host} (heartbeat {row.last_heartbeat})")
             return False
+        if row and row.host == self.host and not self._holds_lock:
+            self.log("taking over the serve lock from a previous run on this laptop")
         self.board.upsert_agent(AgentRow(name="serve", provider="serve", host=self.host, status="running",
                                          last_heartbeat=now, page_id=row.page_id if row else ""))
         self._holds_lock = True
