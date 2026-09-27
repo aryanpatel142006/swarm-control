@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from swarm.board.notion_props import (
     TASKS_SCHEMA,
+    p_title,
     agent_to_props,
     p_date,
     p_rich,
@@ -83,3 +84,9 @@ def test_tasks_schema_has_agent_options():
     names = [o["name"] for o in schema["Agent"]["select"]["options"]]
     assert names == ["claude-a", "codex-a"]
     assert "Backlog" in [o["name"] for o in schema["Status"]["select"]["options"]]
+
+
+def test_page_without_id_has_empty_id():
+    t = page_to_task(_page("pg", {"Name": p_title("Hand made"), "Status": p_select("Ready")}))
+    assert t.id == "" and t.title == "Hand made" and t.status is Status.READY
+    assert page_to_task(_page("pg2", {"Name": p_title("T-005 · Old style")})).id == "T-005"

@@ -72,6 +72,11 @@ class Runner:
         self.executor = executor or ThreadPoolExecutor(max_workers=workers)
         self._last_heartbeat = None
         self._idle_since = None
+        self._stopping = False
+
+    def stop(self) -> None:
+        """Ask in-flight runs to requeue their task instead of publishing (Ctrl-C path)."""
+        self._stopping = True
 
     # ----- capacity -----
     def free_slots(self, agent_name: str) -> int:
@@ -104,6 +109,26 @@ class Runner:
             row.cost_5h_usd = self.ledger.window(name, 5, now).cost_usd or 0.0
             self.board.upsert_agent(row)
 
+    # ----- recovery -----
+    def _requeue(self, task: Task, why: str) -> None:
+        task.status, task.claim_nonce = Status.READY, ""
+        task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+        task.last_error = why[:1900]
+        self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error"])
+
+    def recover_orphans(self) -> int:
+        """On start (and after Ctrl-C): tasks still Running for my agents belong to a process that is gone."""
+        n = 0
+        with self.lock:
+            active = {tid for ids in self.active.values() for tid in ids}
+        for t in self.board.list_tasks(status=[Status.RUNNING], agent=list(self.agents)):
+            if t.id in active:
+                continue
+            self._requeue(t, "runner restarted; requeued to resume on its branch")
+            self.log(f"[{t.id}] recovered orphaned run → Ready")
+            n += 1
+        return n
+
     # ----- polling -----
     def pending_tasks(self) -> list[Task]:
         tasks = self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED], agent=list(self.agents))
@@ -113,10 +138,11 @@ class Runner:
         self.heartbeat()
         dispatched = 0
         now = self.now()
+        rows = {a.name: a for a in self.board.list_agents()}
         for task in self.pending_tasks():
-            row = self.board.get_agent(task.agent)
-            if row and row.cooldown_until and row.cooldown_until > now and task.importance != "critical":
-                continue
+            row = rows.get(task.agent)
+            if row and row.cooldown_until and row.cooldown_until > now:
+                continue  # a rate-limited provider cannot run anything, whatever the importance
             if self.free_slots(task.agent) <= 0:
                 continue
             with self.lock:
@@ -134,11 +160,14 @@ class Runner:
             self.log(f"[{task.id}] runner crashed: {e!r}")
             try:
                 fresh = self.board.get_task(task.id)
-                if fresh and fresh.status is Status.RUNNING:
-                    fresh.status, fresh.claim_nonce = Status.FAILED, ""
-                    fresh.last_error = f"runner crash: {e!r}"[:1900]
-                    fresh.attempts += 1
-                    self.board.update_task(fresh, ["status", "last_error", "claim_nonce", "attempts"])
+                if fresh and fresh.status is Status.RUNNING and fresh.claim_nonce == task.claim_nonce:
+                    if self._stopping:
+                        self._requeue(fresh, "runner stopped mid-task")
+                    else:
+                        fresh.status, fresh.claim_nonce = Status.FAILED, ""
+                        fresh.last_error = f"runner crash: {e!r}"[:1900]
+                        fresh.attempts += 1
+                        self.board.update_task(fresh, ["status", "last_error", "claim_nonce", "attempts"])
             except Exception as e2:  # noqa: BLE001
                 self.log(f"[{task.id}] could not record crash: {e2!r}")
         finally:
@@ -147,19 +176,26 @@ class Runner:
 
     def loop(self, *, once: bool = False, stop: Callable[[], bool] = lambda: False) -> None:
         self.log(f"swarm run · host={self.host} · agents={', '.join(self.agents)}")
-        while not stop():
-            n = self.tick()
-            if once:
-                break
-            now = self.now()
-            if n == 0:
-                self._idle_since = self._idle_since or now
-                idle_for = (now - self._idle_since).total_seconds()
-                self.sleep(self.cfg.idle_poll_seconds if idle_for > IDLE_AFTER_S else self.cfg.poll_seconds)
-            else:
-                self._idle_since = None
-                self.sleep(self.cfg.poll_seconds)
+        self.recover_orphans()
+        try:
+            while not stop():
+                n = self.tick()
+                if once:
+                    break
+                now = self.now()
+                if n == 0:
+                    self._idle_since = self._idle_since or now
+                    idle_for = (now - self._idle_since).total_seconds()
+                    self.sleep(self.cfg.idle_poll_seconds if idle_for > IDLE_AFTER_S else self.cfg.poll_seconds)
+                else:
+                    self._idle_since = None
+                    self.sleep(self.cfg.poll_seconds)
+        except KeyboardInterrupt:
+            self.log("stopping: waiting for in-flight runs to park their work (Ctrl-C again to abandon)")
+            self.stop()
         self.executor.shutdown(wait=True)
+        if self._stopping:
+            self.recover_orphans()
 
     # ----- one task -----
     def run_task(self, task: Task) -> Outcome:
@@ -196,6 +232,8 @@ class Runner:
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
                                duration_s=duration, ok=result.ok)
             self._save_logs(wt, task.id, attempt, result)
+            if self._stopping:
+                return self._park(task, wt, result)
             if result.rate_limited:
                 return self._rate_limited(task, result)
             return self._publish(task, wt, attempt, result)
@@ -214,6 +252,15 @@ class Runner:
         except OSError as e:
             self.log(f"could not save logs: {e}")
 
+    def _park(self, task: Task, wt: Path, result: RunResult) -> Outcome:
+        """Runner is stopping: keep whatever the model left, push it, and requeue for a resume."""
+        if self.ws.changed_files(wt):
+            self.ws.commit_all(wt, f"{task.id}: parked by runner stop")
+            self.ws.push(wt, task.branch, force_with_lease=True)
+        self._requeue(task, "runner stopped mid-task; work parked on the branch")
+        self.log(f"[{task.id}] parked → Ready (resume)")
+        return Outcome(task, None, result, None, Status.READY)
+
     def _rate_limited(self, task: Task, result: RunResult) -> Outcome:
         now = self.now()
         task.status, task.claim_nonce = Status.READY, ""
@@ -229,6 +276,12 @@ class Runner:
         return Outcome(task, None, result, None, Status.READY)
 
     def _publish(self, task: Task, wt: Path, attempt: int, result: RunResult) -> Outcome:
+        fresh = self.board.get_task(task.id)
+        if fresh is None or fresh.claim_nonce != task.claim_nonce or fresh.status is not Status.RUNNING:
+            # we were reaped (laptop slept) and someone else owns the task now; never overwrite their state
+            self.log(f"[{task.id}] claim no longer ours; abandoning publish")
+            return Outcome(task, None, result, None, fresh.status if fresh else Status.READY)
+
         changed = self.ws.changed_files(wt)
         report = parse_report(result.structured_output, wt, changed_files=changed)
         flags = [f for f in task.flags if f not in TRANSIENT_FLAGS]
@@ -257,10 +310,11 @@ class Runner:
         verify_ok = verify.ok if verify is not None else None
         verify_tail = verify.tail(1500) if verify is not None else ""
 
-        pr_url = task.pr_url
+        pr_url, push_error = task.pr_url, ""
         if changed:
             self.ws.commit_all(wt, f"{task.id}: {(report.summary or 'work in progress')[:60]}")
-            push = self.ws.push(wt, task.branch)
+            # only the claim holder pushes this branch, so a lease against the fetched remote ref is safe
+            push = self.ws.push(wt, task.branch, force_with_lease=True)
             if push.ok:
                 body = report_to_markdown(report, attempt=attempt, verify_ok=verify_ok, verify_tail=verify_tail,
                                           pr_url="", flags=flags)
@@ -269,23 +323,27 @@ class Runner:
                 except RuntimeError as e:
                     self.log(f"[{task.id}] PR failed: {e}")
             else:
-                self.log(f"[{task.id}] push failed: {push.err.strip()[:200]}")
+                push_error = push.err.strip()[:600] or f"exit {push.code}"
+                self.log(f"[{task.id}] push failed: {push_error[:200]}")
         task.pr_url = pr_url
 
         md = report_to_markdown(report, attempt=attempt, verify_ok=verify_ok, verify_tail=verify_tail,
                                 pr_url=pr_url, flags=flags)
         self.board.append_task_report(task, f"Report — attempt {attempt}", md)
+        if report.status == "blocked" and not report.question:
+            report.question = {"kind": "blocking", "options": [], "proceeding_with": "",
+                               "text": (report.summary or f"{task.id} reported blocked without saying why")[:190]}
         if report.question:
             self._file_question(task, report, report.question)
 
-        status = self._decide(task, report, result, changed, verify_ok, verify_tail)
+        status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error)
         task.status = status
         self.board.update_task(task, PUBLISH_FIELDS)
         self.log(f"[{task.id}] → {status.value}")
         return Outcome(task, report, result, verify_ok, status)
 
     def _decide(self, task: Task, report: Report, result: RunResult, changed: list[str],
-                verify_ok: bool | None, verify_tail: str) -> Status:
+                verify_ok: bool | None, verify_tail: str, push_error: str) -> Status:
         if report.status == "blocked":
             return Status.BLOCKED
         if report.status == "failed":
@@ -293,6 +351,9 @@ class Runner:
             return Status.FAILED
         if not changed:
             task.last_error = "timeout" if result.timed_out else ("no changes" if result.ok else result.error[:1900])
+            return Status.FAILED
+        if push_error:
+            task.last_error = f"push failed: {push_error}"[:1900]
             return Status.FAILED
         if not result.ok and report.synthesized:
             # the CLI ended abnormally (max turns, timeout, crash) but left work behind: continue on the branch

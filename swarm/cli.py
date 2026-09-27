@@ -306,7 +306,7 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
     srv = Server(state.cfg, board, ws,
                  reviewer=NoReview() if no_review else Reviewer(state.cfg, board, ws, log=console.print),
                  merger=NoMerge() if no_merge else Merger(state.cfg, board, ws, log=console.print),
-                 log=console.print, host=state.host or "serve")
+                 log=console.print, host=state.host or "serve", background=not once)
     if once:
         srv.acquire_lock()
         console.print(srv.tick())

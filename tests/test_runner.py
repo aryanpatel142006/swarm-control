@@ -231,12 +231,94 @@ def test_heartbeat_writes_rows(cfg, git_repo, tmp_path):
     assert row.host == "host-a" and row.status == "idle" and row.last_heartbeat is not None
 
 
-def test_cooldown_agent_not_dispatched_unless_critical(cfg, git_repo, tmp_path):
+def test_cooldown_gates_dispatch_for_every_importance(cfg, git_repo, tmp_path):
     adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
     r, board = make_runner(cfg, git_repo, tmp_path, adapter)
     board.upsert_agent(AgentRow(name="codex-a", status="cooldown", cooldown_until=utcnow() + timedelta(minutes=5)))
     ready_task(board, title="n", importance="normal")
     ready_task(board, title="c", importance="critical")
-    assert r.tick() == 1
-    assert board.get_task("T-001").status is Status.READY
-    assert board.get_task("T-002").status is Status.REVIEW  # critical → reviewed under high_and_above
+    assert r.tick() == 0
+    assert board.get_task("T-001").status is Status.READY and board.get_task("T-002").status is Status.READY
+
+
+def test_recover_orphans_on_start(cfg, git_repo, tmp_path):
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    t = board.create_task(Task(id="", title="orphan", status=Status.RUNNING, agent="codex-a", claim_nonce="old"))
+    other = board.create_task(Task(id="", title="other host", status=Status.RUNNING, agent="fake-b"))
+    assert r.recover_orphans() == 1
+    s = board.get_task(t.id)
+    assert s.status is Status.READY and "resume" in s.flags and s.claim_nonce == ""
+    assert board.get_task(other.id).status is Status.RUNNING
+
+
+def test_push_uses_force_with_lease(cfg, git_repo, tmp_path):
+    # a stale remote branch from an earlier attempt must not block a fresh-from-main push
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    wt = r.ws.provision(t.id)
+    (wt / "old.txt").write_text("old\n")
+    r.ws.commit_all(wt, "old attempt")
+    r.ws.push(wt, t.branch)
+    r.ws.dispose(wt)
+    assert r.run_task(t).status is Status.MERGE_READY
+    wt2 = r.ws.provision(t.id, reuse_branch=True)
+    assert not (wt2 / "old.txt").exists() and (wt2 / "src" / "a.py").exists()
+    r.ws.dispose(wt2)
+
+
+def test_push_failure_is_failed(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    r.ws.push = lambda path, branch, force_with_lease=False: CmdResult(1, "", "rejected")
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.FAILED
+    assert "push failed" in board.get_task(t.id).last_error
+
+
+def test_blocked_without_question_synthesizes_one(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "x"},
+                          structured={"status": "blocked", "summary": "cannot find the API key"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.BLOCKED
+    q = board.list_questions(status="Open")[0]
+    assert q.kind == "blocking" and "API key" in q.text
+
+
+def test_publish_abandons_when_claim_lost(cfg, git_repo, tmp_path):
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+    t = ready_task(board)
+
+    class Hijack(FakeAdapter):
+        def run(self, spec):
+            stolen = board.get_task(t.id)
+            stolen.claim_nonce, stolen.agent = "someone-else", "claude-a"
+            board.update_task(stolen, ["claim_nonce", "agent"])
+            return super().run(spec)
+
+    adapter = Hijack(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r.adapter_factory = lambda a: adapter
+    r.run_task(t)
+    stored = board.get_task(t.id)
+    assert stored.status is Status.RUNNING and stored.claim_nonce == "someone-else" and stored.agent == "claude-a"
+    assert t.id not in board.reports
+
+
+def test_stopping_requeues_instead_of_publishing(cfg, git_repo, tmp_path):
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+
+    class Stopper(FakeAdapter):
+        def run(self, spec):
+            r.stop()
+            return super().run(spec)
+
+    adapter = Stopper(files={"src/a.py": "half"}, ok=False)
+    r.adapter_factory = lambda a: adapter
+    t = ready_task(board)
+    out = r.run_task(t)
+    s = board.get_task(t.id)
+    assert out.status is Status.READY and s.status is Status.READY and "resume" in s.flags and s.claim_nonce == ""
+    wt = r.ws.provision(t.id, reuse_branch=True)
+    assert (wt / "src" / "a.py").exists()  # partial work was pushed for the resume
+    r.ws.dispose(wt)

@@ -1,6 +1,7 @@
 """Notion property builders/readers and the database schemas for tasks, questions, agents."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Iterable
 
@@ -144,8 +145,9 @@ def page_to_task(page: dict) -> Task:
         return p.get(name, {})
 
     full_title = r_title(g("Name"))
-    tid = r_rich(g("ID")) or full_title.split(" · ")[0]
-    title = full_title.split(" · ", 1)[1] if " · " in full_title else full_title
+    prefix = full_title.split(" · ")[0]
+    tid = r_rich(g("ID")) or (prefix if re.fullmatch(r"T-\d+", prefix) else "")
+    title = full_title.split(" · ", 1)[1] if " · " in full_title and tid else full_title
     status_name = r_select(g("Status")) or "Backlog"
     return Task(
         id=tid, title=title, description=r_rich(g("Description")), acceptance=r_rich(g("Acceptance")),

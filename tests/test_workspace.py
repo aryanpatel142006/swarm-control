@@ -115,3 +115,14 @@ def test_main_worktree(git_repo, tmp_path):
     assert (m / "README.md").exists()
     assert _git(m, "rev-parse", "--abbrev-ref", "HEAD").strip() == "swarm-main"
     assert ws.main_worktree() == m
+
+
+def test_swarm_run_excluded_without_gitignore(git_repo, tmp_path):
+    (git_repo / ".gitignore").unlink()
+    _git(git_repo, "commit", "-qam", "drop gitignore")
+    _git(git_repo, "push", "-q", "origin", "main")
+    ws = Workspace(git_repo, tmp_path / "wt")
+    path = ws.provision("T-009")
+    (path / ".swarm-run" / "prompt.md").write_text("p")
+    assert ws.changed_files(path) == []
+    ws.dispose(path)

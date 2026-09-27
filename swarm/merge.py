@@ -3,8 +3,14 @@ from __future__ import annotations
 
 from .board.base import Board
 from .config import Config
-from .models import Status, Task, utcnow
+from .models import Question, Status, Task, utcnow
 from .workspace import Workspace
+
+MAX_MERGE_FAILURES = 3
+
+
+def merge_failures(task: Task) -> int:
+    return sum(1 for f in task.flags if f.startswith("merge_failed"))
 
 
 class Merger:
@@ -19,9 +25,24 @@ class Merger:
         self.log(f"[{task.id}] merge → changes requested")
         return False
 
+    def _merge_failed(self, task: Task, error: str) -> bool:
+        n = merge_failures(task) + 1
+        task.last_error = error[:1900]
+        task.flags = list(dict.fromkeys(task.flags + [f"merge_failed_{n}"]))
+        if n >= MAX_MERGE_FAILURES:
+            task.status = Status.BLOCKED
+            self.board.update_task(task, ["last_error", "flags", "status"])
+            self.board.create_question(Question(
+                id="", text=f"{task.id} could not be merged {n} times: {error[:100]}"[:190], kind="blocking",
+                context=error[:1900], options=["merge by hand then answer 'merged'", "cut", "human fix"],
+                impact="high", task_id=task.id, asked_by="serve"))
+            self.log(f"[{task.id}] merge failed {n} times → blocked")
+        else:
+            self.board.update_task(task, ["last_error", "flags"])
+            self.log(f"[{task.id}] merge failed ({n}/{MAX_MERGE_FAILURES}): {error[:120]}")
+        return False
+
     def merge(self, task: Task) -> bool:
-        if "merge_failed" in task.flags:
-            return False
         wt = self.ws.provision(task.id, reuse_branch=True)
         try:
             ok, conflicts = self.ws.rebase_onto_main(wt)
@@ -35,21 +56,18 @@ class Merger:
                 return self._back(task, "verify_fast.sh failed after rebase onto main:\n" + verify.tail(1500))
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if not push.ok:
-                task.last_error = ("push failed: " + push.err.strip())[:1900]
-                self.board.update_task(task, ["last_error"])
-                return False
-            r = self.ws.pr_merge(task.branch)
-            if not r.ok:
-                task.last_error = ("gh pr merge failed: " + (r.err.strip() or r.out.strip()))[:1900]
-                task.flags = list(dict.fromkeys(task.flags + ["merge_failed"]))
-                self.board.update_task(task, ["last_error", "flags"])
-                self.log(f"[{task.id}] gh merge failed: {task.last_error}")
-                return False
-            task.status, task.claim_nonce = Status.DONE, ""
-            self.board.update_task(task, ["status", "claim_nonce"])
-            self.board.append_task_report(task, "Merged", f"Squash-merged into {self.cfg.main_branch} at "
-                                          f"{utcnow().isoformat(timespec='minutes')}. PR: {task.pr_url or '(none)'}")
-            self.log(f"[{task.id}] merged")
-            return True
+                return self._merge_failed(task, "push failed: " + push.err.strip())
         finally:
+            # release the branch before gh touches it: a checked-out branch cannot be deleted or fast-forwarded
             self.ws.dispose(wt)
+        r = self.ws.pr_merge(task.branch)
+        if not r.ok:
+            return self._merge_failed(task, "gh pr merge failed: " + (r.err.strip() or r.out.strip()))
+        task.status, task.claim_nonce = Status.DONE, ""
+        task.flags = [f for f in task.flags if not f.startswith("merge_failed")]
+        self.board.update_task(task, ["status", "claim_nonce", "flags"])
+        self.board.append_task_report(task, "Merged", f"Squash-merged into {self.cfg.main_branch} at "
+                                      f"{utcnow().isoformat(timespec='minutes')}. PR: {task.pr_url or '(none)'}")
+        self.ws.delete_remote_branch(task.branch)
+        self.log(f"[{task.id}] merged")
+        return True

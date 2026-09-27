@@ -46,7 +46,7 @@
 
 | What happened | Do this |
 |---|---|
-| A laptop died or slept | Restart `swarm run`. Its running tasks are requeued by serve within 10 minutes. |
+| A laptop died or slept | Restart `swarm run`. On start it requeues its own Running tasks with their branches intact; serve also reaps them within 10 minutes if the runner never comes back. Ctrl-C parks in-flight work on the branch and requeues it. |
 | serve died | Restart it. If it refuses ("another serve is running"), wait for the old heartbeat to go stale (10 min) or run `swarm serve --host <same name>`. |
 | Notion is down | Workers keep working and publish when it returns. Nothing to do. |
 | A provider is rate limited | `swarm status` shows cooldown. Non-critical work reroutes itself. `swarm reroute` to force it. |

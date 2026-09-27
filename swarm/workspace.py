@@ -80,7 +80,22 @@ class Workspace:
         start = remote_branch if (reuse_branch and has_remote) else self._main_ref()
         self.git(self.repo_root, "worktree", "add", "-q", "-B", branch, str(path), start)
         (path / ".swarm-run").mkdir(exist_ok=True)
+        self._ensure_excluded(".swarm-run/")
         return path
+
+    def _ensure_excluded(self, pattern: str) -> None:
+        """Ignore runtime files even when the project's .gitignore does not (info/exclude is shared by worktrees)."""
+        common = self.git(self.repo_root, "rev-parse", "--git-common-dir", check=False).out.strip()
+        if not common:
+            return
+        exclude = (self.repo_root / common / "info" / "exclude").resolve()
+        try:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            existing = exclude.read_text() if exclude.exists() else ""
+            if pattern not in existing.splitlines():
+                exclude.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + pattern + "\n")
+        except OSError:
+            pass
 
     def dispose(self, path: Path) -> None:
         r = self.git(self.repo_root, "worktree", "remove", "--force", str(path), check=False)
@@ -145,7 +160,11 @@ class Workspace:
         return created.out.strip().splitlines()[-1] if created.out.strip() else ""
 
     def pr_merge(self, branch: str) -> CmdResult:
-        return self.gh(["pr", "merge", branch, "--squash", "--delete-branch"], self.repo_root)
+        # no --delete-branch: gh would try to delete the local branch too, which fails while a worktree holds it
+        return self.gh(["pr", "merge", branch, "--squash"], self.repo_root)
+
+    def delete_remote_branch(self, branch: str) -> CmdResult:
+        return self.git(self.repo_root, "push", "-q", self.remote, "--delete", branch, check=False, timeout=120)
 
     # ----- a long-lived worktree of main, used by serve and the planner -----
     def main_worktree(self) -> Path:

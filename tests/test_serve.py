@@ -149,3 +149,43 @@ def test_tick_writes_status(cfg, git_repo, tmp_path):
     summary = srv.tick()
     assert set(summary) >= {"reaped", "retried", "relayed", "promoted", "reviewed", "merged", "rerouted"}
     assert "SWARM STATUS" in board.status_page
+
+
+def test_step_exception_does_not_abort_tick(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+
+    def boom(task):
+        raise RuntimeError("boom")
+
+    srv.reviewer.process = boom
+    board.create_task(Task(id="", title="r", status=Status.REVIEW))
+    board.create_task(Task(id="", title="m", status=Status.MERGE_READY))
+    summary = srv.tick()
+    assert summary["merged"] == 1 and summary["errors"] == 1
+
+
+def test_reroute_changes_requested_on_offline_agent(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="codex-a", status="offline"))
+    t = board.create_task(Task(id="", title="cr", status=Status.CHANGES_REQUESTED, agent="codex-a", type="backend"))
+    assert srv.reroute() == 1 and board.get_task(t.id).agent == "claude-a"
+
+
+def test_reap_orphan_with_fresh_heartbeat(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-a", last_heartbeat=now, current_task=""))
+    t = board.create_task(Task(id="", title="orphan", status=Status.RUNNING, agent="codex-a",
+                               started=now - timedelta(minutes=5)))
+    fresh = board.create_task(Task(id="", title="just started", status=Status.RUNNING, agent="codex-a",
+                                   started=now - timedelta(seconds=30)))
+    assert srv.reap() == 1
+    assert board.get_task(t.id).status is Status.READY and board.get_task(fresh.id).status is Status.RUNNING
+
+
+def test_assign_ids_to_handmade_tasks(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.create_task(Task(id="", title="normal"))
+    board.tasks[""] = Task(id="", title="hand made", status=Status.READY, page_id="pg-hand")
+    assert srv.assign_ids() == 1
+    assert board.get_task("T-002").title == "hand made" and "" not in board.tasks

@@ -1,6 +1,8 @@
 """Control loop (exactly one per project): reap, retry, relay answers, promote, review, merge, reroute, status."""
 from __future__ import annotations
 
+import re
+import threading
 import time
 from datetime import timedelta
 from typing import Callable
@@ -13,24 +15,27 @@ from .status import render_status
 from .workspace import Workspace
 
 IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
+FAST_STEPS = ("assigned", "reaped", "retried", "relayed", "promoted", "rerouted")
 
 
 class Server:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, reviewer, merger, now=utcnow,
                  sleep: Callable[[float], None] = time.sleep, log=print, host: str = "serve",
-                 status_every_s: int = 900, review_batch: int = 1):
+                 status_every_s: int = 900, review_batch: int = 1, background: bool = False):
         self.cfg, self.board, self.ws, self.reviewer, self.merger = cfg, board, ws, reviewer, merger
         self.now, self.sleep, self.log, self.host = now, sleep, log, host
-        self.status_every_s, self.review_batch = status_every_s, review_batch
+        self.status_every_s, self.review_batch, self.background = status_every_s, review_batch, background
         self._last_status = None
         self._holds_lock = False
+        self._slow_thread: threading.Thread | None = None
+        self._slow_summary = {"reviewed": 0, "merged": 0}
 
     # ----- lock -----
     def acquire_lock(self) -> bool:
         now = self.now()
         row = self.board.get_agent("serve")
         stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
-        if (row and row.last_heartbeat and (now - row.last_heartbeat) < stale and not self._holds_lock):
+        if row and row.last_heartbeat and (now - row.last_heartbeat) < stale and not self._holds_lock:
             self.log(f"another serve is alive on {row.host} (heartbeat {row.last_heartbeat})")
             return False
         self.board.upsert_agent(AgentRow(name="serve", provider="serve", host=self.host, status="running",
@@ -45,18 +50,34 @@ class Server:
         self._holds_lock = True
 
     # ----- steps -----
+    def assign_ids(self) -> int:
+        """Cards humans created by hand in Notion have no ID; give them one so branches and lookups work."""
+        n = 0
+        for t in self.board.list_tasks():
+            if t.id and re.fullmatch(r"T-\d+", t.id):
+                continue
+            t.id = self.board.next_task_id()
+            self.board.update_task(t, ["id"])
+            self.log(f"[{t.id}] assigned id to hand-made card '{t.title}'")
+            n += 1
+        return n
+
     def reap(self) -> int:
         now = self.now()
         stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
+        orphan_after = timedelta(seconds=2 * self.cfg.heartbeat_seconds)
         rows = {a.name: a for a in self.board.list_agents()}
         n = 0
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             row = rows.get(t.agent or "")
-            if row and row.last_heartbeat and (now - row.last_heartbeat) < stale:
+            alive = bool(row and row.last_heartbeat and (now - row.last_heartbeat) < stale)
+            listed = bool(row and t.id in [x.strip() for x in row.current_task.split(",") if x.strip()])
+            recent = t.started is None or (now - t.started) < orphan_after  # unknown start: trust the heartbeat
+            if alive and (listed or recent):
                 continue
             t.status, t.attempts, t.claim_nonce = Status.READY, t.attempts + 1, ""
             t.flags = list(dict.fromkeys(t.flags + ["resume"]))
-            t.last_error = "worker heartbeat stale; requeued"
+            t.last_error = "worker heartbeat stale; requeued" if not alive else "worker no longer running it; requeued"
             self.board.update_task(t, ["status", "attempts", "claim_nonce", "flags", "last_error"])
             self.log(f"[{t.id}] reaped from {t.agent}")
             n += 1
@@ -162,7 +183,7 @@ class Server:
         now = self.now()
         ctx = context_from_board(self.board, self.cfg, now)
         n = 0
-        for t in self.board.list_tasks(status=[Status.READY]):
+        for t in self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED]):
             row = ctx.rows.get(t.agent or "")
             unknown = t.agent not in self.cfg.agents
             cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
@@ -188,12 +209,44 @@ class Server:
         self.board.write_status_page(text)
         return text
 
+    # ----- tick -----
+    def _step(self, summary: dict, name: str, fn: Callable[[], int]) -> None:
+        try:
+            summary[name] = fn()
+        except Exception as e:  # noqa: BLE001 - one failing step must not stop the others
+            summary[name] = 0
+            summary["errors"] = summary.get("errors", 0) + 1
+            self.log(f"serve step {name} failed: {e!r}")
+
+    def _slow_steps(self) -> None:
+        summary: dict = {}
+        self._step(summary, "reviewed", self.review_pending)
+        self._step(summary, "merged", self.merge_pending)
+        self._slow_summary = summary
+
     def tick(self) -> dict:
-        self.heartbeat_lock()
-        summary = {"reaped": self.reap(), "retried": self.retry_failed(), "relayed": self.relay(),
-                   "promoted": self.promote(), "reviewed": self.review_pending(), "merged": self.merge_pending(),
-                   "rerouted": self.reroute()}
-        self.write_status()
+        summary: dict = {"errors": 0}
+        self._step(summary, "lock", lambda: (self.heartbeat_lock(), 0)[1])
+        self._step(summary, "assigned", self.assign_ids)
+        self._step(summary, "reaped", self.reap)
+        self._step(summary, "retried", self.retry_failed)
+        self._step(summary, "relayed", self.relay)
+        self._step(summary, "promoted", self.promote)
+        if self.background:
+            # review + merge can take many minutes; keep the fast steps flowing on the main thread
+            if self._slow_thread is None or not self._slow_thread.is_alive():
+                summary.update(self._slow_summary)
+                self._slow_summary = {"reviewed": 0, "merged": 0}
+                self._slow_thread = threading.Thread(target=self._slow_steps, daemon=True)
+                self._slow_thread.start()
+            else:
+                summary.update({"reviewed": 0, "merged": 0})
+        else:
+            self._step(summary, "reviewed", self.review_pending)
+            self._step(summary, "merged", self.merge_pending)
+        self._step(summary, "rerouted", self.reroute)
+        self._step(summary, "status", lambda: 1 if self.write_status() else 0)
+        summary.pop("lock", None)
         return summary
 
     def loop(self, stop: Callable[[], bool] = lambda: False) -> None:
@@ -201,10 +254,7 @@ class Server:
             raise SystemExit("another swarm serve is running; stop it first or wait for its heartbeat to go stale")
         self.write_status(force=True)
         while not stop():
-            try:
-                s = self.tick()
-                if any(s.values()):
-                    self.log(" · ".join(f"{k} {v}" for k, v in s.items() if v))
-            except Exception as e:  # noqa: BLE001 - keep serving
-                self.log(f"serve tick failed: {e!r}")
+            s = self.tick()
+            if any(v for k, v in s.items() if k != "status"):
+                self.log(" · ".join(f"{k} {v}" for k, v in s.items() if v and k != "status"))
             self.sleep(self.cfg.serve_seconds)

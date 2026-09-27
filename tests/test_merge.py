@@ -10,11 +10,14 @@ def _git(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout
 
 
-def prep(cfg, git_repo, tmp_path, gh_ok=True, verify_ok=True):
+def prep(cfg, git_repo, tmp_path, gh_ok=True, verify_ok=True, seen=None):
     calls = []
 
     def gh(args, cwd):
         calls.append(args)
+        if seen is not None and args[:2] == ["pr", "merge"]:
+            seen["worktree_exists"] = (tmp_path / "wt" / args[2].split("/")[-1]).exists()
+            seen["args"] = list(args)
         if args[:2] == ["pr", "merge"]:
             if gh_ok:
                 # emulate GitHub's squash-merge by merging the branch into main on the remote
@@ -70,5 +73,24 @@ def test_gh_merge_failure_flags(cfg, git_repo, tmp_path):
     m, board, t, dep, calls = prep(cfg, git_repo, tmp_path, gh_ok=False)
     assert m.merge(t) is False
     stored = board.get_task(t.id)
-    assert stored.status is Status.MERGE_READY and "merge_failed" in stored.flags
+    assert stored.status is Status.MERGE_READY and any(f.startswith("merge_failed") for f in stored.flags)
     assert "not mergeable" in stored.last_error
+
+
+def test_gh_merge_failure_retries_then_blocks(cfg, git_repo, tmp_path):
+    m, board, t, dep, calls = prep(cfg, git_repo, tmp_path, gh_ok=False)
+    for _ in range(2):
+        assert m.merge(board.get_task(t.id)) is False
+        assert board.get_task(t.id).status is Status.MERGE_READY
+    assert m.merge(board.get_task(t.id)) is False
+    assert board.get_task(t.id).status is Status.BLOCKED
+    assert board.list_questions(status="Open")[0].task_id == t.id
+
+
+def test_merge_disposes_worktree_before_gh_and_deletes_remote_branch(cfg, git_repo, tmp_path):
+    seen = {}
+    m, board, t, dep, calls = prep(cfg, git_repo, tmp_path, seen=seen)
+    assert m.merge(t) is True
+    assert seen["worktree_exists"] is False
+    assert "--delete-branch" not in seen["args"]
+    assert not _git(git_repo, "ls-remote", "--heads", "origin", t.branch).strip()

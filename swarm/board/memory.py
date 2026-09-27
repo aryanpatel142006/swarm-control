@@ -43,7 +43,13 @@ class InMemoryBoard:
         return [copy.deepcopy(t) for t in out]
 
     def update_task(self, task: Task, fields: Iterable[str]) -> Task:
-        stored = self.tasks[task.id]
+        stored = self.tasks.get(task.id)
+        if stored is None:  # id may have just been assigned; find the row by page handle
+            key, stored = next(((k, t) for k, t in self.tasks.items() if t.page_id == task.page_id), (None, None))
+            if stored is None:
+                raise KeyError(task.id)
+            del self.tasks[key]
+            self.tasks[task.id] = stored
         for f in fields:
             setattr(stored, f, copy.deepcopy(getattr(task, f)))
         stored.updated = utcnow()
