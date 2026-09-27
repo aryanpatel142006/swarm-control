@@ -28,3 +28,13 @@ def test_ledger_missing_file_is_empty(tmp_path):
 
 def test_default_path():
     assert str(default_ledger_path("demo")).endswith("/.swarm/demo/usage.jsonl")
+
+
+def test_ledger_records_cache_tokens(tmp_path):
+    led = Ledger(tmp_path / "usage.jsonl")
+    led.append(agent="a", model="m", task_id="T-1", usage=Usage(10, 5, 0.5, cache_write_tokens=7000, cache_read_tokens=90000),
+               duration_s=1.0, ok=True)
+    row = led._rows()[0]
+    assert row["cache_w"] == 7000 and row["cache_r"] == 90000
+    t = led.totals("a")
+    assert t.cache_write_tokens == 7000 and t.cache_read_tokens == 90000

@@ -186,9 +186,33 @@ def test_claude_passes_settings_and_inline_mcp_definitions(tmp_path):
     assert "--settings" not in argv2
 
 
-def test_codex_enables_requested_mcp_servers_per_run(tmp_path):
-    argv, _ = CodexAdapter().build_command(spec(tmp_path, mcp=["context7", "playwright"]))
-    assert "mcp_servers.context7.enabled=true" in argv and "mcp_servers.playwright.enabled=true" in argv
+def test_codex_enables_only_registered_mcp_servers_per_run(tmp_path):
+    a = CodexAdapter(mcp_lookup=lambda: {"context7"})
+    argv, _ = a.build_command(spec(tmp_path, mcp=["context7", "playwright"]))
+    assert "mcp_servers.context7.enabled=true" in argv
     assert argv[argv.index("mcp_servers.context7.enabled=true") - 1] == "-c"
-    argv2, _ = CodexAdapter().build_command(spec(tmp_path))
-    assert not any(a.startswith("mcp_servers.") for a in argv2)
+    assert not any("playwright" in x for x in argv)   # not registered on this laptop: never break the run
+    argv2, _ = CodexAdapter(mcp_lookup=lambda: set()).build_command(spec(tmp_path, mcp=["context7"]))
+    assert not any(x.startswith("mcp_servers.") for x in argv2)
+    argv3, _ = CodexAdapter(mcp_lookup=lambda: {"context7"}).build_command(spec(tmp_path))
+    assert not any(x.startswith("mcp_servers.") for x in argv3)
+
+
+def test_codex_registered_servers_parse_mcp_list(tmp_path):
+    from swarm.adapters.codex import registered_mcp_servers
+    from swarm.workspace import CmdResult
+    good = lambda args, cwd=None, timeout=60: CmdResult(0, json.dumps({"servers": [{"name": "context7"}, {"name": "pw"}]}), "")  # noqa: E731
+    assert registered_mcp_servers(run=good) == {"context7", "pw"}
+    flat = lambda args, cwd=None, timeout=60: CmdResult(0, json.dumps([{"name": "context7"}]), "")  # noqa: E731
+    assert registered_mcp_servers(run=flat) == {"context7"}
+    assert registered_mcp_servers(run=lambda a, cwd=None, timeout=60: CmdResult(1, "", "boom")) == set()
+    assert registered_mcp_servers(run=lambda a, cwd=None, timeout=60: CmdResult(0, "not json", "")) == set()
+
+
+def test_claude_parse_keeps_cache_tokens(tmp_path):
+    out = json.dumps({"type": "result", "result": "{\"status\":\"done\"}", "is_error": False, "num_turns": 3,
+                      "total_cost_usd": 0.02, "structured_output": {"status": "done"},
+                      "usage": {"input_tokens": 19, "output_tokens": 300, "cache_creation_input_tokens": 10755,
+                                "cache_read_input_tokens": 36675}})
+    r = ClaudeAdapter(mcp_lookup=dict).parse_output(0, out, "")
+    assert r.usage.cache_write_tokens == 10755 and r.usage.cache_read_tokens == 36675

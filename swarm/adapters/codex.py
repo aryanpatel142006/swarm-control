@@ -5,7 +5,21 @@ import subprocess
 from pathlib import Path
 
 from ..models import RunResult, Usage
+from ..workspace import run_cmd
 from .base import RATE_LIMIT_RE, Adapter, RunSpec, parse_reset_at
+
+
+def registered_mcp_servers(run=run_cmd) -> set[str]:
+    """Names of MCP servers this laptop's Codex knows (`codex mcp list --json`); empty when unavailable."""
+    r = run(["codex", "mcp", "list", "--json"], cwd=Path.cwd(), timeout=30)
+    if not r.ok:
+        return set()
+    try:
+        data = json.loads(r.out)
+    except ValueError:
+        return set()
+    rows = data.get("servers") if isinstance(data, dict) else data
+    return {str(x.get("name")) for x in (rows or []) if isinstance(x, dict) and x.get("name")}
 
 
 def git_common_dir(cwd: Path) -> str | None:
@@ -22,6 +36,10 @@ class CodexAdapter(Adapter):
     """OpenAI Codex CLI headless: `codex exec --json` with `--output-schema`. Reports tokens, not dollars."""
     name = "codex"
 
+    def __init__(self, agent_cfg=None, mcp_lookup=registered_mcp_servers):
+        super().__init__(agent_cfg)
+        self.mcp_lookup = mcp_lookup
+
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
         argv = ["codex", "exec", "--json", "-C", str(spec.cwd), "-m", spec.model]
         if spec.effort:
@@ -34,8 +52,13 @@ class CodexAdapter(Adapter):
         common = git_common_dir(spec.cwd)
         if common and sandbox != "danger-full-access":
             argv += ["--add-dir", common]   # a worktree's index and locks live under the main repo's .git
-        for name in spec.mcp:   # servers are registered once with `codex mcp add` (enabled = false) and switched on per run
-            argv += ["-c", f"mcp_servers.{name}.enabled=true"]
+        if spec.mcp:
+            # servers are registered once with `codex mcp add` (enabled = false) and switched on per run;
+            # an unregistered name is skipped, never passed: a dangling entry would fail the whole run
+            known = self.mcp_lookup()
+            for name in spec.mcp:
+                if name in known:
+                    argv += ["-c", f"mcp_servers.{name}.enabled=true"]
         if spec.schema:
             schema_path = spec.cwd / ".swarm-run" / "schema.json"
             schema_path.parent.mkdir(exist_ok=True)

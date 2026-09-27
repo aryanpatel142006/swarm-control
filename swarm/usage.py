@@ -21,6 +21,7 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         entry = {"ts": (now or utcnow()).isoformat(), "agent": agent, "model": model, "task": task_id,
                  "in": usage.input_tokens, "out": usage.output_tokens, "cost": usage.cost_usd,
+                 "cache_w": usage.cache_write_tokens, "cache_r": usage.cache_read_tokens,
                  "duration_s": round(duration_s, 1), "ok": ok}
         with self.path.open("a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -45,6 +46,8 @@ class Ledger:
             u.input_tokens += int(r.get("in") or 0)
             u.output_tokens += int(r.get("out") or 0)
             u.cost_usd += float(r.get("cost") or 0.0)
+            u.cache_write_tokens += int(r.get("cache_w") or 0)
+            u.cache_read_tokens += int(r.get("cache_r") or 0)
         return u
 
     def window(self, agent: str, hours: float = 5, now: datetime | None = None) -> Usage:

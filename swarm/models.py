@@ -123,6 +123,8 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float | None = None
+    cache_write_tokens: int = 0   # prompt tokens written to the cache (the expensive part of a Claude run)
+    cache_read_tokens: int = 0    # prompt tokens served from the cache
 
 
 @dataclass

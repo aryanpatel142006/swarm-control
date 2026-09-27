@@ -67,7 +67,9 @@ class ClaudeAdapter(Adapter):
         u = data.get("usage") or {}
         usage = Usage(input_tokens=int(u.get("input_tokens", 0) or 0),
                       output_tokens=int(u.get("output_tokens", 0) or 0),
-                      cost_usd=data.get("total_cost_usd"))
+                      cost_usd=data.get("total_cost_usd"),
+                      cache_write_tokens=int(u.get("cache_creation_input_tokens", 0) or 0),
+                      cache_read_tokens=int(u.get("cache_read_input_tokens", 0) or 0))
         text = str(data.get("result") or "")
         rate_limited = is_error and bool(RATE_LIMIT_RE.search(text + "\n" + err))
         return RunResult(ok=not is_error, exit_code=code, stdout=out, stderr=err,
