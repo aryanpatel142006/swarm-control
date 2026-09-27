@@ -15,6 +15,29 @@ export SWARM_HOST=laptop-a   # your name in config.hosts
 
 Requirements: Python 3.11+, `git`, `gh` (logged in), and whichever agent CLIs you use (`claude`, `codex`, `agy`, `gemini`, `grok`, or anything via the generic adapter).
 
+## For a teammate joining (second laptop)
+
+```
+git clone https://github.com/aryanpatel142006/swarm-control.git && cd swarm-control
+python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+pytest                                   # should be all green with no setup
+```
+
+Then, to work the same board as the rest of the team:
+
+1. Get the Notion token from a teammate privately (never through git or chat logs) and put it in your shell profile
+   along with your laptop's name from the project's `.swarm/config.yaml`:
+   ```
+   export NOTION_TOKEN=ntn_...
+   export SWARM_HOST=laptop-b
+   ```
+2. Accept the invite to the project repo, clone it next to swarm-control, and run `swarm doctor` inside it.
+   Every row must say yes except CLIs you don't have.
+3. `swarm doctor --smoke <your agent>` once per agent you'll run (Claude Code, Codex, Antigravity...).
+4. `caffeinate -dims swarm run` and leave it. Cards assigned to your agents start moving on the shared board.
+
+Only one laptop runs `swarm serve`; ask before starting a second one.
+
 ## Ten-line mental model
 
 1. `PLAN.md` is the product. `swarm plan` turns a milestone of it into tasks with types, importance, sizes, scopes, and dependencies.
