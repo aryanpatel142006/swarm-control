@@ -148,6 +148,7 @@ class Report:
     tests: dict = field(default_factory=dict)
     debts: list[dict] = field(default_factory=list)
     decisions: list[dict] = field(default_factory=list)
+    tools_used: list[dict] = field(default_factory=list)   # {name, kind, helped, note}
     question: dict | None = None
     notes_for_reviewer: str = ""
     synthesized: bool = False

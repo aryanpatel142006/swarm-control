@@ -23,6 +23,10 @@ REPORT_SCHEMA = {
         "decisions": {"type": "array", "items": {"type": "object", "properties": {
             "decision": {"type": "string"}, "why": {"type": "string"},
             "impact": {"type": "string", "enum": ["high", "medium", "low"]}}, "required": ["decision", "impact"]}},
+        "tools_used": {"type": "array", "description": "skills, MCP servers, plugins you actually used",
+                       "items": {"type": "object", "properties": {
+                           "name": {"type": "string"}, "kind": {"type": "string", "enum": ["skill", "mcp", "plugin", "cli"]},
+                           "helped": {"type": "boolean"}, "note": {"type": "string"}}, "required": ["name"]}},
         "question": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["blocking", "fyi"]}, "text": {"type": "string"},
             "options": {"type": "array", "items": {"type": "string"}}, "proceeding_with": {"type": "string"}},
@@ -76,9 +80,28 @@ def parse_report(structured: dict | None, worktree: Path, *, changed_files: list
         files_changed=[str(x) for x in (data.get("files_changed") or changed_files)],
         tests=dict(data.get("tests") or {}),
         debts=[d for d in (data.get("debts") or []) if isinstance(d, dict)],
-        decisions=[d for d in (data.get("decisions") or []) if isinstance(d, dict)], question=q,
+        decisions=[d for d in (data.get("decisions") or []) if isinstance(d, dict)],
+        tools_used=_tools(data.get("tools_used")), question=q,
         notes_for_reviewer=str(data.get("notes_for_reviewer") or ""),
     )
+
+
+def _tools(raw) -> list[dict]:
+    out = []
+    for t in raw or []:
+        if isinstance(t, str) and t.strip():
+            out.append({"name": t.strip()})
+        elif isinstance(t, dict) and str(t.get("name", "")).strip():
+            out.append({k: v for k, v in t.items() if k in ("name", "kind", "helped", "note")})
+    return out
+
+
+def _tool_line(t: dict) -> str:
+    bits = [str(t.get("kind"))] if t.get("kind") else []
+    if "helped" in t:
+        bits.append("helped" if t["helped"] else "did not help")
+    text = t["name"] + (f" ({', '.join(bits)})" if bits else "")
+    return text + (f": {t['note']}" if t.get("note") else "")
 
 
 def report_to_markdown(r: Report, *, attempt: int, verify_ok: bool | None, verify_tail: str,
@@ -100,6 +123,8 @@ def report_to_markdown(r: Report, *, attempt: int, verify_ok: bool | None, verif
     if r.decisions:
         lines += ["", "Decisions:"]
         lines += [f"- [{d.get('impact', '?')}] {d.get('decision', '')} — {d.get('why', '')}" for d in r.decisions]
+    if r.tools_used:
+        lines += ["", "Tools used: " + "; ".join(_tool_line(t) for t in r.tools_used)]
     if r.debts:
         lines += ["", "Debts:"]
         lines += [f"- {d.get('kind', '?')} at `{d.get('location', '?')}`: {d.get('reason', '')} → {d.get('fix', '')}"
@@ -112,11 +137,13 @@ def report_to_markdown(r: Report, *, attempt: int, verify_ok: bool | None, verif
 
 
 def decisions_markdown(task: Task, r: Report) -> str:
-    if not r.decisions:
+    if not r.decisions and not r.tools_used:
         return ""
     stamp = utcnow().strftime("%Y-%m-%d %H:%M UTC")
     out = [f"## {task.id} · {task.title} ({stamp})"]
     out += [f"- **[{d.get('impact', '?')}]** {d.get('decision', '')} — {d.get('why', '')}" for d in r.decisions]
+    if r.tools_used:
+        out.append("- **Tools used:** " + "; ".join(_tool_line(t) for t in r.tools_used))
     return "\n".join(out) + "\n\n"
 
 

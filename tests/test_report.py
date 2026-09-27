@@ -61,3 +61,24 @@ def test_markdown_outputs(tmp_path):
     assert "T-009" in decisions_markdown(t, r) and "use tap" in decisions_markdown(t, r)
     assert "b.py:3" in debts_markdown(t, r)
     assert decisions_markdown(t, parse_report({"status": "done"}, tmp_path, changed_files=["a"])) == ""
+
+
+def test_tools_used_flow_into_the_decision_log_and_report(tmp_path):
+    from swarm.models import Task
+    from swarm.report import REPORT_SCHEMA, decisions_markdown, report_to_markdown
+    assert "tools_used" in REPORT_SCHEMA["properties"]
+    r = parse_report({"status": "done", "summary": "s",
+                      "tools_used": [{"name": "playwright", "kind": "mcp", "helped": True,
+                                      "note": "verified the page headless, no console errors"},
+                                     {"name": "frontend-design", "kind": "skill", "helped": True}]},
+                     tmp_path, changed_files=["a"])
+    assert [t["name"] for t in r.tools_used] == ["playwright", "frontend-design"]
+    dec = decisions_markdown(Task(id="T-9", title="Page"), r)
+    assert "Tools used" in dec and "playwright (mcp, helped)" in dec and "no console errors" in dec
+    md = report_to_markdown(r, attempt=1, verify_ok=True, verify_tail="", pr_url="", flags=[])
+    assert "playwright" in md
+    plain = parse_report({"status": "done", "summary": "s", "tools_used": ["context7", {"name": "x"}, 7]},
+                         tmp_path, changed_files=["a"])
+    assert [t["name"] for t in plain.tools_used] == ["context7", "x"]
+    assert decisions_markdown(Task(id="T-9", title="Page"), parse_report(
+        {"status": "done", "summary": "s"}, tmp_path, changed_files=["a"])) == ""

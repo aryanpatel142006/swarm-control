@@ -54,3 +54,10 @@ def test_prompt_lists_tools_and_allows_install_for_critical(cfg):
     t.importance = "normal"
     p3 = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True)
     assert "## Tools for this task" not in p3
+
+
+def test_tools_section_asks_for_tools_used_in_the_report(cfg):
+    t = Task(id="T-021", title="Hero", type="frontend", importance="normal", size="S")
+    p = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                       mcp=["playwright"], skills=[])
+    assert "tools_used" in p

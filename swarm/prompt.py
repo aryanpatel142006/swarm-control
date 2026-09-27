@@ -61,6 +61,8 @@ def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
     if not mcp and not skills and task.importance != "critical":
         return []
     parts = ["", "## Tools for this task", ""]
+    parts.append("- In your final report, fill `tools_used` with every skill, MCP server or plugin you actually used "
+                 "and whether it helped; the harness writes it into docs/decisions/<task id>.md.")
     if mcp:
         parts.append("- MCP servers enabled for this run: " + ", ".join(mcp)
                      + ". Use them (docs lookup, browser checks, component search) instead of guessing.")
