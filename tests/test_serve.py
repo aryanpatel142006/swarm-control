@@ -56,7 +56,7 @@ def test_lock(cfg, git_repo, tmp_path):
 def test_reap_stale_running(cfg, git_repo, tmp_path):
     srv, board, clock = make(cfg, git_repo, tmp_path)
     now = clock["now"]
-    board.upsert_agent(AgentRow(name="claude-a", last_heartbeat=now - timedelta(minutes=20)))
+    board.upsert_agent(AgentRow(name="claude-a", last_heartbeat=now - timedelta(minutes=20), current_task="T-001"))
     board.upsert_agent(AgentRow(name="codex-a", last_heartbeat=now - timedelta(minutes=1)))
     t1 = board.create_task(Task(id="", title="stale", status=Status.RUNNING, agent="claude-a"))
     t2 = board.create_task(Task(id="", title="fresh", status=Status.RUNNING, agent="codex-a"))
@@ -66,7 +66,8 @@ def test_reap_stale_running(cfg, git_repo, tmp_path):
     assert s1.status is Status.READY and s1.attempts == 1 and "resume" in s1.flags and s1.claim_nonce == ""
     assert board.get_task(t2.id).status is Status.RUNNING
     assert board.get_task(t3.id).status is Status.READY
-    assert board.get_agent("claude-a").status == "offline"
+    offline = board.get_agent("claude-a")
+    assert offline.status == "offline" and offline.current_task == ""
 
 
 def test_retry_ladder(cfg, git_repo, tmp_path):

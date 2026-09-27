@@ -89,8 +89,8 @@ class Server:
         for name, row in rows.items():
             if name == "serve":
                 continue
-            if row.last_heartbeat and (now - row.last_heartbeat) >= stale and row.status != "offline":
-                row.status = "offline"
+            if row.last_heartbeat and (now - row.last_heartbeat) >= stale and (row.status != "offline" or row.current_task):
+                row.status, row.current_task = "offline", ""
                 self.board.upsert_agent(row)
         return n
 
