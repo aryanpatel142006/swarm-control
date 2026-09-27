@@ -30,6 +30,12 @@ TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "
 PUBLISH_FIELDS = ["status", "attempts", "flags", "pr_url", "claim_nonce", "feedback", "last_error", "review_rounds"]
 
 
+def _append_log(path: Path, section: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text() if path.exists() else ""
+    path.write_text((existing.rstrip() + "\n\n" if existing.strip() else "") + section)
+
+
 class _Done:
     def __init__(self, value):
         self._v = value
@@ -356,12 +362,9 @@ class Runner:
 
         # decision / debt logs live on the branch, one file per task, so parallel tasks never conflict
         dec, debt = decisions_markdown(task, report), debts_markdown(task, report)
-        if dec:
-            (wt / "docs" / "decisions").mkdir(parents=True, exist_ok=True)
-            (wt / "docs" / "decisions" / f"{task.id}.md").write_text(dec)
-        if debt:
-            (wt / "docs" / "debt").mkdir(parents=True, exist_ok=True)
-            (wt / "docs" / "debt" / f"{task.id}.md").write_text(debt)
+        for sub, text in (("decisions", dec), ("debt", debt)):
+            if text:
+                _append_log(wt / "docs" / sub / f"{task.id}.md", text)   # every attempt adds a section
         if dec or debt:
             changed = self.ws.changed_files(wt)
 

@@ -402,3 +402,25 @@ def test_runner_skips_plugin_setup_for_non_claude_agents(cfg, git_repo, tmp_path
     ready_task(board, type="backend", agent="codex-a", scope=["src/**"])
     r.tick()
     assert ensured == [] and adapter.specs
+
+
+def test_decision_log_accumulates_across_attempts(cfg, git_repo, tmp_path):
+    """A resumed attempt appends its decisions; the first attempt's decisions stay on the branch."""
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={
+        "status": "done", "summary": "first", "decisions": [{"decision": "use tap", "why": "simple", "impact": "low"}]})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, importance="high", scope=["src/**"])
+    r.run_task(t)
+    stored = board.get_task(t.id)
+    assert stored.status is Status.REVIEW
+    stored.status, stored.feedback = Status.CHANGES_REQUESTED, "add a note"
+    stored.flags = list(dict.fromkeys(stored.flags + ["resume"]))
+    board.update_task(stored, ["status", "feedback", "flags"])
+    adapter.structured = {"status": "done", "summary": "second",
+                          "decisions": [{"decision": "keep favicon", "why": "no warnings", "impact": "low"}]}
+    r.run_task(board.get_task(t.id))
+    wt = r.ws.provision(t.id, reuse_branch=True)
+    text = (wt / "docs" / "decisions" / f"{t.id}.md").read_text()
+    r.ws.dispose(wt)
+    assert "use tap" in text and "keep favicon" in text
+    assert text.index("use tap") < text.index("keep favicon")
