@@ -1,0 +1,210 @@
+"""Control loop (exactly one per project): reap, retry, relay answers, promote, review, merge, reroute, status."""
+from __future__ import annotations
+
+import time
+from datetime import timedelta
+from typing import Callable
+
+from .board.base import Board
+from .config import Config
+from .models import AgentRow, Question, Status, Task, utcnow
+from .router import context_from_board, escalate_importance, route
+from .status import render_status
+from .workspace import Workspace
+
+IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
+
+
+class Server:
+    def __init__(self, cfg: Config, board: Board, ws: Workspace, *, reviewer, merger, now=utcnow,
+                 sleep: Callable[[float], None] = time.sleep, log=print, host: str = "serve",
+                 status_every_s: int = 900, review_batch: int = 1):
+        self.cfg, self.board, self.ws, self.reviewer, self.merger = cfg, board, ws, reviewer, merger
+        self.now, self.sleep, self.log, self.host = now, sleep, log, host
+        self.status_every_s, self.review_batch = status_every_s, review_batch
+        self._last_status = None
+        self._holds_lock = False
+
+    # ----- lock -----
+    def acquire_lock(self) -> bool:
+        now = self.now()
+        row = self.board.get_agent("serve")
+        stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
+        if (row and row.last_heartbeat and (now - row.last_heartbeat) < stale and not self._holds_lock):
+            self.log(f"another serve is alive on {row.host} (heartbeat {row.last_heartbeat})")
+            return False
+        self.board.upsert_agent(AgentRow(name="serve", provider="serve", host=self.host, status="running",
+                                         last_heartbeat=now, page_id=row.page_id if row else ""))
+        self._holds_lock = True
+        return True
+
+    def heartbeat_lock(self) -> None:
+        row = self.board.get_agent("serve") or AgentRow(name="serve", provider="serve")
+        row.host, row.status, row.last_heartbeat = self.host, "running", self.now()
+        self.board.upsert_agent(row)
+        self._holds_lock = True
+
+    # ----- steps -----
+    def reap(self) -> int:
+        now = self.now()
+        stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
+        rows = {a.name: a for a in self.board.list_agents()}
+        n = 0
+        for t in self.board.list_tasks(status=[Status.RUNNING]):
+            row = rows.get(t.agent or "")
+            if row and row.last_heartbeat and (now - row.last_heartbeat) < stale:
+                continue
+            t.status, t.attempts, t.claim_nonce = Status.READY, t.attempts + 1, ""
+            t.flags = list(dict.fromkeys(t.flags + ["resume"]))
+            t.last_error = "worker heartbeat stale; requeued"
+            self.board.update_task(t, ["status", "attempts", "claim_nonce", "flags", "last_error"])
+            self.log(f"[{t.id}] reaped from {t.agent}")
+            n += 1
+        for name, row in rows.items():
+            if name == "serve":
+                continue
+            if row.last_heartbeat and (now - row.last_heartbeat) >= stale and row.status != "offline":
+                row.status = "offline"
+                self.board.upsert_agent(row)
+        return n
+
+    def retry_failed(self) -> int:
+        n = 0
+        ctx = context_from_board(self.board, self.cfg, self.now())
+        for t in self.board.list_tasks(status=[Status.FAILED]):
+            if t.attempts >= self.cfg.max_attempts:
+                self.board.create_question(Question(
+                    id="", text=f"{t.id} failed {t.attempts} times: {t.last_error[:120]}"[:190], kind="blocking",
+                    context=t.last_error[:1900], options=["retry once more", "split", "cut", "human fix"],
+                    impact="high", task_id=t.id, asked_by="serve"))
+                t.status = Status.BLOCKED
+                self.board.update_task(t, ["status"])
+                self.log(f"[{t.id}] gave up after {t.attempts} attempts → blocked")
+                n += 1
+                continue
+            if t.attempts >= 2:
+                t.importance = escalate_importance(t.importance)
+            t.agent, t.model, t.effort = route(t, self.cfg, ctx)
+            t.status, t.claim_nonce = Status.READY, ""
+            t.feedback = (f"Previous attempt failed: {t.last_error[:600]}. Start fresh from main."
+                          if t.last_error else "")
+            t.flags = [f for f in t.flags if f != "resume"]
+            self.board.update_task(t, ["status", "claim_nonce", "importance", "agent", "model", "effort",
+                                       "feedback", "flags"])
+            self.log(f"[{t.id}] retry #{t.attempts + 1} on {t.agent}/{t.model}")
+            n += 1
+        return n
+
+    def relay(self) -> int:
+        n = 0
+        ctx = None
+        for q in self.board.list_questions(status="Open"):
+            if not q.answer.strip():
+                continue
+            t = self.board.get_task(q.task_id) if q.task_id else None
+            if q.kind == "blocking":
+                if t and t.status is Status.BLOCKED:
+                    t.feedback = f"Human answer to \"{q.text}\": {q.answer}"[:1900]
+                    t.flags = list(dict.fromkeys(t.flags + ["resume"]))
+                    t.status, t.claim_nonce = Status.READY, ""
+                    self.board.update_task(t, ["feedback", "flags", "status", "claim_nonce"])
+                    self.log(f"[{t.id}] unblocked by {q.id}")
+            elif q.needs_follow_up:
+                ctx = ctx or context_from_board(self.board, self.cfg, self.now())
+                follow = Task(id="", title=f"Follow-up: {q.text[:70]}",
+                              description=f"Human answer to \"{q.text}\": {q.answer}\n\nContext: {q.context}",
+                              acceptance="- the human's answer is implemented\n- verify passes", type="bugfix",
+                              importance=IMPACT_TO_IMPORTANCE.get(q.impact, "normal"), size="S",
+                              milestone=t.milestone if t else "", scope=list(t.scope) if t else [],
+                              depends_on=[t.id] if t and t.status is not Status.DONE else [],
+                              feedback=q.answer[:1900])
+                follow.status = Status.BACKLOG if follow.depends_on else Status.READY
+                follow.agent, follow.model, follow.effort = route(follow, self.cfg, ctx)
+                created = self.board.create_task(follow)
+                self.log(f"[{created.id}] follow-up created from {q.id}")
+            q.status = "Applied"
+            self.board.update_question(q, ["status"])
+            n += 1
+        return n
+
+    def promote(self) -> int:
+        done = {t.id for t in self.board.list_tasks(status=[Status.DONE])}
+        ctx = None
+        n = 0
+        for t in self.board.list_tasks(status=[Status.BACKLOG]):
+            if t.depends_on and not all(d in done for d in t.depends_on):
+                continue
+            ctx = ctx or context_from_board(self.board, self.cfg, self.now())
+            t.agent, t.model, t.effort = route(t, self.cfg, ctx)
+            t.status = Status.READY
+            self.board.update_task(t, ["status", "agent", "model", "effort"])
+            ctx.queue_depth[t.agent] = ctx.queue_depth.get(t.agent, 0) + 1
+            self.log(f"[{t.id}] promoted → {t.agent}/{t.model}")
+            n += 1
+        return n
+
+    def review_pending(self) -> int:
+        n = 0
+        for t in self.board.list_tasks(status=[Status.REVIEW])[: self.review_batch]:
+            self.reviewer.process(t)
+            n += 1
+        return n
+
+    def merge_pending(self) -> int:
+        n = 0
+        for t in self.board.list_tasks(status=[Status.MERGE_READY]):
+            if self.merger.merge(t):
+                n += 1
+                self.promote()
+        return n
+
+    def reroute(self) -> int:
+        now = self.now()
+        ctx = context_from_board(self.board, self.cfg, now)
+        n = 0
+        for t in self.board.list_tasks(status=[Status.READY]):
+            row = ctx.rows.get(t.agent or "")
+            unknown = t.agent not in self.cfg.agents
+            cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
+            offline = bool(row and row.status == "offline")
+            if not unknown and not ((cooling or offline) and t.importance != "critical"):
+                continue
+            agent, model, effort = route(t, self.cfg, ctx)
+            if agent == t.agent:
+                continue
+            t.agent, t.model, t.effort = agent, model, effort
+            self.board.update_task(t, ["agent", "model", "effort"])
+            self.log(f"[{t.id}] rerouted → {agent}/{model}")
+            n += 1
+        return n
+
+    def write_status(self, force: bool = False) -> str | None:
+        now = self.now()
+        if not force and self._last_status and (now - self._last_status).total_seconds() < self.status_every_s:
+            return None
+        self._last_status = now
+        text = render_status(self.cfg, self.board.list_tasks(), self.board.list_agents(),
+                             self.board.list_questions(), now)
+        self.board.write_status_page(text)
+        return text
+
+    def tick(self) -> dict:
+        self.heartbeat_lock()
+        summary = {"reaped": self.reap(), "retried": self.retry_failed(), "relayed": self.relay(),
+                   "promoted": self.promote(), "reviewed": self.review_pending(), "merged": self.merge_pending(),
+                   "rerouted": self.reroute()}
+        self.write_status()
+        return summary
+
+    def loop(self, stop: Callable[[], bool] = lambda: False) -> None:
+        if not self.acquire_lock():
+            raise SystemExit("another swarm serve is running; stop it first or wait for its heartbeat to go stale")
+        self.write_status(force=True)
+        while not stop():
+            try:
+                s = self.tick()
+                if any(s.values()):
+                    self.log(" · ".join(f"{k} {v}" for k, v in s.items() if v))
+            except Exception as e:  # noqa: BLE001 - keep serving
+                self.log(f"serve tick failed: {e!r}")
+            self.sleep(self.cfg.serve_seconds)
