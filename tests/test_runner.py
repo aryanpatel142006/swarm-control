@@ -331,3 +331,18 @@ def test_agent_row_reflects_spend_after_a_task(cfg, git_repo, tmp_path):
     r.run_task(t)
     row = board.get_agent("codex-a")
     assert row is not None and row.cost_5h_usd == 0.25 and row.runs == 1
+
+
+def test_loop_installs_signal_handlers_that_park(cfg, git_repo, tmp_path):
+    import signal
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    captured = {}
+
+    def fake_signal(sig, handler):
+        captured[sig] = handler
+        return signal.SIG_DFL
+
+    r.install_signal_handlers(signal_fn=fake_signal)
+    assert set(captured) == {signal.SIGINT, signal.SIGTERM}
+    captured[signal.SIGTERM](signal.SIGTERM, None)
+    assert r._stopping is True

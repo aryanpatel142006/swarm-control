@@ -63,3 +63,14 @@ def test_claim_task_succeeds_and_detects_race():
         b.update_task(stored, ["claim_nonce"])
 
     assert claim_task(b, t2, "a", sleep=hijack, nonce="mine") is False
+
+
+def test_claim_backs_off_when_task_was_reassigned():
+    b = InMemoryBoard()
+    t = b.create_task(Task(id="", title="x", status=Status.READY, agent="a"))
+    stale = b.get_task(t.id)          # what the runner fetched on its last poll
+    moved = b.get_task(t.id)
+    moved.agent = "b"                 # orchestrator reassigned it meanwhile
+    b.update_task(moved, ["agent"])
+    assert claim_task(b, stale, "a", sleep=lambda s: None, nonce="n") is False
+    assert b.get_task(t.id).status is Status.READY and b.get_task(t.id).agent == "b"

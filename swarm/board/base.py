@@ -29,6 +29,9 @@ def claim_task(board: Board, task: Task, agent: str, *, sleep: Callable[[float],
                nonce: str | None = None, wait_s: float = 1.5) -> bool:
     """Optimistic claim: write Running + nonce, wait, re-read, confirm the nonce survived."""
     nonce = nonce or uuid.uuid4().hex
+    fresh = board.get_task(task.id)
+    if fresh is None or fresh.agent != agent or fresh.status not in (Status.READY, Status.CHANGES_REQUESTED):
+        return False  # reassigned, cut, or already claimed since we polled
     task.status = Status.RUNNING
     task.claim_nonce = nonce
     task.agent = agent

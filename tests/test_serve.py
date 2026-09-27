@@ -203,3 +203,26 @@ def test_relay_on_merge_failed_task_retries_merge_or_marks_done(cfg, git_repo, t
     board.create_question(Question(id="", text="could not be merged", kind="blocking", task_id=t2.id, answer="I merged it by hand"))
     srv.relay()
     assert board.get_task(t2.id).status is Status.DONE
+
+
+def test_relay_cut_answer_cuts_the_task(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    t = board.create_task(Task(id="", title="b", status=Status.BLOCKED, agent="claude-a"))
+    board.create_question(Question(id="", text="keeps failing", kind="blocking", task_id=t.id, answer="cut it"))
+    assert srv.relay() == 1
+    assert board.get_task(t.id).status is Status.CUT
+
+
+def test_rebalance_moves_queued_work_to_idle_equal_agent(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    # claude-a and codex-a both score 4 on ml_audio? no: both default 3 → equal. codex-a has a queue, claude-a is idle.
+    for i in range(3):
+        board.create_task(Task(id="", title=f"q{i}", status=Status.READY, agent="codex-a", type="ml_audio"))
+    board.create_task(Task(id="", title="busy", status=Status.RUNNING, agent="codex-a", type="ml_audio"))
+    moved = srv.rebalance()
+    assert moved == 2  # claude-a and fake-b are both idle and both score >= codex-a on ml_audio
+    agents = [board.get_task(f"T-00{i}").agent for i in (1, 2, 3)]
+    assert agents.count("claude-a") == 1 and agents.count("fake-b") == 1 and agents.count("codex-a") == 1
+    # a critical task is never moved, and nothing moves to a weaker agent
+    board.create_task(Task(id="", title="crit", status=Status.READY, agent="codex-a", type="backend", importance="critical"))
+    assert srv.rebalance() == 0

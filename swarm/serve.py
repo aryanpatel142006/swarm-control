@@ -10,7 +10,7 @@ from typing import Callable
 from .board.base import Board
 from .config import Config
 from .models import AgentRow, Question, Status, Task, utcnow
-from .router import context_from_board, escalate_importance, route
+from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
 from .status import render_status
 from .workspace import Workspace
 
@@ -133,6 +133,10 @@ class Server:
                 t.claim_nonce = ""
                 self.board.update_task(t, ["status", "flags", "claim_nonce"])
                 self.log(f"[{t.id}] merge question answered → {t.status.value}")
+            elif q.kind == "blocking" and t and t.status is Status.BLOCKED and q.answer.strip().lower().startswith("cut"):
+                t.status = Status.CUT
+                self.board.update_task(t, ["status"])
+                self.log(f"[{t.id}] cut by answer to {q.id}")
             elif q.kind == "blocking":
                 if t and t.status is Status.BLOCKED:
                     t.feedback = f"Human answer to \"{q.text}\": {q.answer}"[:1900]
@@ -209,6 +213,34 @@ class Server:
             n += 1
         return n
 
+    def rebalance(self) -> int:
+        """Work stealing: an idle agent takes one queued non-critical task from an agent with a backlog,
+        when it is at least as strong for that task type. Two Claude laptops otherwise leave one idle."""
+        now = self.now()
+        ctx = context_from_board(self.board, self.cfg, now)
+        ready = self.board.list_tasks(status=[Status.READY])
+        idle = [a for a in self.cfg.agents.values()
+                if ctx.queue_depth.get(a.name, 0) == 0 and is_available(a, ctx.rows.get(a.name), importance="normal", now=now)]
+        moved = 0
+        for idle_agent in idle:
+            candidates = [t for t in ready if t.agent and t.agent != idle_agent.name and t.importance != "critical"
+                          and t.agent in self.cfg.agents
+                          and ctx.queue_depth.get(t.agent, 0) >= 2
+                          and idle_agent.strengths.get(t.type, 3) >= self.cfg.agents[t.agent].strengths.get(t.type, 3)]
+            if not candidates:
+                continue
+            t = sorted(candidates, key=lambda x: (x.priority, x.id))[-1]  # the one furthest back in the donor's queue
+            donor = t.agent
+            t.agent = idle_agent.name
+            t.model, t.effort = model_for(idle_agent, tier_for(t, self.cfg), t.type, self.cfg)
+            self.board.update_task(t, ["agent", "model", "effort"])
+            ctx.queue_depth[donor] -= 1
+            ctx.queue_depth[idle_agent.name] = 1
+            ready.remove(t)
+            self.log(f"[{t.id}] rebalanced {donor} → {idle_agent.name}")
+            moved += 1
+        return moved
+
     def write_status(self, force: bool = False) -> str | None:
         now = self.now()
         if not force and self._last_status and (now - self._last_status).total_seconds() < self.status_every_s:
@@ -255,6 +287,7 @@ class Server:
             self._step(summary, "reviewed", self.review_pending)
             self._step(summary, "merged", self.merge_pending)
         self._step(summary, "rerouted", self.reroute)
+        self._step(summary, "rebalanced", self.rebalance)
         self._step(summary, "status", lambda: 1 if self.write_status() else 0)
         summary.pop("lock", None)
         return summary

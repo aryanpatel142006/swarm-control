@@ -75,8 +75,23 @@ class Runner:
         self._stopping = False
 
     def stop(self) -> None:
-        """Ask in-flight runs to requeue their task instead of publishing (Ctrl-C path)."""
+        """Ask in-flight runs to requeue their task instead of publishing (Ctrl-C / kill path)."""
         self._stopping = True
+
+    def install_signal_handlers(self, signal_fn=None) -> None:
+        """SIGINT and SIGTERM park in-flight work. Explicit handlers also work when SIGINT was inherited as ignored."""
+        import signal
+        signal_fn = signal_fn or signal.signal
+
+        def handler(signum, frame):
+            self.log(f"signal {signum}: stopping after in-flight runs park their work")
+            self.stop()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal_fn(sig, handler)
+            except (ValueError, OSError):  # not the main thread, or unsupported platform
+                pass
 
     # ----- capacity -----
     def free_slots(self, agent_name: str) -> int:
@@ -176,9 +191,10 @@ class Runner:
 
     def loop(self, *, once: bool = False, stop: Callable[[], bool] = lambda: False) -> None:
         self.log(f"swarm run · host={self.host} · agents={', '.join(self.agents)}")
+        self.install_signal_handlers()
         self.recover_orphans()
         try:
-            while not stop():
+            while not stop() and not self._stopping:
                 n = self.tick()
                 if once:
                     break
