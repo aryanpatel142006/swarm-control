@@ -317,7 +317,7 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
             return False
 
     srv = Server(_cfg(), board, ws,
-                 reviewer=NoReview() if no_review else Reviewer(_cfg(), board, ws, log=console.print),
+                 reviewer=NoReview() if no_review else Reviewer(_cfg(), board, ws, log=console.print, ledger=_ledger(_cfg())),
                  merger=NoMerge() if no_merge else Merger(_cfg(), board, ws, log=console.print),
                  log=console.print, host=state.host or "serve", background=not once)
     if once:

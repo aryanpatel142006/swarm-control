@@ -25,6 +25,8 @@ class ClaudeAdapter(Adapter):
             argv += ["--max-budget-usd", str(spec.budget_usd)]
         if spec.schema:
             argv += ["--json-schema", json.dumps(spec.schema)]
+        # a worker needs no MCP servers; the user's personal ones would add every tool schema to each run's context
+        argv += ["--mcp-config", json.dumps({"mcpServers": {}}), "--strict-mcp-config"]
         argv += list(spec.extra_args)
         return argv, spec.prompt_file.read_bytes()
 

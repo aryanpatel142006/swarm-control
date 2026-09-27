@@ -98,3 +98,13 @@ def test_escalate_creates_question(cfg, git_repo, tmp_path):
                                    {"verdict": "escalate", "summary": "task conflicts with contracts"})
     assert rev.process(t).status is Status.BLOCKED
     assert "conflicts" in board.list_questions()[0].text
+
+
+def test_reviewer_run_is_recorded_in_the_ledger(cfg, git_repo, tmp_path):
+    from swarm.usage import Ledger
+    rev, board, t, adapter = setup(cfg, git_repo, tmp_path, {"verdict": "approve", "summary": "good", "findings": []})
+    ledger = Ledger(tmp_path / "usage.jsonl")
+    rev.ledger = ledger
+    rev.process(t)
+    assert ledger.totals("codex-a").input_tokens == 0 and len(ledger._rows()) == 1
+    assert ledger._rows()[0]["task"] == t.id and ledger._rows()[0]["model"] == "gpt-6-sol"

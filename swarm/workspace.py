@@ -118,7 +118,7 @@ class Workspace:
 
     def changed_files(self, path: Path) -> list[str]:
         committed = self.git(path, "diff", "--name-only", f"{self._main_ref()}...HEAD", check=False).out.split()
-        status = self.git(path, "status", "--porcelain", check=False).out.splitlines()
+        status = self.git(path, "status", "--porcelain", "--untracked-files=all", check=False).out.splitlines()
         uncommitted = [line[3:].strip() for line in status if line.strip()]
         return sorted(set(committed) | set(uncommitted))
 

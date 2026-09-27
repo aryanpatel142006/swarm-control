@@ -148,3 +148,9 @@ def test_codex_adds_git_common_dir_as_writable(git_repo, tmp_path):
     assert "--add-dir" in argv
     added = argv[argv.index("--add-dir") + 1]
     assert added.endswith("/.git") and (git_repo / ".git").resolve() == __import__("pathlib").Path(added).resolve()
+
+
+def test_claude_workers_skip_user_mcp_servers(tmp_path):
+    argv, _ = ClaudeAdapter().build_command(spec(tmp_path))
+    assert "--strict-mcp-config" in argv
+    assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": {}}

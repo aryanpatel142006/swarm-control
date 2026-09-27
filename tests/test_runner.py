@@ -346,3 +346,13 @@ def test_loop_installs_signal_handlers_that_park(cfg, git_repo, tmp_path):
     assert set(captured) == {signal.SIGINT, signal.SIGTERM}
     captured[signal.SIGTERM](signal.SIGTERM, None)
     assert r._stopping is True
+
+
+def test_harness_written_logs_are_never_out_of_scope(cfg, git_repo, tmp_path):
+    """Resumed attempts see docs/decisions/<id>.md from the previous attempt; that must not force a review."""
+    adapter = FakeAdapter(files={"src/a.py": "x", "docs/decisions/T-001.md": "old", "docs/debt/T-001.md": "old"},
+                          structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    out = r.run_task(t)
+    assert out.status is Status.MERGE_READY and "out_of_scope" not in board.get_task(t.id).flags

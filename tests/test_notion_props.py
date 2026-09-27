@@ -90,3 +90,17 @@ def test_page_without_id_has_empty_id():
     t = page_to_task(_page("pg", {"Name": p_title("Hand made"), "Status": p_select("Ready")}))
     assert t.id == "" and t.title == "Hand made" and t.status is Status.READY
     assert page_to_task(_page("pg2", {"Name": p_title("T-005 · Old style")})).id == "T-005"
+
+
+def test_select_options_carry_colors():
+    schema = TASKS_SCHEMA(["claude-a"])
+    status = {o["name"]: o.get("color") for o in schema["Status"]["select"]["options"]}
+    assert status["Blocked"] == "red" and status["Failed"] == "red" and status["Done"] == "green"
+    assert status["Running"] == "yellow" and status["Ready"] == "blue" and status["Backlog"] == "gray"
+    imp = {o["name"]: o.get("color") for o in schema["Importance"]["select"]["options"]}
+    assert imp["critical"] == "red" and imp["low"] == "gray"
+    from swarm.board.notion_props import AGENTS_SCHEMA, QUESTIONS_SCHEMA
+    ag = {o["name"]: o.get("color") for o in AGENTS_SCHEMA["Status"]["select"]["options"]}
+    assert ag["offline"] == "red" and ag["running"] == "green" and ag["cooldown"] == "yellow"
+    q = {o["name"]: o.get("color") for o in QUESTIONS_SCHEMA("ds")["Kind"]["select"]["options"]}
+    assert q["blocking"] == "red" and q["fyi"] == "blue"

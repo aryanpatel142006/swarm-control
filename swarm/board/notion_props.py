@@ -96,8 +96,25 @@ def _uncsv(s: str) -> list[str]:
     return [x.strip() for x in (s or "").split(",") if x.strip()]
 
 
-def _sel(names: Iterable[str]) -> dict:
-    return {"select": {"options": [{"name": n} for n in names]}}
+STATUS_COLORS = {"Backlog": "gray", "Ready": "blue", "Running": "yellow", "Review": "purple",
+                 "Changes Requested": "orange", "Merge Ready": "green", "Blocked": "red", "Failed": "red",
+                 "Done": "green", "Cut": "gray"}
+IMPORTANCE_COLORS = {"critical": "red", "high": "orange", "normal": "blue", "low": "gray"}
+SIZE_COLORS = {"S": "green", "M": "yellow", "L": "orange"}
+TYPE_COLORS = {"frontend": "yellow", "backend": "yellow", "realtime": "yellow", "integration": "yellow", "infra": "yellow",
+               "ml_audio": "purple", "ml_vision": "purple", "ml_fusion": "purple", "eval": "purple",
+               "tests": "pink", "bugfix": "pink", "docs": "green", "research": "green"}
+AGENT_STATUS_COLORS = {"idle": "gray", "running": "green", "cooldown": "yellow", "offline": "red"}
+PROVIDER_COLORS = {"claude": "orange", "codex": "green", "antigravity": "blue", "gemini": "blue", "grok": "gray",
+                   "generic": "gray", "serve": "purple"}
+KIND_COLORS = {"blocking": "red", "fyi": "blue"}
+IMPACT_COLORS = {"high": "red", "medium": "orange", "low": "gray"}
+QSTATUS_COLORS = {"Open": "red", "Applied": "green"}
+
+
+def _sel(names: Iterable[str], colors: dict[str, str] | None = None) -> dict:
+    return {"select": {"options": [({"name": n, "color": colors[n]} if colors and n in colors else {"name": n})
+                                   for n in names]}}
 
 
 # ---------- tasks ----------
@@ -169,10 +186,10 @@ def page_to_task(page: dict) -> Task:
 def TASKS_SCHEMA(agent_names: list[str]) -> dict:  # noqa: N802 - schema factory, name mirrors the constant style
     return {
         "Name": {"title": {}}, "ID": {"rich_text": {}}, "Description": {"rich_text": {}},
-        "Acceptance": {"rich_text": {}}, "Type": _sel(TASK_TYPES), "Importance": _sel(IMPORTANCES),
-        "Size": _sel(SIZES), "Milestone": _sel(["M0", "M1", "M2", "M3", "M4"]),
+        "Acceptance": {"rich_text": {}}, "Type": _sel(TASK_TYPES, TYPE_COLORS), "Importance": _sel(IMPORTANCES, IMPORTANCE_COLORS),
+        "Size": _sel(SIZES, SIZE_COLORS), "Milestone": _sel(["M0", "M1", "M2", "M3", "M4"]),
         "Priority": {"number": {"format": "number"}}, "Agent": _sel(agent_names),
-        "Model": {"rich_text": {}}, "Effort": {"rich_text": {}}, "Status": _sel(STATUS_ORDER),
+        "Model": {"rich_text": {}}, "Effort": {"rich_text": {}}, "Status": _sel(STATUS_ORDER, STATUS_COLORS),
         "Depends On": {"rich_text": {}}, "Scope": {"rich_text": {}}, "Feedback": {"rich_text": {}},
         "PR": {"url": {}}, "Attempts": {"number": {"format": "number"}},
         "Review Rounds": {"number": {"format": "number"}}, "Claim Nonce": {"rich_text": {}},
@@ -222,11 +239,11 @@ def page_to_question(page: dict) -> Question:
 
 def QUESTIONS_SCHEMA(tasks_ds_id: str) -> dict:  # noqa: N802
     return {
-        "Question": {"title": {}}, "ID": {"rich_text": {}}, "Kind": _sel(["blocking", "fyi"]),
+        "Question": {"title": {}}, "ID": {"rich_text": {}}, "Kind": _sel(["blocking", "fyi"], KIND_COLORS),
         "Context": {"rich_text": {}}, "Options": {"rich_text": {}}, "Proceeding With": {"rich_text": {}},
-        "Impact": _sel(["high", "medium", "low"]),
+        "Impact": _sel(["high", "medium", "low"], IMPACT_COLORS),
         "Task": {"relation": {"data_source_id": tasks_ds_id, "type": "single_property", "single_property": {}}},
-        "Task ID": {"rich_text": {}}, "Asked By": {"rich_text": {}}, "Status": _sel(["Open", "Applied"]),
+        "Task ID": {"rich_text": {}}, "Asked By": {"rich_text": {}}, "Status": _sel(["Open", "Applied"], QSTATUS_COLORS),
         "Answer": {"rich_text": {}}, "Needs Follow-up": {"checkbox": {}},
     }
 
@@ -262,9 +279,9 @@ def page_to_agent(page: dict) -> AgentRow:
 
 AGENTS_SCHEMA = {
     "Name": {"title": {}},
-    "Provider": _sel(["claude", "codex", "antigravity", "gemini", "grok", "generic", "serve"]),
+    "Provider": _sel(["claude", "codex", "antigravity", "gemini", "grok", "generic", "serve"], PROVIDER_COLORS),
     "Host": {"rich_text": {}},
-    "Status": _sel(["idle", "running", "cooldown", "offline"]),
+    "Status": _sel(["idle", "running", "cooldown", "offline"], AGENT_STATUS_COLORS),
     "Current Task": {"rich_text": {}}, "Last Heartbeat": {"date": {}}, "Cooldown Until": {"date": {}},
     "Runs": {"number": {"format": "number"}}, "Tokens In": {"number": {"format": "number"}},
     "Tokens Out": {"number": {"format": "number"}}, "Cost USD": {"number": {"format": "number"}},

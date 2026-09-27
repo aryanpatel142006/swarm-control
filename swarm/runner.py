@@ -22,6 +22,7 @@ from .workspace import Workspace
 
 STRUCTURED_PROVIDERS = {"claude", "codex"}
 ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
+HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itself, never by the model
 RATE_LIMIT_COOLDOWN_MIN = 15
 IDLE_AFTER_S = 300
 TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
@@ -316,7 +317,7 @@ class Runner:
         flags = [f for f in task.flags if f not in TRANSIENT_FLAGS]
         if report.synthesized:
             flags.append("report_missing")
-        if any(not in_scope(f, task.scope) for f in changed):
+        if any(not in_scope(f, task.scope) for f in changed if not f.startswith(HARNESS_PATHS)):
             flags.append("out_of_scope")
         if any(f in ALWAYS_REVIEWED_DOCS for f in changed):
             flags.append("docs_touched")

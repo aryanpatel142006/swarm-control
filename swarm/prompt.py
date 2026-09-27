@@ -83,5 +83,5 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
     else:
         parts.append("Before you finish, write a JSON object matching this schema to `.swarm-run/report.json` "
                      "in the worktree root (create the directory if needed):")
-    parts += ["", "```json", json.dumps(REPORT_SCHEMA, indent=1), "```", ""]
+    parts += ["", "```json", json.dumps(REPORT_SCHEMA, separators=(",", ":")), "```", ""]
     return "\n".join(parts)

@@ -126,3 +126,12 @@ def test_swarm_run_excluded_without_gitignore(git_repo, tmp_path):
     (path / ".swarm-run" / "prompt.md").write_text("p")
     assert ws.changed_files(path) == []
     ws.dispose(path)
+
+
+def test_changed_files_lists_untracked_files_individually(git_repo, tmp_path):
+    ws = Workspace(git_repo, tmp_path / "wt")
+    path = ws.provision("T-010")
+    (path / "docs" / "decisions").mkdir(parents=True)
+    (path / "docs" / "decisions" / "T-010.md").write_text("d")
+    assert ws.changed_files(path) == ["docs/decisions/T-010.md"]
+    ws.dispose(path)

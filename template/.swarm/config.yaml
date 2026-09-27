@@ -44,7 +44,7 @@ routing:
     claude: { frontend: { best: opus } }
 
 docs_by_type:               # what gets inlined into a worker's prompt; everything else is referenced by path
-  _all:        [PLAN.md#summary, AGENTS.md]
+  _all:        [PLAN.md#summary]   # AGENTS.md is auto-loaded by every CLI (via CLAUDE.md / GEMINI.md), never inline it
   frontend:    [docs/DESIGN.md, docs/CONTRACTS.md]
   backend:     [docs/CONTRACTS.md, docs/ARCHITECTURE.md]
   realtime:    [docs/CONTRACTS.md, docs/ARCHITECTURE.md]

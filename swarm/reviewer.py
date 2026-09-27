@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,9 +70,10 @@ def findings_to_feedback(v: Verdict) -> str:
 
 class Reviewer:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, adapter_factory=get_adapter, log=print,
-                 prompt_text: str | None = None):
+                 prompt_text: str | None = None, ledger=None):
         self.cfg, self.board, self.ws, self.adapter_factory, self.log = cfg, board, ws, adapter_factory, log
         self.prompt_text = prompt_text if prompt_text is not None else (PROMPTS_DIR / "reviewer.md").read_text()
+        self.ledger = ledger
 
     def review(self, task: Task) -> Verdict:
         wt = self.ws.provision(task.id, reuse_branch=True)
@@ -95,7 +97,11 @@ class Reviewer:
                            max_turns=REVIEW_TURNS, budget_usd=None, timeout_s=REVIEW_TIMEOUT_S, cwd=wt,
                            schema=REVIEW_SCHEMA if structured else None, read_only=True,
                            sandbox="read-only", extra_args=list(agent_cfg.extra_args))
+            started = time.time()
             result = self.adapter_factory(agent_cfg).run(spec)
+            if self.ledger is not None:
+                self.ledger.append(agent=role.agent, model=spec.model, task_id=task.id, usage=result.usage,
+                                   duration_s=time.time() - started, ok=result.ok)
             if not result.ok and result.structured_output is None:
                 return Verdict("escalate", f"reviewer run failed: {result.error[:300]}", [])
             return parse_verdict(result.structured_output, wt)
