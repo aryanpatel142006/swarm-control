@@ -257,3 +257,20 @@ def test_decorate_falls_back_to_emoji_without_assets(tmp_path):
     assert failed == []
     assert decorated["parent"]["icon"] == {"type": "emoji", "emoji": "🐝"}
     assert decorated["db1"]["cover"]["external"]["url"].startswith("https://www.notion.so/images/page-cover/")
+
+
+def test_retry_after_http_date_is_honored():
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+    calls = {"n": 0}
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=7))
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": when}, json={})
+        return httpx.Response(200, json={"ok": True})
+
+    client, sleeps = make_client(handler)
+    assert client.request("GET", "/users/me") == {"ok": True}
+    assert len(sleeps) == 1 and 4 <= sleeps[0] <= 8

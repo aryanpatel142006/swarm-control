@@ -18,16 +18,25 @@ app = typer.Typer(help="swarm-control: Notion board + git worktrees + headless c
                   no_args_is_help=True)
 console = Console()
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "template"
-NO_CONFIG_COMMANDS = {"template"}
 
 
 class State:
-    cfg: Config
+    cfg: Config | None = None
+    config_path: Path | None = None
     memory: bool = False
     host: str | None = None
 
 
 state = State()
+
+
+def _cfg() -> Config:
+    if state.cfg is None:
+        try:
+            state.cfg = load_config(state.config_path or find_config(Path.cwd()))
+        except (ConfigError, typer.BadParameter, OSError) as e:
+            raise typer.Exit(code=_fail(str(e)))
+    return state.cfg
 
 
 def find_config(start: Path) -> Path:
@@ -72,12 +81,8 @@ def main(ctx: typer.Context,
          config: Path = typer.Option(None, "--config", help="path to .swarm/config.yaml"),
          memory: bool = typer.Option(False, "--memory", help="use an in-memory board (dry runs)"),
          host: str = typer.Option(None, "--host", help="this laptop's name in config.hosts (or SWARM_HOST)")):
-    if ctx.invoked_subcommand in NO_CONFIG_COMMANDS:
-        return
-    try:
-        state.cfg = load_config(config or find_config(Path.cwd()))
-    except (ConfigError, typer.BadParameter, OSError) as e:
-        raise typer.Exit(code=_fail(str(e)))
+    state.cfg = None
+    state.config_path = config
     state.memory = memory
     state.host = host or os.environ.get("SWARM_HOST")
 
@@ -87,9 +92,9 @@ def doctor(offline: bool = typer.Option(False, "--offline", help="skip network c
            smoke: str = typer.Option(None, "--smoke", help="agent name to smoke-test with a 1-turn prompt")):
     """Check tokens, CLIs, git, gh, verify scripts."""
     from .doctor import run_checks, smoke_agent
-    checks = run_checks(state.cfg, state.host, offline=offline)
+    checks = run_checks(_cfg(), state.host, offline=offline)
     if smoke:
-        checks.append(smoke_agent(state.cfg, smoke, state.cfg.worktree_root / "_smoke"))
+        checks.append(smoke_agent(_cfg(), smoke, _cfg().worktree_root / "_smoke"))
     table = Table("check", "ok", "detail")
     for c in checks:
         table.add_row(c.name, "[green]yes[/green]" if c.ok else "[red]NO[/red]", c.detail)
@@ -104,29 +109,29 @@ def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page
     token = os.environ.get("NOTION_TOKEN")
     if not token:
         raise typer.Exit(code=_fail("NOTION_TOKEN is not set"))
-    ids = NotionBoard.init(NotionClient(token), parent_page, list(state.cfg.agents))
-    path = save_notion_ids(state.cfg, ids)
+    ids = NotionBoard.init(NotionClient(token), parent_page, list(_cfg().agents))
+    path = save_notion_ids(_cfg(), ids)
     console.print(f"created databases; ids saved to {path}")
     if not str(ids.get("views_ok", "")).startswith("true"):
         console.print("[yellow]board views could not be created via the API; add them by hand: "
                       "open each database → + view → Board → group by Status / Agent.[/yellow]")
-    state.cfg = load_config(state.cfg.path)
+    state.cfg = load_config(_cfg().path)
     agents_sync()
 
 
 @app.command("agents-sync")
 def agents_sync():
     """Refresh Agent rows (and the Agent select options) from config."""
-    board = make_board(state.cfg, state.memory)
-    for a in state.cfg.agents.values():
+    board = make_board(_cfg(), state.memory)
+    for a in _cfg().agents.values():
         row = board.get_agent(a.name) or AgentRow(name=a.name)
         row.provider, row.host = a.provider, a.host
         board.upsert_agent(row)
     if not state.memory:
         from .board import notion_props as np
-        board.c.request("PATCH", f"/data_sources/{state.cfg.notion.tasks_ds}",
-                        json={"properties": {"Agent": np.TASKS_SCHEMA(list(state.cfg.agents))["Agent"]}})
-    console.print(f"synced {len(state.cfg.agents)} agents")
+        board.c.request("PATCH", f"/data_sources/{_cfg().notion.tasks_ds}",
+                        json={"properties": {"Agent": np.TASKS_SCHEMA(list(_cfg().agents))["Agent"]}})
+    console.print(f"synced {len(_cfg().agents)} agents")
 
 
 def _print_proposals(proposals):
@@ -142,8 +147,8 @@ def plan(plan_file: Path = typer.Argument(Path("PLAN.md")), milestone: str = typ
          apply: bool = typer.Option(False, "--apply", help="create the tasks without asking")):
     """Decompose PLAN.md into tasks with the planner model, then create them."""
     from .planner import Planner
-    board = make_board(state.cfg, state.memory)
-    pl = Planner(state.cfg, board, _workspace(state.cfg), log=console.print)
+    board = make_board(_cfg(), state.memory)
+    pl = Planner(_cfg(), board, _workspace(_cfg()), log=console.print)
     proposals = pl.propose(plan_file, milestone=milestone)
     _print_proposals(proposals)
     if not proposals:
@@ -156,8 +161,8 @@ def plan(plan_file: Path = typer.Argument(Path("PLAN.md")), milestone: str = typ
 def apply_proposals(file: Path = typer.Argument(Path(".swarm/tasks.proposed.json"))):
     """Create tasks from an edited tasks.proposed.json."""
     from .planner import Planner
-    board = make_board(state.cfg, state.memory)
-    Planner(state.cfg, board, _workspace(state.cfg), log=console.print).apply(json.loads(file.read_text()))
+    board = make_board(_cfg(), state.memory)
+    Planner(_cfg(), board, _workspace(_cfg()), log=console.print).apply(json.loads(file.read_text()))
 
 
 @app.command()
@@ -169,12 +174,12 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
     from .router import context_from_board, route
     if type not in TASK_TYPES or importance not in IMPORTANCES or size not in SIZES:
         raise typer.Exit(code=_fail(f"type/importance/size must be in {TASK_TYPES}/{IMPORTANCES}/{SIZES}"))
-    board = make_board(state.cfg, state.memory)
+    board = make_board(_cfg(), state.memory)
     done = {t.id for t in board.list_tasks(status=[Status.DONE])}
     t = Task(id="", title=title, description=description, acceptance=acceptance, type=type, importance=importance,
              size=size, milestone=milestone, depends_on=list(depends), scope=list(scope), priority=priority)
     t.status = Status.READY if all(d in done for d in t.depends_on) else Status.BACKLOG
-    t.agent, t.model, t.effort = route(t, state.cfg, context_from_board(board, state.cfg))
+    t.agent, t.model, t.effort = route(t, _cfg(), context_from_board(board, _cfg()))
     t = board.create_task(t)
     console.print(f"{t.id} {t.status.value} → {t.agent} / {t.model} / {t.effort}: {t.title}")
 
@@ -183,15 +188,15 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
 def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str = typer.Option(None),
            effort: str = typer.Option(None)):
     """Override routing for one task."""
-    board = make_board(state.cfg, state.memory)
+    board = make_board(_cfg(), state.memory)
     t = board.get_task(task_id)
     if not t:
         raise typer.Exit(code=_fail(f"{task_id} not found"))
-    if agent not in state.cfg.agents:
+    if agent not in _cfg().agents:
         raise typer.Exit(code=_fail(f"unknown agent {agent}"))
     t.agent = agent
-    t.model = model or state.cfg.agents[agent].models["mid"]
-    t.effort = effort or state.cfg.agents[agent].effort.get("mid")
+    t.model = model or _cfg().agents[agent].models["mid"]
+    t.effort = effort or _cfg().agents[agent].effort.get("mid")
     board.update_task(t, ["agent", "model", "effort"])
     console.print(f"{t.id} → {t.agent} / {t.model} / {t.effort}")
 
@@ -199,25 +204,29 @@ def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str =
 @app.command()
 def cut(task_id: str):
     """Mark a task Cut (never run again)."""
-    board = make_board(state.cfg, state.memory)
+    board = make_board(_cfg(), state.memory)
     t = board.get_task(task_id)
     if not t:
         raise typer.Exit(code=_fail(f"{task_id} not found"))
     t.status = Status.CUT
     board.update_task(t, ["status"])
+    dependents = [x.id for x in board.list_tasks() if task_id in x.depends_on and x.status is not Status.DONE]
     console.print(f"{t.id} cut")
+    if dependents:
+        console.print(f"[yellow]warning: {', '.join(dependents)} depend on {t.id} and will never be promoted; "
+                      f"edit their dependencies or cut them too.[/yellow]")
 
 
 @app.command()
 def split(task_id: str, apply: bool = typer.Option(False, "--apply")):
     """Ask the planner to split a task into smaller ones; cuts the original when applied."""
     from .planner import Planner
-    board = make_board(state.cfg, state.memory)
+    board = make_board(_cfg(), state.memory)
     t = board.get_task(task_id)
     if not t:
         raise typer.Exit(code=_fail(f"{task_id} not found"))
-    pl = Planner(state.cfg, board, _workspace(state.cfg), log=console.print)
-    proposals = pl.propose(state.cfg.repo_root / "PLAN.md", split_of=t)
+    pl = Planner(_cfg(), board, _workspace(_cfg()), log=console.print)
+    proposals = pl.propose(_cfg().repo_root / "PLAN.md", split_of=t)
     _print_proposals(proposals)
     if proposals and (apply or typer.confirm("create these and cut the original?", default=True)):
         pl.apply(proposals)
@@ -229,22 +238,22 @@ def split(task_id: str, apply: bool = typer.Option(False, "--apply")):
 def answer(question_id: str, text: str,
            follow_up: bool = typer.Option(False, "--follow-up", help="fyi questions: create a follow-up task")):
     """Answer a question (same as typing in Notion)."""
-    board = make_board(state.cfg, state.memory)
+    board = make_board(_cfg(), state.memory)
     qs = [q for q in board.list_questions() if q.id == question_id]
     if not qs:
         raise typer.Exit(code=_fail(f"{question_id} not found"))
     q = qs[0]
     q.answer, q.needs_follow_up = text, follow_up
     board.update_question(q, ["answer", "needs_follow_up"])
-    console.print(f"{q.id} answered; serve will relay it within {state.cfg.serve_seconds}s")
+    console.print(f"{q.id} answered; serve will relay it within {_cfg().serve_seconds}s")
 
 
 @app.command()
 def status():
     """Print the status page."""
     from .status import render_status
-    board = make_board(state.cfg, state.memory)
-    console.print(render_status(state.cfg, board.list_tasks(), board.list_agents(), board.list_questions(),
+    board = make_board(_cfg(), state.memory)
+    console.print(render_status(_cfg(), board.list_tasks(), board.list_agents(), board.list_questions(),
                                 utcnow()))
 
 
@@ -252,8 +261,8 @@ def status():
 def reroute():
     """Re-run routing for Ready tasks whose agent is offline, cooling down, or unknown."""
     from .serve import Server
-    board = make_board(state.cfg, state.memory)
-    srv = Server(state.cfg, board, _workspace(state.cfg), reviewer=None, merger=None, log=console.print)
+    board = make_board(_cfg(), state.memory)
+    srv = Server(_cfg(), board, _workspace(_cfg()), reviewer=None, merger=None, log=console.print)
     console.print(f"rerouted {srv.reroute()} tasks")
 
 
@@ -266,8 +275,10 @@ def run(agent: str = typer.Option(None, "--agent", help="only this agent"),
     from .runner import Runner, SyncExecutor
     if not state.host:
         raise typer.Exit(code=_fail("set SWARM_HOST or pass --host"))
-    board = make_board(state.cfg, state.memory)
-    r = Runner(state.cfg, board, state.host, _workspace(state.cfg), ledger=_ledger(state.cfg),
+    if state.host not in _cfg().hosts:
+        raise typer.Exit(code=_fail(f"host '{state.host}' is not in config.hosts ({', '.join(_cfg().hosts)})"))
+    board = make_board(_cfg(), state.memory)
+    r = Runner(_cfg(), board, state.host, _workspace(_cfg()), ledger=_ledger(_cfg()),
                log=console.print, executor=SyncExecutor() if once else None)
     if agent:
         if agent not in r.agents:
@@ -279,7 +290,7 @@ def run(agent: str = typer.Option(None, "--agent", help="only this agent"),
         if not tasks:
             console.print("no pending tasks")
             raise typer.Exit()
-        console.print(compile_prompt(tasks[0], state.cfg, rules_text=load_rules(), deps_summaries={},
+        console.print(compile_prompt(tasks[0], _cfg(), rules_text=load_rules(), deps_summaries={},
                                      structured_output_supported=True))
         raise typer.Exit()
     r.loop(once=once)
@@ -292,8 +303,8 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
     from .merge import Merger
     from .reviewer import Reviewer
     from .serve import Server
-    board = make_board(state.cfg, state.memory)
-    ws = _workspace(state.cfg)
+    board = make_board(_cfg(), state.memory)
+    ws = _workspace(_cfg())
 
     class NoReview:
         def process(self, task):
@@ -303,9 +314,9 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
         def merge(self, task):
             return False
 
-    srv = Server(state.cfg, board, ws,
-                 reviewer=NoReview() if no_review else Reviewer(state.cfg, board, ws, log=console.print),
-                 merger=NoMerge() if no_merge else Merger(state.cfg, board, ws, log=console.print),
+    srv = Server(_cfg(), board, ws,
+                 reviewer=NoReview() if no_review else Reviewer(_cfg(), board, ws, log=console.print),
+                 merger=NoMerge() if no_merge else Merger(_cfg(), board, ws, log=console.print),
                  log=console.print, host=state.host or "serve", background=not once)
     if once:
         srv.acquire_lock()
@@ -317,10 +328,12 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
 @app.command()
 def logs(task_id: str, attempt: int = typer.Option(None, "--attempt")):
     """Show prompt/stdout/stderr for a task's run on this laptop."""
-    base = Path.home() / ".swarm" / state.cfg.project / "runs" / task_id
+    base = Path.home() / ".swarm" / _cfg().project / "runs" / task_id
     if not base.exists():
         raise typer.Exit(code=_fail(f"no logs under {base}"))
     attempts = sorted(base.glob("attempt-*"))
+    if not attempts:
+        raise typer.Exit(code=_fail(f"no logs under {base}"))
     d = base / f"attempt-{attempt}" if attempt else attempts[-1]
     for name in ("prompt.md", "stdout.txt", "stderr.txt"):
         f = d / name

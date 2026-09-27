@@ -19,6 +19,23 @@ MAX_RETRIES = 5
 MAX_SLEEP = 300.0
 
 
+def _retry_after_seconds(value) -> float | None:
+    """Retry-After may be integer seconds or an HTTP-date."""
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        when = parsedate_to_datetime(str(value))
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
 class NotionError(RuntimeError):
     def __init__(self, status: int, code: str, message: str):
         super().__init__(f"Notion {status} {code}: {message}")
@@ -61,7 +78,9 @@ class NotionClient:
             ra = resp.headers.get("Retry-After")
             if ra is None:
                 ra = (body.get("additional_data") or {}).get("retry_after")
-            wait = float(ra) if ra is not None else (2 ** attempt + random.random())
+            wait = _retry_after_seconds(ra)
+            if wait is None:
+                wait = 2 ** attempt + random.random()
             self._sleep(min(MAX_SLEEP, wait))
 
     # ----- convenience wrappers -----

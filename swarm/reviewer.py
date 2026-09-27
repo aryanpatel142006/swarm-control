@@ -86,7 +86,7 @@ class Reviewer:
             if role is None:
                 return Verdict("approve", "no reviewer configured; verify passed", [])
             agent_cfg = self.cfg.agents[role.agent]
-            diff = self.ws.git(wt, "diff", f"origin/{self.cfg.main_branch}...HEAD", check=False).out
+            diff = self.ws.git(wt, "diff", f"{self.ws.remote}/{self.cfg.main_branch}...HEAD", check=False).out
             prompt = build_review_prompt(task, diff, full.tail(1500) if full else "", self.prompt_text)
             pf = wt / ".swarm-run" / "review_prompt.md"
             pf.write_text(prompt)

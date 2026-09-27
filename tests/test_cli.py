@@ -53,3 +53,37 @@ def test_template_copies(tmp_path):
     assert (dest / "AGENTS.md").exists() and (dest / ".swarm" / "config.yaml").exists()
     assert (dest / "scripts" / "verify_fast.sh").exists()
     assert os.access(dest / "scripts" / "verify_fast.sh", os.X_OK)
+
+
+def test_unknown_host_is_a_clean_error(project_dir):
+    r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "--host", "nope", "run", "--once"])
+    assert r.exit_code == 1 and "nope" in r.output and "Traceback" not in r.output
+
+
+def test_logs_without_runs_is_a_clean_error(project_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "logs", "T-001"])
+    assert r.exit_code == 1 and "no logs" in r.output
+
+
+def test_subcommand_help_needs_no_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(app, ["doctor", "--help"])
+    assert r.exit_code == 0 and "offline" in r.output
+
+
+def test_cut_warns_about_dependents(project_dir):
+    base = ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory"]
+    # --memory boards do not persist between invocations, so drive the command function directly
+    from swarm import cli as cli_mod
+    from swarm.board.memory import InMemoryBoard
+    from swarm.config import load_config
+    from swarm.models import Status, Task
+    board = InMemoryBoard()
+    board.create_task(Task(id="T-001", title="base", status=Status.READY))
+    board.create_task(Task(id="T-002", title="dep", status=Status.BACKLOG, depends_on=["T-001"]))
+    cli_mod.state.cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    cli_mod.state.memory = True
+    cli_mod.make_board = lambda cfg, memory=False: board
+    r = runner.invoke(app, base + ["cut", "T-001"])
+    assert r.exit_code == 0 and "T-002" in r.output and "depend" in r.output
