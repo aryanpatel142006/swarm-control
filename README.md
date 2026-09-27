@@ -32,6 +32,7 @@ Then, to work the same board as the rest of the team:
    export SWARM_HOST=laptop-b
    ```
 2. Accept the invite to the project repo, clone it next to swarm-control, and run `swarm doctor` inside it.
+   Then `swarm tools --install` there: it installs the plugins the project's config asks for (and Playwright's browser). On a Codex laptop also register the MCP servers named in config with `codex mcp add` (docs/RUNBOOK.md step 7).
    Every row must say yes except CLIs you don't have.
 3. `swarm doctor --smoke <your agent>` once per agent you'll run (Claude Code, Codex, Antigravity...).
 4. `caffeinate -dims swarm run` and leave it. Cards assigned to your agents start moving on the shared board.

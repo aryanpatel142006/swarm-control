@@ -103,3 +103,4 @@ Rulings, all measured on this laptop with Claude Code 2.1 headless:
 - Plugin MCP manifests come in two shapes: `{"mcpServers": {...}}` (context7) and flat `{"name": {...}}` (playwright); both parsed. Inline `mcp_servers` in config win (playwright runs `--headless --isolated`).
 - Codex: skills from `.agents/skills` (symlink to `.claude/skills`), MCP per run via `-c mcp_servers.<name>.enabled=true`; servers registered once with `codex mcp add`, `enabled = false`. Untested on a real Codex laptop (none here).
 - Not adopted: filesystem/memory/sequential-thinking MCPs (redundant), github MCP (`gh` is cheaper), magic (34 tools), feature-dev/ralph-loop (harness owns the loop).
+- Deferred minor: the runner calls `claude plugin list --json` up to three times per task (setup + two ensure calls); cache per process with invalidation after an install if it ever shows up in timings.
