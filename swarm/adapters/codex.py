@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 from ..models import RunResult, Usage
 from .base import RATE_LIMIT_RE, Adapter, RunSpec, parse_reset_at
+
+
+def git_common_dir(cwd: Path) -> str | None:
+    """Absolute path of the repository's shared .git directory, or None outside a git checkout."""
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
 class CodexAdapter(Adapter):
@@ -19,6 +31,9 @@ class CodexAdapter(Adapter):
         else:
             sandbox = spec.sandbox or (self.cfg.sandbox if self.cfg else None) or "workspace-write"
         argv += ["--sandbox", sandbox]
+        common = git_common_dir(spec.cwd)
+        if common and sandbox != "danger-full-access":
+            argv += ["--add-dir", common]   # a worktree's index and locks live under the main repo's .git
         if spec.schema:
             schema_path = spec.cwd / ".swarm-run" / "schema.json"
             schema_path.parent.mkdir(exist_ok=True)

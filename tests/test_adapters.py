@@ -133,3 +133,18 @@ def test_rate_limit_regex_and_reset():
     assert not RATE_LIMIT_RE.search("all good")
     assert parse_reset_at("resets at 2026-10-10T18:00:00Z").isoformat() == "2026-10-10T18:00:00+00:00"
     assert parse_reset_at("nothing here") is None
+
+
+def test_codex_adds_git_common_dir_as_writable(git_repo, tmp_path):
+    """Inside a git worktree the index and locks live under the main repo's .git; Codex's sandbox must be told."""
+    import subprocess
+    subprocess.run(["git", "-C", str(git_repo), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "x"], check=True)
+    wt = tmp_path / "wt"
+    (wt / ".swarm-run").mkdir()
+    pf = wt / "prompt.md"
+    pf.write_text("go")
+    argv, _ = CodexAdapter().build_command(RunSpec(prompt_file=pf, model="m", effort=None, max_turns=5,
+                                                   budget_usd=None, timeout_s=10, cwd=wt))
+    assert "--add-dir" in argv
+    added = argv[argv.index("--add-dir") + 1]
+    assert added.endswith("/.git") and (git_repo / ".git").resolve() == __import__("pathlib").Path(added).resolve()
