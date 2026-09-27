@@ -139,10 +139,11 @@ ROW_ICONS = {  # name: (accent, glyph builder)
 
 
 def row_icon_svg(name: str) -> str:
+    """Row icons are the bare glyph on a transparent background (no tile), enlarged to read at list size."""
     accent, glyph = ROW_ICONS[name]
+    body = glyph(accent).replace("#1b2140", "#0e1330")   # the cut-outs stay dark on light and dark themes
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">'
-            f'<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{NAVY}"/><stop offset="1" stop-color="{NAVY2}"/></linearGradient></defs>'
-            f'<rect width="512" height="512" rx="112" fill="url(#bg)"/>{glyph(accent)}</svg>')
+            f'<g transform="translate(256 256) scale(1.3) translate(-256 -256)">{body}</g></svg>')
 
 
 def main() -> None:
