@@ -189,3 +189,17 @@ def test_assign_ids_to_handmade_tasks(cfg, git_repo, tmp_path):
     board.tasks[""] = Task(id="", title="hand made", status=Status.READY, page_id="pg-hand")
     assert srv.assign_ids() == 1
     assert board.get_task("T-002").title == "hand made" and "" not in board.tasks
+
+
+def test_relay_on_merge_failed_task_retries_merge_or_marks_done(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    t = board.create_task(Task(id="", title="stuck", status=Status.BLOCKED, agent="claude-a",
+                               flags=["merge_failed_1", "merge_failed_2", "merge_failed_3"]))
+    q = board.create_question(Question(id="", text="could not be merged", kind="blocking", task_id=t.id, answer="retry"))
+    assert srv.relay() == 1
+    s = board.get_task(t.id)
+    assert s.status is Status.MERGE_READY and not any(f.startswith("merge_failed") for f in s.flags)
+    t2 = board.create_task(Task(id="", title="handmerged", status=Status.BLOCKED, agent="claude-a", flags=["merge_failed_3"]))
+    board.create_question(Question(id="", text="could not be merged", kind="blocking", task_id=t2.id, answer="I merged it by hand"))
+    srv.relay()
+    assert board.get_task(t2.id).status is Status.DONE

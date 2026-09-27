@@ -239,6 +239,19 @@ class Runner:
             return self._publish(task, wt, attempt, result)
         finally:
             self.ws.dispose(wt)
+            self._bump_agent_row(task.agent, result_usage=None)
+
+    def _bump_agent_row(self, agent: str, result_usage=None) -> None:
+        """Refresh runs/spend on the Agents row so the status page shows real numbers after each task."""
+        try:
+            row = self.board.get_agent(agent) or AgentRow(name=agent, provider=self.agents[agent].provider, host=self.host)
+            totals = self.ledger.totals(agent)
+            row.runs, row.tokens_in, row.tokens_out = row.runs + 1, totals.input_tokens, totals.output_tokens
+            row.cost_usd = totals.cost_usd or 0.0
+            row.cost_5h_usd = self.ledger.window(agent, 5, self.now()).cost_usd or 0.0
+            self.board.upsert_agent(row)
+        except Exception as e:  # noqa: BLE001 - bookkeeping must never fail a task
+            self.log(f"could not update agent row: {e!r}")
 
     def _save_logs(self, wt: Path, task_id: str, attempt: int, result: RunResult) -> None:
         logdir = self.log_dir / task_id / f"attempt-{attempt}"

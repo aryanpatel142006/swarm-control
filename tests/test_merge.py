@@ -94,3 +94,37 @@ def test_merge_disposes_worktree_before_gh_and_deletes_remote_branch(cfg, git_re
     assert seen["worktree_exists"] is False
     assert "--delete-branch" not in seen["args"]
     assert not _git(git_repo, "ls-remote", "--heads", "origin", t.branch).strip()
+
+
+def test_merge_waits_for_github_mergeability_after_push(cfg, git_repo, tmp_path):
+    """GitHub recomputes mergeability asynchronously after a force-push; merging before it settles fails."""
+    state = {"views": 0, "merges": 0}
+
+    def gh(args, cwd):
+        if args[:2] == ["pr", "view"]:
+            state["views"] += 1
+            status = "UNKNOWN" if state["views"] < 3 else "MERGEABLE"
+            return CmdResult(0, f'{{"mergeable":"{status}","mergeStateStatus":"{"UNKNOWN" if status == "UNKNOWN" else "CLEAN"}"}}', "")
+        if args[:2] == ["pr", "merge"]:
+            state["merges"] += 1
+            if state["views"] < 3:
+                return CmdResult(1, "", "GraphQL: Pull Request is not mergeable (mergePullRequest)")
+            _git(git_repo, "fetch", "-q", "origin")
+            _git(git_repo, "merge", "-q", "--no-edit", f"origin/{args[2]}")
+            _git(git_repo, "push", "-q", "origin", "main")
+            return CmdResult(0, "merged", "")
+        return CmdResult(0, "", "")
+
+    board = InMemoryBoard()
+    ws = Workspace(git_repo, tmp_path / "wt", gh=gh)
+    t = board.create_task(Task(id="", title="Feature", status=Status.MERGE_READY, agent="codex-a"))
+    wt = ws.provision(t.id)
+    (wt / "feature.txt").write_text("f\n")
+    ws.commit_all(wt, "feature")
+    ws.push(wt, t.branch)
+    ws.dispose(wt)
+    sleeps = []
+    m = Merger(cfg, board, ws, log=lambda *a: None, sleep=sleeps.append)
+    assert m.merge(t) is True
+    assert state["merges"] == 1 and state["views"] >= 3 and len(sleeps) >= 2
+    assert board.get_task(t.id).status is Status.DONE

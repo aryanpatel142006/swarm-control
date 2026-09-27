@@ -123,7 +123,17 @@ class Server:
             if not q.answer.strip():
                 continue
             t = self.board.get_task(q.task_id) if q.task_id else None
-            if q.kind == "blocking":
+            if q.kind == "blocking" and t and t.status is Status.BLOCKED and any(f.startswith("merge_failed") for f in t.flags):
+                # a merge that gave up: the human either merged by hand or wants the merge retried
+                if "merged" in q.answer.lower():
+                    t.status = Status.DONE
+                else:
+                    t.status = Status.MERGE_READY
+                t.flags = [f for f in t.flags if not f.startswith("merge_failed")]
+                t.claim_nonce = ""
+                self.board.update_task(t, ["status", "flags", "claim_nonce"])
+                self.log(f"[{t.id}] merge question answered → {t.status.value}")
+            elif q.kind == "blocking":
                 if t and t.status is Status.BLOCKED:
                     t.feedback = f"Human answer to \"{q.text}\": {q.answer}"[:1900]
                     t.flags = list(dict.fromkeys(t.flags + ["resume"]))

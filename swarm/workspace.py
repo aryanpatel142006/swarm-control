@@ -159,6 +159,17 @@ class Workspace:
             raise RuntimeError(f"gh pr create failed: {created.err.strip() or created.out.strip()}")
         return created.out.strip().splitlines()[-1] if created.out.strip() else ""
 
+    def pr_state(self, branch: str) -> tuple[str, str]:
+        """GitHub's (mergeable, mergeStateStatus) for the PR on this branch; UNKNOWN while GitHub recomputes."""
+        r = self.gh(["pr", "view", branch, "--json", "mergeable,mergeStateStatus"], self.repo_root)
+        if not r.ok:
+            return "N/A", "N/A"          # no PR or gh unavailable: nothing to wait for
+        try:
+            data = json.loads(r.out)
+        except ValueError:
+            return "N/A", "N/A"
+        return str(data.get("mergeable") or "UNKNOWN"), str(data.get("mergeStateStatus") or "UNKNOWN")
+
     def pr_merge(self, branch: str) -> CmdResult:
         # no --delete-branch: gh would try to delete the local branch too, which fails while a worktree holds it
         return self.gh(["pr", "merge", branch, "--squash"], self.repo_root)

@@ -1,12 +1,17 @@
 """Merger: rebase onto main, fast verify, force-with-lease push, squash merge, mark Done."""
 from __future__ import annotations
 
+import time
+from typing import Callable
+
 from .board.base import Board
 from .config import Config
 from .models import Question, Status, Task, utcnow
 from .workspace import Workspace
 
 MAX_MERGE_FAILURES = 3
+MERGEABILITY_POLLS = 12      # × MERGEABILITY_WAIT_S ≈ 36 s for GitHub to recompute after a push
+MERGEABILITY_WAIT_S = 3.0
 
 
 def merge_failures(task: Task) -> int:
@@ -14,8 +19,28 @@ def merge_failures(task: Task) -> int:
 
 
 class Merger:
-    def __init__(self, cfg: Config, board: Board, ws: Workspace, *, log=print):
-        self.cfg, self.board, self.ws, self.log = cfg, board, ws, log
+    def __init__(self, cfg: Config, board: Board, ws: Workspace, *, log=print,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.cfg, self.board, self.ws, self.log, self.sleep = cfg, board, ws, log, sleep
+
+    def _wait_mergeable(self, branch: str) -> str:
+        """After a push GitHub reports UNKNOWN for a few seconds; merging then fails with 'not mergeable'."""
+        state = "UNKNOWN"
+        for _ in range(MERGEABILITY_POLLS):
+            mergeable, state = self.ws.pr_state(branch)
+            if mergeable != "UNKNOWN" and state != "UNKNOWN":   # settled, or N/A (nothing to wait for)
+                return state
+            self.sleep(MERGEABILITY_WAIT_S)
+        return state
+
+    def _gh_merge(self, task: Task):
+        self._wait_mergeable(task.branch)
+        r = self.ws.pr_merge(task.branch)
+        if not r.ok and "not mergeable" in (r.err + r.out):
+            self.sleep(MERGEABILITY_WAIT_S * 2)   # one more chance for GitHub to settle
+            self._wait_mergeable(task.branch)
+            r = self.ws.pr_merge(task.branch)
+        return r
 
     def _back(self, task: Task, feedback: str) -> bool:
         task.status = Status.CHANGES_REQUESTED
@@ -60,7 +85,7 @@ class Merger:
         finally:
             # release the branch before gh touches it: a checked-out branch cannot be deleted or fast-forwarded
             self.ws.dispose(wt)
-        r = self.ws.pr_merge(task.branch)
+        r = self._gh_merge(task)
         if not r.ok:
             return self._merge_failed(task, "gh pr merge failed: " + (r.err.strip() or r.out.strip()))
         task.status, task.claim_nonce = Status.DONE, ""

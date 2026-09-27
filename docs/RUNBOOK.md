@@ -9,7 +9,7 @@
 5. Instantiate the project: `swarm template ../<project> && cd ../<project> && git init && gh repo create ...` Edit `.swarm/config.yaml` (agents, hosts, models). Commit and push.
 6. `swarm init --parent-page <id>` once; commit `.swarm/notion.yaml`.
 7. `swarm doctor` on both laptops, then `swarm doctor --smoke <agent>` for every agent you will use. An agent whose smoke fails is disabled: remove it from config or fix the CLI.
-8. Laptop A: disable sleep, plug in power.
+8. Both laptops: plug in power and disable sleep (System Settings → Battery → Options → Prevent automatic sleeping on power adapter). `caffeinate -dims` in front of every swarm command is the belt to that suspender.
 
 ## 0:00–0:45 — plan
 
@@ -18,8 +18,8 @@
 
 ## 0:45 — start the loops
 
-- Laptop A: `caffeinate -i swarm serve` in one terminal.
-- Both laptops: `swarm run` in one terminal each.
+- Laptop A: `caffeinate -dims swarm serve` in one terminal.
+- Both laptops: `caffeinate -dims swarm run` in one terminal each. Every process pauses when a Mac sleeps; during the tryout a closed lid stretched 30-second serve ticks into hours.
 - Open the Notion board (By Status) and the Questions board.
 
 ## 0:45–1:30 — first hour rules

@@ -322,3 +322,12 @@ def test_stopping_requeues_instead_of_publishing(cfg, git_repo, tmp_path):
     wt = r.ws.provision(t.id, reuse_branch=True)
     assert (wt / "src" / "a.py").exists()  # partial work was pushed for the resume
     r.ws.dispose(wt)
+
+
+def test_agent_row_reflects_spend_after_a_task(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)
+    row = board.get_agent("codex-a")
+    assert row is not None and row.cost_5h_usd == 0.25 and row.runs == 1
