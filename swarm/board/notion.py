@@ -385,6 +385,10 @@ class NotionBoard:
                     "group_by": {"type": "select", "property_id": props[prop]["id"],
                                  "sort": {"type": "manual"}, "hide_empty_groups": False},
                     "card_layout": "compact"})
+            client.create_view(ids["tasks_db"], ids["tasks_ds"], "Needs Human", "table", {
+                "type": "table",
+                "filter": {"or": [{"property": props["Status"]["id"], "select": {"equals": "Blocked"}},
+                                  {"property": props["Status"]["id"], "select": {"equals": "Failed"}}]}})
             qds = client.get_data_source(ids["questions_ds"])
             client.create_view(ids["questions_db"], ids["questions_ds"], "Open Questions", "board", {
                 "type": "board",

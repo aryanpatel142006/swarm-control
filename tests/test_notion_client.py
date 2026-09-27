@@ -201,6 +201,7 @@ def test_board_questions_agents_status():
 
 def test_init_decorates_everything_it_creates():
     decorated = {}
+    views = []
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -222,6 +223,7 @@ def test_init_decorates_everything_it_creates():
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
             return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
         if req.method == "POST" and path == "/v1/views":
+            views.append(body["name"])
             return httpx.Response(200, json={"id": "view"})
         if req.method == "PATCH" and (path.startswith("/v1/databases/") or path.startswith("/v1/pages/")):
             decorated[path.split("/")[3]] = body
@@ -232,6 +234,7 @@ def test_init_decorates_everything_it_creates():
     ids = NotionBoard.init(client, "parent", ["claude-a"])
     assert ids["views_ok"] == "true"
     assert ids["decor_ok"] == "true"
+    assert views == ["By Status", "By Agent", "Needs Human", "Open Questions"]
     for key in ("db1", "db2", "db3", "status-page", "parent"):
         assert decorated[key]["icon"]["type"] == "file_upload", key
         assert decorated[key]["cover"]["type"] == "file_upload", key
