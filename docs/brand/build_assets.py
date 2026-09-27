@@ -108,14 +108,23 @@ def render(svg_path: Path, png_path: Path, w: int, h: int) -> None:
     html.unlink()
 
 
+def render_banner(kind: str, png_path: Path) -> None:
+    """Banners are generative canvas art (docs/brand/banner.html), rendered at 2x then downscaled for smoothness."""
+    big = png_path.with_name(png_path.stem + "@2x.png")
+    subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2",
+                    "--window-size=1500,500", "--virtual-time-budget=8000", f"--screenshot={big}",
+                    f"file://{HERE / 'banner.html'}?kind={kind}"], check=True, capture_output=True)
+    subprocess.run(["sips", "-z", "500", "1500", str(big), "--out", str(png_path)], check=True, capture_output=True)
+    big.unlink()
+
+
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     for kind in PALETTE:
-        isvg, bsvg = HERE / f"icon-{kind}.svg", HERE / f"banner-{kind}.svg"
+        isvg = HERE / f"icon-{kind}.svg"
         isvg.write_text(icon_svg(kind))
-        bsvg.write_text(banner_svg(kind))
         render(isvg, ASSETS / f"icon-{kind}.png", 512, 512)
-        render(bsvg, ASSETS / f"banner-{kind}.png", 1500, 500)
+        render_banner(kind, ASSETS / f"banner-{kind}.png")
         print("built", kind)
 
 

@@ -1,0 +1,196 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>swarm banner</title>
+<style>html,body{margin:0;background:#10152b}canvas{display:block}</style>
+</head>
+<body>
+<canvas id="c" width="1500" height="500"></canvas>
+<script>
+// Generative banner: a swarm drawn as light. ?kind=board|tasks|questions|agents|status. Deterministic per kind.
+const kind = new URLSearchParams(location.search).get("kind") || "board";
+const W = 1500, H = 500;
+const cv = document.getElementById("c"), g = cv.getContext("2d");
+
+let seed = { board: 1101, tasks: 2202, questions: 3303, agents: 4404, status: 5505 }[kind] || 7;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const ACCENT = { board: [255, 179, 71], tasks: [246, 196, 83], questions: [255, 133, 112],
+                 agents: [79, 220, 196], status: [168, 147, 255] }[kind];
+const LABEL = { board: "swarm", tasks: "tasks", questions: "questions", agents: "agents", status: "status" }[kind];
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const LINE = [159, 214, 255];
+
+// ---------- sky ----------
+const sky = g.createLinearGradient(0, 0, 0, H);
+sky.addColorStop(0, "#10152b"); sky.addColorStop(0.55, "#232a63"); sky.addColorStop(1, "#3b2a55");
+g.fillStyle = sky; g.fillRect(0, 0, W, H);
+const ember = g.createRadialGradient(1150, 560, 0, 1150, 560, 760);
+ember.addColorStop(0, "rgba(205,110,75,0.38)"); ember.addColorStop(1, "rgba(205,110,75,0)");
+g.fillStyle = ember; g.fillRect(0, 0, W, H);
+const haze = g.createRadialGradient(330, 250, 0, 330, 250, 520);
+haze.addColorStop(0, rgba(ACCENT, 0.10)); haze.addColorStop(1, rgba(ACCENT, 0));
+g.fillStyle = haze; g.fillRect(0, 0, W, H);
+if (kind === "tasks") {  // four soft gates the lanes pass through
+  for (const gx of [330, 560, 790, 1020]) {
+    const gg = g.createLinearGradient(gx - 26, 0, gx + 26, 0);
+    gg.addColorStop(0, rgba(ACCENT, 0)); gg.addColorStop(0.5, rgba(ACCENT, 0.10)); gg.addColorStop(1, rgba(ACCENT, 0));
+    g.fillStyle = gg; g.fillRect(gx - 26, 95, 52, 310);
+  }
+}
+for (let i = 0; i < 260; i++) {  // stars
+  g.fillStyle = `rgba(255,255,255,${0.12 + rnd() * 0.4})`;
+  g.beginPath(); g.arc(rnd() * W, rnd() * H, 0.4 + rnd() * 1.3, 0, 7); g.fill();
+}
+
+// ---------- particle fields ----------
+const HUB = { x: 330, y: 250 };
+const AGENT_HUBS = [{ x: 210, y: 150 }, { x: 470, y: 120 }, { x: 640, y: 330 }, { x: 300, y: 390 }];
+const RING = { x: 340, y: 250, r: 150 };
+if (kind === "agents") {  // the clusters talk to each other
+  g.lineWidth = 1.2;
+  for (let i = 0; i < AGENT_HUBS.length; i++) for (let j = i + 1; j < AGENT_HUBS.length; j++) {
+    g.strokeStyle = rgba(LINE, 0.16); g.beginPath();
+    g.moveTo(AGENT_HUBS[i].x, AGENT_HUBS[i].y); g.lineTo(AGENT_HUBS[j].x, AGENT_HUBS[j].y); g.stroke();
+  }
+}
+
+function spawn() {
+  switch (kind) {
+    case "board": {  // most from the right, streaming in; some already orbiting
+      if (rnd() < 0.7) return { x: 700 + rnd() * 850, y: 40 + rnd() * 420, life: 70 + rnd() * 60 };
+      const a = rnd() * Math.PI * 2, r = 90 + rnd() * 160;
+      return { x: HUB.x + Math.cos(a) * r, y: HUB.y + Math.sin(a) * r, life: 60 + rnd() * 40 };
+    }
+    case "tasks": {  // five lanes entering from the left
+      const lane = Math.floor(rnd() * 5);
+      return { x: -60 + rnd() * 900, y: 130 + lane * 60 + (rnd() - 0.5) * 18, lane, life: 80 + rnd() * 60 };
+    }
+    case "questions": {  // on the ring, but never in the gap (between -0.35 and 0.45 rad, top-right)
+      let a; do { a = rnd() * Math.PI * 2; } while (a > -0.35 + Math.PI * 2 || (a > -0.35 && a < 0.45));
+      const r = RING.r + (rnd() - 0.5) * 36;
+      return { x: RING.x + Math.cos(a) * r, y: RING.y + Math.sin(a) * r, life: 60 + rnd() * 50 };
+    }
+    case "agents": {  // around one of four hubs, a few travelers between hubs
+      const h = AGENT_HUBS[Math.floor(rnd() * AGENT_HUBS.length)];
+      const a = rnd() * Math.PI * 2, r = 30 + rnd() * 70;
+      const traveler = rnd() < 0.12;
+      return { x: h.x + Math.cos(a) * r, y: h.y + Math.sin(a) * r, hub: h, traveler,
+               life: traveler ? 160 + rnd() * 80 : 60 + rnd() * 50 };
+    }
+    case "status": {  // along a rising curve, denser and wider at the start, tight at the tip
+      const t = Math.pow(rnd(), 0.8);
+      const x = lerp(110, 640, t), y = lerp(410, 110, t) - Math.sin(t * Math.PI) * 60;
+      const spread = lerp(85, 14, t);
+      return { x: x + (rnd() - 0.5) * spread, y: y + (rnd() - 0.5) * spread, t, life: 50 + rnd() * 40 };
+    }
+  }
+}
+
+function field(p) {  // returns velocity for a particle
+  switch (kind) {
+    case "board": {
+      const dx = HUB.x - p.x, dy = HUB.y - p.y, d = Math.hypot(dx, dy) + 1e-3;
+      const inward = d > 130 ? 1.6 : 0.2, swirl = d > 130 ? 0.9 : 2.2;
+      return { vx: (dx / d) * inward + (-dy / d) * swirl, vy: (dy / d) * inward + (dx / d) * swirl };
+    }
+    case "tasks": {
+      const gate = Math.sin(p.x / 140) * 0.6;
+      const slow = p.x > 1080 ? Math.max(0.15, 1 - (p.x - 1080) / 90) : 1;   // they pile up at the end
+      return { vx: (2.2 + p.lane * 0.15) * slow, vy: gate * 0.5 * slow + (130 + p.lane * 60 - p.y) * 0.05 };
+    }
+    case "questions": {
+      const dx = p.x - RING.x, dy = p.y - RING.y, d = Math.hypot(dx, dy) + 1e-3;
+      const a = Math.atan2(dy, dx);
+      // stop before the gap so the loop stays open
+      const nextA = a + 0.02;
+      if (nextA > -0.35 && nextA < 0.45) return { vx: 0, vy: 0 };
+      return { vx: -Math.sin(a) * 1.8 + (RING.r - d) * 0.02 * Math.cos(a), vy: Math.cos(a) * 1.8 + (RING.r - d) * 0.02 * Math.sin(a) };
+    }
+    case "agents": {
+      if (p.traveler) {
+        const target = p.target || (p.target = AGENT_HUBS[Math.floor(rnd() * AGENT_HUBS.length)]);
+        const dx = target.x - p.x, dy = target.y - p.y, d = Math.hypot(dx, dy) + 1e-3;
+        return { vx: (dx / d) * 2.4, vy: (dy / d) * 2.4 };
+      }
+      const dx = p.x - p.hub.x, dy = p.y - p.hub.y, d = Math.hypot(dx, dy) + 1e-3;
+      return { vx: -dy / d * 1.6 + (60 - d) * 0.01 * dx / d, vy: dx / d * 1.6 + (60 - d) * 0.01 * dy / d };
+    }
+    case "status": {
+      const t = Math.min(1, Math.max(0, (p.x - 110) / 530));
+      const slope = (-300 / 530) - Math.cos(t * Math.PI) * Math.PI * 60 / 530;
+      return { vx: 1.8, vy: slope * 1.8 };
+    }
+  }
+}
+
+// ---------- draw trails ----------
+g.globalCompositeOperation = "lighter";
+const particles = [];
+const N = { board: 520, tasks: 420, questions: 360, agents: 420, status: 380 }[kind];
+for (let i = 0; i < N; i++) particles.push(spawn());
+for (const p of particles) {
+  let x = p.x, y = p.y;
+  const steps = Math.floor(p.life);
+  g.lineWidth = 1.1;
+  for (let s = 0; s < steps; s++) {
+    const v = field({ ...p, x, y });
+    const nx = x + v.vx, ny = y + v.vy;
+    const fade = s / steps;
+    g.strokeStyle = rgba(ACCENT, 0.035 + fade * 0.07);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(nx, ny); g.stroke();
+    x = nx; y = ny;
+    if (v.vx === 0 && v.vy === 0) break;
+  }
+  p.ex = x; p.ey = y;
+}
+
+// ---------- constellation lines between nearby heads ----------
+let links = 0;
+for (let i = 0; i < particles.length && links < 700; i++) {
+  for (let j = i + 1; j < particles.length && links < 700; j++) {
+    const a = particles[i], b = particles[j];
+    const d = Math.hypot(a.ex - b.ex, a.ey - b.ey);
+    if (d < 46) {
+      g.strokeStyle = rgba(LINE, 0.10 * (1 - d / 46));
+      g.lineWidth = 0.8;
+      g.beginPath(); g.moveTo(a.ex, a.ey); g.lineTo(b.ex, b.ey); g.stroke();
+      links++;
+    }
+  }
+}
+
+// ---------- glowing heads ----------
+function glow(x, y, r, c, a) {
+  const grd = g.createRadialGradient(x, y, 0, x, y, r * 5);
+  grd.addColorStop(0, rgba(c, a)); grd.addColorStop(0.25, rgba(c, a * 0.35)); grd.addColorStop(1, rgba(c, 0));
+  g.fillStyle = grd; g.beginPath(); g.arc(x, y, r * 5, 0, 7); g.fill();
+  g.fillStyle = rgba([255, 250, 235], Math.min(1, a + 0.3)); g.beginPath(); g.arc(x, y, r * 0.55, 0, 7); g.fill();
+}
+for (const p of particles) {
+  const near = kind === "board" ? 1 - Math.min(1, Math.hypot(p.ex - HUB.x, p.ey - HUB.y) / 700) : 0.6;
+  const progress = kind === "tasks" ? Math.min(1, Math.max(0, p.ex / 1150)) : 1;
+  const r = (1.2 + rnd() * 2.2 + near * 1.2) * (kind === "status" ? 0.8 : 1);
+  glow(p.ex, p.ey, r, ACCENT, (0.25 + rnd() * 0.35) * (0.5 + 0.5 * progress));
+}
+// focal points
+if (kind === "board") glow(HUB.x, HUB.y, 9, ACCENT, 0.95);
+if (kind === "agents") for (const h of AGENT_HUBS) glow(h.x, h.y, 6, ACCENT, 0.9);
+if (kind === "status") glow(640, 110, 5, ACCENT, 0.7);
+if (kind === "questions") {  // the lone particle in the gap
+  const a = 0.05, r = RING.r;
+  glow(RING.x + Math.cos(a) * r, RING.y + Math.sin(a) * r, 7, [255, 245, 225], 0.95);
+}
+g.globalCompositeOperation = "source-over";
+
+// ---------- the word ----------
+g.font = '600 66px "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif';
+g.textAlign = "right"; g.textBaseline = "middle";
+g.fillStyle = "rgba(255,255,255,0.14)"; g.fillText(LABEL, 1402, 254);  // soft echo
+g.fillStyle = "rgba(255,255,255,0.92)"; g.fillText(LABEL, 1400, 250);
+document.title = "done";
+</script>
+</body>
+</html>
