@@ -1,3 +1,4 @@
+import json
 import os
 
 from typer.testing import CliRunner
@@ -53,6 +54,9 @@ def test_template_copies(tmp_path):
     assert (dest / "AGENTS.md").exists() and (dest / ".swarm" / "config.yaml").exists()
     assert (dest / "scripts" / "verify_fast.sh").exists()
     assert os.access(dest / "scripts" / "verify_fast.sh", os.X_OK)
+    assert (dest / ".claude" / "skills" / "test-driven-development" / "SKILL.md").exists()
+    assert (dest / ".agents" / "skills").is_symlink()   # Codex reads .agents/skills; one source of truth
+    assert (dest / ".agents" / "skills" / "verification-before-completion" / "SKILL.md").exists()
 
 
 def test_unknown_host_is_a_clean_error(project_dir):
@@ -100,3 +104,18 @@ def test_assign_defaults_model_to_the_tasks_tier(project_dir):
     cli_mod.make_board = lambda cfg, memory=False: board
     r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "assign", "T-001", "--agent", "codex-a"])
     assert r.exit_code == 0 and board.get_task("T-001").model == "gpt-6-astra" and board.get_task("T-001").effort == "high"
+
+
+def test_doctor_checks_required_plugins(cfg):
+    cfg.plugins_required = ["frontend-design", "humanizer"]
+
+    class R:
+        ok, err = True, ""
+        out = json.dumps([{"id": "frontend-design@claude-plugins-official", "enabled": True, "installPath": "/x"},
+                          {"id": "other@m", "enabled": True, "installPath": "/y"}])
+
+    checks = run_checks(cfg, "host-a", offline=True, notion_token="", which=lambda n: f"/usr/bin/{n}",
+                        run=lambda args, cwd, timeout=60: R())
+    names = {c.name: c for c in checks}
+    assert names["plugin:frontend-design"].ok and not names["plugin:humanizer"].ok
+    assert "swarm tools install" in names["plugin:humanizer"].detail

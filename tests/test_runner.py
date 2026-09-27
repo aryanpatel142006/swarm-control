@@ -6,6 +6,7 @@ from swarm.board.memory import InMemoryBoard
 from swarm.models import AgentRow, RunResult, Status, Task, Usage, utcnow
 from swarm.policy import glob_match, in_scope, needs_review
 from swarm.runner import Runner, SyncExecutor
+from swarm.tools import PluginInfo
 from swarm.usage import Ledger
 from swarm.workspace import CmdResult, Workspace
 
@@ -365,3 +366,39 @@ def test_runner_passes_mcp_servers_by_task_type(cfg, git_repo, tmp_path):
     r.run_task(ready_task(board, type="frontend", agent="claude-a", model="sonnet"))
     r.run_task(ready_task(board, type="backend", agent="claude-a", model="sonnet"))
     assert adapter.specs[0].mcp == ["magic"] and adapter.specs[1].mcp == []
+
+
+def test_runner_ensures_plugins_and_passes_tools_to_the_prompt(cfg, git_repo, tmp_path):
+    cfg.plugins_required = ["superpowers"]
+    cfg.plugins_by_type = {"frontend": ["frontend-design"]}
+    cfg.skills_by_type = {"frontend": ["frontend-design"]}
+    cfg.mcp_by_type = {"frontend": ["magic"]}
+    cfg.mcp_by_importance = {"critical": ["context7"]}
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "ok"})
+    ensured = []
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    r.ensure_plugins = lambda names, enable=True: ensured.append((list(names), enable)) or []
+    r.installed_plugins = lambda: {"frontend-design": PluginInfo("frontend-design", "frontend-design@m", False,
+                                                                 "/cache/fd/1"),
+                                   "humanizer": PluginInfo("humanizer", "humanizer@h", True, "/cache/h/3")}
+    cfg.mcp_servers = {"magic": {"type": "http", "url": "https://magic/mcp"}}
+    ready_task(board, type="frontend", importance="critical", scope=["src/**"], agent="claude-a", model="sonnet")
+    r.tick()
+    assert ensured == [(["superpowers"], True), (["frontend-design"], False)]
+    assert adapter.specs[0].plugin_dirs == ["/cache/fd/1"]
+    assert adapter.specs[0].settings == {"enabledPlugins": {"humanizer@h": False}}
+    assert adapter.specs[0].mcp == ["magic", "context7"]
+    assert adapter.specs[0].mcp_servers == {"magic": {"type": "http", "url": "https://magic/mcp"}}
+    assert "## Tools for this task" in adapter.prompts[0] and "frontend-design" in adapter.prompts[0]
+    assert "claude plugin install" in adapter.prompts[0]
+
+
+def test_runner_skips_plugin_setup_for_non_claude_agents(cfg, git_repo, tmp_path):
+    cfg.plugins_required = ["superpowers"]
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "ok"})
+    ensured = []
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    r.ensure_plugins = lambda names, enable=True: ensured.append(list(names)) or []
+    ready_task(board, type="backend", agent="codex-a", scope=["src/**"])
+    r.tick()
+    assert ensured == [] and adapter.specs

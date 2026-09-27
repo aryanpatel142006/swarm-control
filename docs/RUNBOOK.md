@@ -8,7 +8,7 @@
 4. One person: create the Notion parent page, add the connection to it (••• → Add connections), invite the teammate as a guest.
 5. Instantiate the project: `swarm template ../<project> && cd ../<project> && git init && gh repo create ...` Edit `.swarm/config.yaml` (agents, hosts, models). Commit and push.
 6. `swarm init --parent-page <id>` once; commit `.swarm/notion.yaml`.
-7. `swarm doctor` on both laptops, then `swarm doctor --smoke <agent>` for every agent you will use. An agent whose smoke fails is disabled: remove it from config or fix the CLI.
+7. `swarm tools --install` on both laptops (installs the plugins in config and Playwright's Chromium). A Codex laptop also registers the MCP servers named in config once: `codex mcp add context7 -- npx -y @upstash/context7-mcp` and `codex mcp add playwright -- npx @playwright/mcp@latest --headless --isolated`, then `enabled = false` on each in `~/.codex/config.toml` (the runner enables them per run). Then `swarm doctor` on both laptops, then `swarm doctor --smoke <agent>` for every agent you will use. An agent whose smoke fails is disabled: remove it from config or fix the CLI.
 8. Both laptops: plug in power and disable sleep (System Settings → Battery → Options → Prevent automatic sleeping on power adapter). `caffeinate -dims` in front of every swarm command is the belt to that suspender.
 
 ## 0:00–0:45 — plan

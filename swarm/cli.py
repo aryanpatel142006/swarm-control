@@ -103,6 +103,56 @@ def doctor(offline: bool = typer.Option(False, "--offline", help="skip network c
 
 
 @app.command()
+def tools(install: bool = typer.Option(False, "--install", help="install missing plugins and enable disabled ones")):
+    """Show the plugins, skills and MCP servers the swarm uses; --install sets this laptop up."""
+    from .tools import all_mcp_servers, ensure_playwright_browser, ensure_plugins, installed_plugins, plugin_ref
+    cfg = _cfg()
+    wanted = list(dict.fromkeys(list(cfg.plugins_required)
+                                + [p for names in cfg.plugins_by_type.values() for p in names]))
+    if install:
+        if cfg.plugins_required:
+            missing = ensure_plugins(cfg.plugins_required, log=console.print, enable=True)
+            if missing:
+                console.print(f"[red]still unavailable: {', '.join(missing)}[/red]")
+        by_type = [p for p in wanted if p not in cfg.plugins_required]
+        if by_type:
+            missing = ensure_plugins(by_type, log=console.print, enable=False)
+            if missing:
+                console.print(f"[red]still unavailable: {', '.join(missing)}[/red]")
+        mcp_names = {m for v in cfg.mcp_by_type.values() for m in v} | {m for v in cfg.mcp_by_importance.values() for m in v}
+        if "playwright" in mcp_names or any(plugin_ref(p)[0] == "playwright" for p in wanted):
+            ensure_playwright_browser(log=console.print)
+    have = installed_plugins()
+    table = Table("plugin", "state", "used for")
+    uses = {p: [t for t, names in cfg.plugins_by_type.items() if p in names] for p in wanted}
+    for name in wanted:
+        short, full = plugin_ref(name)
+        info = have.get(short)
+        state_txt = ("[green]enabled[/green]" if info and info.enabled else
+                     "[yellow]disabled[/yellow]" if info else "[red]not installed[/red]")
+        table.add_row(full, state_txt, ", ".join(uses[name]) or "every task type")
+    console.print(table)
+    servers = {**all_mcp_servers(), **cfg.mcp_servers}
+    t2 = Table("MCP server", "known on this laptop", "task types", "importance")
+    names = list(dict.fromkeys([m for v in cfg.mcp_by_type.values() for m in v]
+                               + [m for v in cfg.mcp_by_importance.values() for m in v]
+                               + [m for a in cfg.agents.values() for m in a.mcp]))
+    for m in names:
+        t2.add_row(m, "[green]yes[/green]" if m in servers else "[red]no[/red]",
+                   ", ".join(t for t, v in cfg.mcp_by_type.items() if m in v),
+                   ", ".join(i for i, v in cfg.mcp_by_importance.items() if m in v))
+    console.print(t2)
+    if cfg.skills_by_type or cfg.skills_by_importance:
+        t3 = Table("skill", "task types", "importance")
+        skills = list(dict.fromkeys([x for v in cfg.skills_by_type.values() for x in v]
+                                    + [x for v in cfg.skills_by_importance.values() for x in v]))
+        for sk in skills:
+            t3.add_row(sk, ", ".join(t for t, v in cfg.skills_by_type.items() if sk in v),
+                       ", ".join(i for i, v in cfg.skills_by_importance.items() if sk in v))
+        console.print(t3)
+
+
+@app.command()
 def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page id that holds the databases")):
     """Create the Notion databases, board views, and status page; save ids to .swarm/notion.yaml."""
     from .board.notion import NotionBoard, NotionClient
@@ -349,7 +399,7 @@ def template(dest: Path):
     """Copy the hackathon-base template into a new directory."""
     if dest.exists() and any(dest.iterdir()):
         raise typer.Exit(code=_fail(f"{dest} is not empty"))
-    shutil.copytree(TEMPLATE_DIR, dest, dirs_exist_ok=True)
+    shutil.copytree(TEMPLATE_DIR, dest, dirs_exist_ok=True, symlinks=True)
     for script in (dest / "scripts").glob("*.sh"):
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
     console.print(f"template copied to {dest}. Next: edit .swarm/config.yaml, then `swarm doctor`.")

@@ -34,6 +34,8 @@ class CodexAdapter(Adapter):
         common = git_common_dir(spec.cwd)
         if common and sandbox != "danger-full-access":
             argv += ["--add-dir", common]   # a worktree's index and locks live under the main repo's .git
+        for name in spec.mcp:   # servers are registered once with `codex mcp add` (enabled = false) and switched on per run
+            argv += ["-c", f"mcp_servers.{name}.enabled=true"]
         if spec.schema:
             schema_path = spec.cwd / ".swarm-run" / "schema.json"
             schema_path.parent.mkdir(exist_ok=True)

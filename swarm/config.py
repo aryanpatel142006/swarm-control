@@ -106,10 +106,27 @@ class Config:
     planner: RoleConfig | None
     notion: NotionIds
     mcp_by_type: dict[str, list[str]] = field(default_factory=dict)
+    mcp_by_importance: dict[str, list[str]] = field(default_factory=dict)
+    skills_by_type: dict[str, list[str]] = field(default_factory=dict)
+    skills_by_importance: dict[str, list[str]] = field(default_factory=dict)
+    plugins_required: list[str] = field(default_factory=list)
+    plugins_by_type: dict[str, list[str]] = field(default_factory=dict)
+    mcp_servers: dict = field(default_factory=dict)   # inline MCP server definitions, override discovered ones
 
-    def mcp_for(self, task_type: str, agent: AgentConfig) -> list[str]:
-        """MCP servers a worker run gets: the task type's list, then the agent's own, no duplicates."""
-        return list(dict.fromkeys(list(self.mcp_by_type.get(task_type, [])) + list(agent.mcp)))
+    def mcp_for(self, task_type: str, agent: AgentConfig, importance: str | None = None) -> list[str]:
+        """MCP servers a worker run gets: the task type's, the importance tier's, then the agent's own."""
+        return list(dict.fromkeys(list(self.mcp_by_type.get(task_type, []))
+                                  + list(self.mcp_by_importance.get(importance or "", []))
+                                  + list(agent.mcp)))
+
+    def skills_for(self, task_type: str, importance: str | None = None) -> list[str]:
+        """Skills the worker is told to invoke for this task type and importance tier."""
+        return list(dict.fromkeys(list(self.skills_by_type.get(task_type, []))
+                                  + list(self.skills_by_importance.get(importance or "", []))))
+
+    def plugins_for(self, task_type: str) -> list[str]:
+        """Plugins that must be installed on the host before a task of this type runs."""
+        return list(dict.fromkeys(list(self.plugins_required) + list(self.plugins_by_type.get(task_type, []))))
 
     def agents_on_host(self, host: str) -> list[AgentConfig]:
         return [a for a in self.agents.values() if a.host == host]
@@ -222,8 +239,18 @@ def load_config(path: Path | str) -> Config:
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),
         planner=_role(raw.get("planner"), agents, "planner"),
         notion=NotionIds(**{k: str(v) for k, v in notion_raw.items() if k in NotionIds.__dataclass_fields__}),
-        mcp_by_type={k: [str(m) for m in (v or [])] for k, v in (raw.get("mcp_by_type") or {}).items()},
+        mcp_by_type=_str_lists(raw.get("mcp_by_type")),
+        mcp_by_importance=_str_lists(raw.get("mcp_by_importance")),
+        skills_by_type=_str_lists(raw.get("skills_by_type")),
+        skills_by_importance=_str_lists(raw.get("skills_by_importance")),
+        plugins_required=[str(x) for x in (raw.get("plugins_required") or [])],
+        plugins_by_type=_str_lists(raw.get("plugins_by_type")),
+        mcp_servers={str(k): dict(v or {}) for k, v in (raw.get("mcp_servers") or {}).items()},
     )
+
+
+def _str_lists(block) -> dict[str, list[str]]:
+    return {str(k): [str(m) for m in (v or [])] for k, v in (block or {}).items()}
 
 
 def save_notion_ids(cfg: Config, ids: dict) -> Path:

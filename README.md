@@ -72,6 +72,15 @@ swarm status                                       # any time
 
 `agents.<name>.strengths` is a 1–5 score per task type; the highest wins, ties go to the shortest queue then the cheaper provider. `routing.importance_to_tier` maps importance to a model tier; `type_model_overrides` encodes evidence-based exceptions (Opus 5.5 outranks Fable 5.1 on frontend, so critical frontend runs Opus). Override any task with `swarm assign`, or drag its card in Notion.
 
+## Toolbox (plugins, skills, MCP servers)
+
+Workers get the tools their task type needs and nothing else, on both CLIs:
+
+- **Plugins (Claude Code).** `plugins_required` are installed and enabled on every laptop (`swarm tools --install`, checked by `swarm doctor`). `plugins_by_type` are installed but may stay disabled globally: the runner loads them for one run with `--plugin-dir`. Every other plugin enabled on that laptop is switched off for the run with `--settings`, which halves a worker's base context (measured 7.6k → 3.9k tokens).
+- **Skills.** The template vendors seven skills into `.claude/skills` (TDD, verification, debugging, Hugging Face model choice, local inference, transformers.js); `.agents/skills` symlinks there for Codex. `skills_by_type` / `skills_by_importance` name the ones the prompt tells the worker to invoke.
+- **MCP servers.** `mcp_by_type` / `mcp_by_importance` / `agents.<name>.mcp` pick servers per run. Claude gets exactly those via `--mcp-config … --strict-mcp-config` (definitions come from `claude mcp list`, installed plugins, or inline `mcp_servers`); Codex gets `-c mcp_servers.<name>.enabled=true` for servers registered once with `codex mcp add`.
+- **Critical tasks** are told they may install a further official plugin mid-run and must log it in `docs/decisions/<id>.md`; promote it to config when it earns its keep. `swarm tools` shows the whole picture for this laptop.
+
 ## Adding a provider
 
 Use `provider: generic` with a `command_template` such as `mycli --prompt-file {prompt_file} --model {model} --cwd {cwd}`. The model must write its report to `.swarm-run/report.json`. For a first-class adapter, subclass `swarm.adapters.base.Adapter`.

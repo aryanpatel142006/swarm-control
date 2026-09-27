@@ -16,6 +16,7 @@ from .config import Config
 from .models import AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
+from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
 from .report import REPORT_SCHEMA, debts_markdown, decisions_markdown, parse_report, report_to_markdown
 from .usage import Ledger
 from .workspace import Workspace
@@ -66,6 +67,8 @@ class Runner:
         self.adapter_factory, self.sleep, self.now, self.log = adapter_factory, sleep, now, log
         self.agents = {a.name: a for a in cfg.agents_on_host(host)}
         self.rules_text = rules_text if rules_text is not None else load_rules()
+        self.ensure_plugins = lambda names, enable=True: ensure_plugins(names, log=self.log, enable=enable)
+        self.installed_plugins = installed_plugins
         self.log_dir = Path(log_dir) if log_dir else Path.home() / ".swarm" / cfg.project / "runs"
         self.lock = threading.Lock()
         self.active: dict[str, set[str]] = {name: set() for name in self.agents}
@@ -215,6 +218,24 @@ class Runner:
             self.recover_orphans()
 
     # ----- one task -----
+    def _setup_plugins(self, task: Task) -> tuple[list[str], dict | None]:
+        """Required plugins: installed + enabled. Task-type plugins: installed, loaded for this run only.
+        Every other plugin enabled on this laptop is switched off for the run (context stays lean)."""
+        required = list(self.cfg.plugins_required)
+        by_type = [p for p in self.cfg.plugins_by_type.get(task.type, []) if p not in required]
+        unavailable = []
+        if required:
+            unavailable += self.ensure_plugins(required, True)
+        if by_type:
+            unavailable += self.ensure_plugins(by_type, False)
+        if unavailable:
+            self.log(f"[{task.id}] plugins unavailable on this host: {', '.join(unavailable)}")
+        installed = self.installed_plugins()
+        dirs = plugin_dirs(by_type, installed) if by_type else []
+        if dirs:
+            self.log(f"[{task.id}] loading task plugins: {', '.join(Path(d).parent.name for d in dirs)}")
+        return dirs, plugin_settings(installed, required + by_type)
+
     def run_task(self, task: Task) -> Outcome:
         agent_cfg = self.agents[task.agent]
         prev_status = task.status
@@ -233,8 +254,15 @@ class Runner:
                 dep = self.board.get_task(d)
                 deps[d] = dep.title if dep else ""
             structured = agent_cfg.provider in STRUCTURED_PROVIDERS
+            mcp = self.cfg.mcp_for(task.type, agent_cfg, task.importance)
+            skills = self.cfg.skills_for(task.type, task.importance)
+            dirs: list[str] = []
+            settings = None
+            if agent_cfg.provider == "claude":
+                dirs, settings = self._setup_plugins(task)
+            inline = {n: self.cfg.mcp_servers[n] for n in mcp if n in self.cfg.mcp_servers}
             prompt = compile_prompt(task, self.cfg, rules_text=self.rules_text, deps_summaries=deps,
-                                    structured_output_supported=structured)
+                                    structured_output_supported=structured, mcp=mcp, skills=skills)
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             limit = self.cfg.limit_for(task.size)
@@ -243,7 +271,8 @@ class Runner:
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=limit.turns,
                            budget_usd=limit.budget_usd, timeout_s=limit.minutes * 60, cwd=wt,
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
-                           extra_args=list(agent_cfg.extra_args), mcp=self.cfg.mcp_for(task.type, agent_cfg))
+                           extra_args=list(agent_cfg.extra_args), mcp=mcp, plugin_dirs=dirs,
+                           mcp_servers=inline, settings=settings)
             result = self.adapter_factory(agent_cfg).run(spec)
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,

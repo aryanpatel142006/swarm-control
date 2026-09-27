@@ -43,11 +43,45 @@ routing:
     # GPT-6 Astra #2, Fable 5.1 #3. So critical frontend runs Opus, and Fable is kept for long-horizon work.
     claude: { frontend: { best: opus } }
 
-# MCP servers a worker may use, by task type (names from that laptop's `claude mcp list`). Off by default:
-# every server adds its tool schemas to each run's context, so give them only to the tasks they help.
+# ---- Toolbox: plugins, skills and MCP servers -------------------------------------------------------------
+# `swarm tools --install` sets a laptop up; the runner also installs a task's plugins right before its first
+# run, and `swarm doctor` checks them. Names are official-marketplace plugins (`name` = name@claude-plugins-official).
+# Cost model (measured): every plugin ENABLED on a laptop adds its skill descriptions to each run, so the runner
+# switches off everything not listed here for the run (--settings), which halves a worker's base context.
+# plugins_required are enabled everywhere; plugins_by_type may stay disabled globally: the runner loads them
+# for that run alone (--plugin-dir). Skills vendored in .claude/skills (TDD, verification, debugging, HF local
+# models, transformers.js) load in every run of this repo for both Claude and Codex, no plugin needed.
+plugins_required: [frontend-design, context7]    # ~80 tok always-on + the docs-lookup MCP server (used only when named below)
+plugins_by_type:
+  frontend: [modern-web-guidance, playwright]   # current web-platform practices; browser checks (chromium installed by `swarm tools --install`)
+
+# Skills the worker is told to invoke (Skill tool) before the relevant work; it also auto-discovers the rest.
+skills_by_type:
+  frontend: [frontend-design, modern-web-guidance]
+  backend:  [test-driven-development]
+  ml:       [huggingface-best, huggingface-local-models]
+  tests:    [test-driven-development]
+skills_by_importance:
+  critical: [verification-before-completion]     # no "done" without evidence
+  high:     [verification-before-completion]
+
+# MCP servers a run gets (names from `swarm tools`: user-scope `claude mcp list`, servers shipped by installed
+# plugins, and mcp_servers below). Off by default; Claude defers tool schemas (tool search) so a server costs
+# little context, but Codex loads every tool definition, so keep this to one or two per type.
 mcp_by_type:
-  frontend: []              # e.g. [magic, playwright] for UI generation and live-browser checks
-  research: []              # e.g. [context7] for current library docs
+  frontend: [context7, playwright]   # playwright: the worker checks its own UI in a headless browser
+  backend:  [context7]
+  ml:       [context7]
+  research: [context7]
+mcp_by_importance:
+  critical: [context7]               # critical work never guesses at an API
+mcp_servers:                         # inline definitions win over discovered ones
+  playwright: {command: npx, args: ["@playwright/mcp@latest", "--headless", "--isolated"]}
+# Codex hosts: register the same names once with `codex mcp add context7 -- npx -y @upstash/context7-mcp`
+# (and playwright), set `enabled = false` in ~/.codex/config.toml; the runner enables them per run.
+
+# Critical tasks may also install a further official plugin themselves (the prompt says how) and must log it
+# in docs/decisions/<id>.md, so you can promote it to plugins_by_type / skills_by_type for the whole task type.
 
 docs_by_type:               # what gets inlined into a worker's prompt; everything else is referenced by path
   _all:        [PLAN.md#summary]   # AGENTS.md is auto-loaded by every CLI (via CLAUDE.md / GEMINI.md), never inline it

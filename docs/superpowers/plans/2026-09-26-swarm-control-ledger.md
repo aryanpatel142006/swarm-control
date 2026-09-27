@@ -92,3 +92,14 @@ Final: minor (deferred): no threaded-runner test (all tests use SyncExecutor)
 - FOUND: two equal Claude agents → all queued work routed to one while the other idled. FIXED: serve rebalances one queued non-critical task per tick onto an idle agent at least as strong. (test_rebalance_moves_queued_work_to_idle_equal_agent)
 - FOUND: answering "cut" to a blocking question re-ran the task. FIXED. (test_relay_cut_answer_cuts_the_task)
 - Ruling: rebalance lets every idle equal-strength agent steal one task per tick (test adjusted from 1 to 2 moves) — cost if wrong: slightly more churn on a busy board.
+
+## Toolbox (Sep 27, 2026)
+
+Rulings, all measured on this laptop with Claude Code 2.1 headless:
+- Plugin skills are invocable from `claude -p` via the Skill tool (frontend-design smoke: first line returned verbatim).
+- `--plugin-dir <installPath>` loads a globally disabled plugin for one run (huggingface-skills smoke: "Unknown skill" without, skill text with). So `plugins_by_type` stay disabled globally and load per run.
+- `--settings '{"enabledPlugins":{...:false}}'` removes a plugin's skills and hook from a run; base context 7,589 → 3,884 cache-write tokens when the laptop's personal plugins are switched off. The runner does this for every plugin not in `plugins_required` + `plugins_by_type[type]`.
+- Whole `superpowers` is wrong for headless workers (brainstorming skill wants a human, SessionStart hook injects ~1.1k tokens): vendored `test-driven-development`, `verification-before-completion`, `systematic-debugging` into `template/.claude/skills` (MIT). Same for 4 of the 25 `huggingface-skills` (Apache-2.0); the full plugin is ~5.1k always-on tokens.
+- Plugin MCP manifests come in two shapes: `{"mcpServers": {...}}` (context7) and flat `{"name": {...}}` (playwright); both parsed. Inline `mcp_servers` in config win (playwright runs `--headless --isolated`).
+- Codex: skills from `.agents/skills` (symlink to `.claude/skills`), MCP per run via `-c mcp_servers.<name>.enabled=true`; servers registered once with `codex mcp add`, `enabled = false`. Untested on a real Codex laptop (none here).
+- Not adopted: filesystem/memory/sequential-thinking MCPs (redundant), github MCP (`gh` is cheaper), magic (34 tools), feature-dev/ralph-loop (harness owns the loop).

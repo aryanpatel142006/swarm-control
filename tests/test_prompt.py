@@ -37,3 +37,20 @@ def test_compile_prompt_contents(cfg):
 
 def test_load_rules():
     assert "Worker rules" in load_rules()
+
+
+def test_prompt_lists_tools_and_allows_install_for_critical(cfg):
+    cfg.mcp_by_type = {"frontend": ["magic"]}
+    cfg.skills_by_type = {"frontend": ["frontend-design"]}
+    t = Task(id="T-020", title="Hero section", type="frontend", importance="normal", size="M")
+    p = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                       mcp=["magic"], skills=["frontend-design"])
+    assert "## Tools for this task" in p and "magic" in p and "frontend-design" in p
+    assert "plugin install" not in p
+    t.importance = "critical"
+    p2 = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                        mcp=["magic"], skills=["frontend-design"])
+    assert "claude plugin install" in p2
+    t.importance = "normal"
+    p3 = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True)
+    assert "## Tools for this task" not in p3

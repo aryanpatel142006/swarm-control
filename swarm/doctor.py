@@ -63,6 +63,19 @@ def run_checks(cfg: Config, host: str | None, *, offline: bool = False, notion_t
             detail = text.splitlines()[0] if text else path
         checks.append(Check(f"cli:{a.name} ({a.provider})", bool(path),
                             detail + (" [experimental adapter]" if a.experimental else "")))
+    wanted = list(dict.fromkeys(list(cfg.plugins_required)
+                                + [p for names in cfg.plugins_by_type.values() for p in names]))
+    if wanted and any(a.provider == "claude" for a in agents):
+        from .tools import installed_plugins, plugin_ref
+        have = installed_plugins(run=run) if which("claude") else {}
+        for name in wanted:
+            short, full = plugin_ref(name)
+            info = have.get(short)
+            ok = bool(info and info.enabled)
+            detail = (f"{info.id} enabled" if ok else
+                      f"{full} " + ("installed but disabled" if info else "not installed")
+                      + "; run `swarm tools install`")
+            checks.append(Check(f"plugin:{short}", ok, detail))
     for label, rel in (("verify_fast", cfg.verify.fast), ("verify_full", cfg.verify.full)):
         if rel:
             p = cfg.repo_root / rel

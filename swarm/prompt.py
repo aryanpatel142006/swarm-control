@@ -56,8 +56,30 @@ def select_docs(cfg: Config, task_type: str) -> list[str]:
     return list(dict.fromkeys(refs))
 
 
+def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
+    """Tell the worker which MCP servers are live and which skills to invoke; critical tasks may add more."""
+    if not mcp and not skills and task.importance != "critical":
+        return []
+    parts = ["", "## Tools for this task", ""]
+    if mcp:
+        parts.append("- MCP servers enabled for this run: " + ", ".join(mcp)
+                     + ". Use them (docs lookup, browser checks, component search) instead of guessing.")
+    if skills:
+        parts.append("- Skills to invoke before you start the relevant work: "
+                     + ", ".join(f"`{s}`" for s in skills)
+                     + ". Invoke them with the Skill tool (or `/<name>`) and follow them.")
+    if task.importance == "critical":
+        parts.append("- This task is critical. If another official plugin or skill would clearly raise the "
+                     "quality of the result, install it: `claude plugin install <name>@claude-plugins-official` "
+                     "(`claude plugin list --available --json` lists them). A plugin installed mid-run is not "
+                     "loaded into this session, so read its SKILL.md under ~/.claude/plugins/cache/ and follow "
+                     "it directly. Record what you installed and why in docs/decisions/<task id>.md so the "
+                     "orchestrator can make it a default for this task type.")
+    return parts
+
+
 def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: dict[str, str],
-                   structured_output_supported: bool) -> str:
+                   structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = ()) -> str:
     parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", "## Task", "",
              f"- ID: {task.id}", f"- Title: {task.title}", f"- Type: {task.type}",
              f"- Importance: {task.importance}", f"- Size: {task.size}",
@@ -71,6 +93,7 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
               task.acceptance.strip() or "(none given; make it work and test it)"]
     if task.feedback.strip():
         parts += ["", "## Feedback from the previous attempt (address every item)", "", task.feedback.strip()]
+    parts += tools_section(task, list(mcp), list(skills))
     parts += ["", "## Project context", ""]
     for ref in select_docs(cfg, task.type):
         text = read_doc(cfg.repo_root, ref)

@@ -163,3 +163,32 @@ def test_claude_loads_only_requested_mcp_servers(tmp_path):
     argv, _ = a.build_command(spec(tmp_path, mcp=["magic", "nope"]))
     cfg = json.loads(argv[argv.index("--mcp-config") + 1])
     assert cfg == {"mcpServers": {"magic": known["magic"]}} and "--strict-mcp-config" in argv
+
+
+def test_claude_loads_task_plugins_with_plugin_dir(tmp_path):
+    argv, _ = ClaudeAdapter(mcp_lookup=dict).build_command(
+        spec(tmp_path, plugin_dirs=["/cache/hf/1.0", "/cache/mwg/2"]))
+    assert argv[argv.index("--plugin-dir") + 1] == "/cache/hf/1.0"
+    assert argv.count("--plugin-dir") == 2 and "/cache/mwg/2" in argv
+    argv2, _ = ClaudeAdapter(mcp_lookup=dict).build_command(spec(tmp_path))
+    assert "--plugin-dir" not in argv2
+
+
+def test_claude_passes_settings_and_inline_mcp_definitions(tmp_path):
+    inline = {"playwright": {"command": "npx", "args": ["@playwright/mcp@latest", "--headless"]}}
+    a = ClaudeAdapter(mcp_lookup=lambda: {"playwright": {"command": "old"}, "context7": {"type": "http", "url": "u"}})
+    argv, _ = a.build_command(spec(tmp_path, mcp=["playwright", "context7"], mcp_servers=inline,
+                                   settings={"enabledPlugins": {"x@m": False}}))
+    cfg = json.loads(argv[argv.index("--mcp-config") + 1])
+    assert cfg["mcpServers"]["playwright"] == inline["playwright"] and "context7" in cfg["mcpServers"]
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"enabledPlugins": {"x@m": False}}
+    argv2, _ = ClaudeAdapter(mcp_lookup=dict).build_command(spec(tmp_path))
+    assert "--settings" not in argv2
+
+
+def test_codex_enables_requested_mcp_servers_per_run(tmp_path):
+    argv, _ = CodexAdapter().build_command(spec(tmp_path, mcp=["context7", "playwright"]))
+    assert "mcp_servers.context7.enabled=true" in argv and "mcp_servers.playwright.enabled=true" in argv
+    assert argv[argv.index("mcp_servers.context7.enabled=true") - 1] == "-c"
+    argv2, _ = CodexAdapter().build_command(spec(tmp_path))
+    assert not any(a.startswith("mcp_servers.") for a in argv2)

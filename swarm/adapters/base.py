@@ -60,6 +60,9 @@ class RunSpec:
     sandbox: str | None = None
     extra_args: list[str] = field(default_factory=list)
     mcp: list[str] = field(default_factory=list)      # MCP server names to enable for this run
+    plugin_dirs: list[str] = field(default_factory=list)  # plugins loaded for this run only (Claude --plugin-dir)
+    mcp_servers: dict = field(default_factory=dict)   # inline server definitions (config mcp_servers) by name
+    settings: dict | None = None                      # per-run settings override (Claude --settings)
 
 
 class Adapter:

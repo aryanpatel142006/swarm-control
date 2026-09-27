@@ -62,3 +62,24 @@ def test_mcp_by_type_and_agent_mcp(project_dir, sample_config_dict):
     assert cfg.agents["claude-a"].mcp == ["context7"] and cfg.agents["codex-a"].mcp == []
     assert cfg.mcp_for("frontend", cfg.agents["claude-a"]) == ["magic", "playwright", "context7"]
     assert cfg.mcp_for("backend", cfg.agents["codex-a"]) == []
+
+
+def test_skills_and_importance_mcp(project_dir, sample_config_dict):
+    sample_config_dict["mcp_by_type"] = {"frontend": ["magic"]}
+    sample_config_dict["mcp_by_importance"] = {"critical": ["context7"]}
+    sample_config_dict["skills_by_type"] = {"frontend": ["frontend-design", "impeccable"]}
+    sample_config_dict["plugins_required"] = ["frontend-design", "humanizer"]
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    a = cfg.agents["claude-a"]
+    assert cfg.mcp_for("frontend", a) == ["magic"]
+    assert cfg.mcp_for("frontend", a, importance="critical") == ["magic", "context7"]
+    assert cfg.skills_for("frontend") == ["frontend-design", "impeccable"] and cfg.skills_for("backend") == []
+    assert cfg.plugins_required == ["frontend-design", "humanizer"]
+
+
+def test_inline_mcp_server_definitions(project_dir, sample_config_dict):
+    sample_config_dict["mcp_servers"] = {"playwright": {"command": "npx", "args": ["@playwright/mcp@latest", "--headless"]}}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.mcp_servers["playwright"]["args"][-1] == "--headless"

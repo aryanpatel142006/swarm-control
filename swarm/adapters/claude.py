@@ -26,8 +26,11 @@ class ClaudeAdapter(Adapter):
     """Claude Code headless: `claude -p --output-format json` with validated structured output."""
     name = "claude"
 
-    def __init__(self, agent_cfg=None, mcp_lookup=user_mcp_servers):
+    def __init__(self, agent_cfg=None, mcp_lookup=None):
         super().__init__(agent_cfg)
+        if mcp_lookup is None:
+            from ..tools import all_mcp_servers
+            mcp_lookup = all_mcp_servers
         self.mcp_lookup = mcp_lookup
 
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
@@ -44,9 +47,13 @@ class ClaudeAdapter(Adapter):
         if spec.schema:
             argv += ["--json-schema", json.dumps(spec.schema)]
         # only the MCP servers this task type asks for; every extra server adds its tool schemas to the run's context
-        known = self.mcp_lookup() if spec.mcp else {}
+        known = {**self.mcp_lookup(), **spec.mcp_servers} if spec.mcp else {}
         chosen = {name: known[name] for name in spec.mcp if name in known}
         argv += ["--mcp-config", json.dumps({"mcpServers": chosen}), "--strict-mcp-config"]
+        for d in spec.plugin_dirs:
+            argv += ["--plugin-dir", d]
+        if spec.settings:
+            argv += ["--settings", json.dumps(spec.settings)]
         argv += list(spec.extra_args)
         return argv, spec.prompt_file.read_bytes()
 
