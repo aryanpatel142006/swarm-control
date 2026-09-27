@@ -1,0 +1,328 @@
+"""Worker loop: claim → worktree → prompt → run CLI → verify → push/PR → publish. One process per laptop."""
+from __future__ import annotations
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import timedelta
+from pathlib import Path
+from typing import Callable
+
+from .adapters import get_adapter
+from .adapters.base import RunSpec
+from .board.base import Board, claim_task
+from .config import Config
+from .models import AgentRow, Question, Report, RunResult, Status, Task, utcnow
+from .policy import in_scope, needs_review
+from .prompt import compile_prompt, load_rules
+from .report import REPORT_SCHEMA, debts_markdown, decisions_markdown, parse_report, report_to_markdown
+from .usage import Ledger
+from .workspace import Workspace
+
+STRUCTURED_PROVIDERS = {"claude", "codex"}
+ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
+RATE_LIMIT_COOLDOWN_MIN = 15
+IDLE_AFTER_S = 300
+TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
+PUBLISH_FIELDS = ["status", "attempts", "flags", "pr_url", "claim_nonce", "feedback", "last_error", "review_rounds"]
+
+
+class _Done:
+    def __init__(self, value):
+        self._v = value
+
+    def result(self):
+        return self._v
+
+
+class SyncExecutor:
+    """Runs submitted callables immediately; used in tests and --once."""
+
+    def submit(self, fn, *args, **kwargs):
+        return _Done(fn(*args, **kwargs))
+
+    def shutdown(self, wait: bool = True) -> None:
+        pass
+
+
+@dataclass
+class Outcome:
+    task: Task
+    report: Report | None
+    result: RunResult | None
+    verify_ok: bool | None
+    status: Status
+
+
+class Runner:
+    def __init__(self, cfg: Config, board: Board, host: str, ws: Workspace, *, ledger: Ledger,
+                 adapter_factory=get_adapter, sleep: Callable[[float], None] = time.sleep, now=utcnow,
+                 log=print, executor=None, rules_text: str | None = None, log_dir: Path | None = None):
+        if host not in cfg.hosts:
+            raise ValueError(f"host '{host}' is not in config.hosts")
+        self.cfg, self.board, self.host, self.ws, self.ledger = cfg, board, host, ws, ledger
+        self.adapter_factory, self.sleep, self.now, self.log = adapter_factory, sleep, now, log
+        self.agents = {a.name: a for a in cfg.agents_on_host(host)}
+        self.rules_text = rules_text if rules_text is not None else load_rules()
+        self.log_dir = Path(log_dir) if log_dir else Path.home() / ".swarm" / cfg.project / "runs"
+        self.lock = threading.Lock()
+        self.active: dict[str, set[str]] = {name: set() for name in self.agents}
+        workers = max(1, sum(a.parallel for a in self.agents.values()))
+        self.executor = executor or ThreadPoolExecutor(max_workers=workers)
+        self._last_heartbeat = None
+        self._idle_since = None
+
+    # ----- capacity -----
+    def free_slots(self, agent_name: str) -> int:
+        a = self.agents[agent_name]
+        host = self.cfg.hosts[self.host]
+        with self.lock:
+            used_agent = len(self.active[agent_name])
+            used_provider = sum(len(self.active[n]) for n, c in self.agents.items() if c.provider == a.provider)
+        cap_provider = host.max_parallel.get(a.provider, 1)
+        return max(0, min(a.parallel - used_agent, cap_provider - used_provider))
+
+    # ----- heartbeat -----
+    def heartbeat(self, force: bool = False) -> None:
+        now = self.now()
+        if (not force and self._last_heartbeat
+                and (now - self._last_heartbeat).total_seconds() < self.cfg.heartbeat_seconds):
+            return
+        self._last_heartbeat = now
+        for name, a in self.agents.items():
+            row = self.board.get_agent(name) or AgentRow(name=name)
+            row.provider, row.host, row.last_heartbeat = a.provider, self.host, now
+            with self.lock:
+                current = sorted(self.active[name])
+            if row.cooldown_until and row.cooldown_until > now:
+                row.status = "cooldown"
+            else:
+                row.status = "running" if current else "idle"
+                row.cooldown_until = None
+            row.current_task = ", ".join(current)
+            row.cost_5h_usd = self.ledger.window(name, 5, now).cost_usd or 0.0
+            self.board.upsert_agent(row)
+
+    # ----- polling -----
+    def pending_tasks(self) -> list[Task]:
+        tasks = self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED], agent=list(self.agents))
+        return [t for t in tasks if t.agent in self.agents]
+
+    def tick(self) -> int:
+        self.heartbeat()
+        dispatched = 0
+        now = self.now()
+        for task in self.pending_tasks():
+            row = self.board.get_agent(task.agent)
+            if row and row.cooldown_until and row.cooldown_until > now and task.importance != "critical":
+                continue
+            if self.free_slots(task.agent) <= 0:
+                continue
+            with self.lock:
+                if task.id in self.active[task.agent]:
+                    continue
+                self.active[task.agent].add(task.id)
+            self.executor.submit(self._guarded_run, task)
+            dispatched += 1
+        return dispatched
+
+    def _guarded_run(self, task: Task) -> None:
+        try:
+            self.run_task(task)
+        except Exception as e:  # noqa: BLE001 - a worker crash must never kill the loop
+            self.log(f"[{task.id}] runner crashed: {e!r}")
+            try:
+                fresh = self.board.get_task(task.id)
+                if fresh and fresh.status is Status.RUNNING:
+                    fresh.status, fresh.claim_nonce = Status.FAILED, ""
+                    fresh.last_error = f"runner crash: {e!r}"[:1900]
+                    fresh.attempts += 1
+                    self.board.update_task(fresh, ["status", "last_error", "claim_nonce", "attempts"])
+            except Exception as e2:  # noqa: BLE001
+                self.log(f"[{task.id}] could not record crash: {e2!r}")
+        finally:
+            with self.lock:
+                self.active.get(task.agent, set()).discard(task.id)
+
+    def loop(self, *, once: bool = False, stop: Callable[[], bool] = lambda: False) -> None:
+        self.log(f"swarm run · host={self.host} · agents={', '.join(self.agents)}")
+        while not stop():
+            n = self.tick()
+            if once:
+                break
+            now = self.now()
+            if n == 0:
+                self._idle_since = self._idle_since or now
+                idle_for = (now - self._idle_since).total_seconds()
+                self.sleep(self.cfg.idle_poll_seconds if idle_for > IDLE_AFTER_S else self.cfg.poll_seconds)
+            else:
+                self._idle_since = None
+                self.sleep(self.cfg.poll_seconds)
+        self.executor.shutdown(wait=True)
+
+    # ----- one task -----
+    def run_task(self, task: Task) -> Outcome:
+        agent_cfg = self.agents[task.agent]
+        prev_status = task.status
+        if not claim_task(self.board, task, task.agent, sleep=self.sleep):
+            self.log(f"[{task.id}] claim lost")
+            return Outcome(task, None, None, None, task.status)
+        attempt = task.attempts + 1
+        reuse = prev_status is Status.CHANGES_REQUESTED or "resume" in task.flags
+        self.log(f"[{task.id}] {task.agent} attempt {attempt} model={task.model} reuse={reuse}")
+        started = self.now()
+        wt = self.ws.provision(task.id, reuse_branch=reuse)
+        try:
+            self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            deps = {}
+            for d in task.depends_on:
+                dep = self.board.get_task(d)
+                deps[d] = dep.title if dep else ""
+            structured = agent_cfg.provider in STRUCTURED_PROVIDERS
+            prompt = compile_prompt(task, self.cfg, rules_text=self.rules_text, deps_summaries=deps,
+                                    structured_output_supported=structured)
+            pf = wt / ".swarm-run" / "prompt.md"
+            pf.write_text(prompt)
+            limit = self.cfg.limit_for(task.size)
+            model = task.model or agent_cfg.models["mid"]
+            effort = task.effort or agent_cfg.effort.get("mid")
+            spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=limit.turns,
+                           budget_usd=limit.budget_usd, timeout_s=limit.minutes * 60, cwd=wt,
+                           schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
+                           extra_args=list(agent_cfg.extra_args))
+            result = self.adapter_factory(agent_cfg).run(spec)
+            duration = (self.now() - started).total_seconds()
+            self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
+                               duration_s=duration, ok=result.ok)
+            self._save_logs(wt, task.id, attempt, result)
+            if result.rate_limited:
+                return self._rate_limited(task, result)
+            return self._publish(task, wt, attempt, result)
+        finally:
+            self.ws.dispose(wt)
+
+    def _save_logs(self, wt: Path, task_id: str, attempt: int, result: RunResult) -> None:
+        logdir = self.log_dir / task_id / f"attempt-{attempt}"
+        try:
+            logdir.mkdir(parents=True, exist_ok=True)
+            (logdir / "stdout.txt").write_text(result.stdout)
+            (logdir / "stderr.txt").write_text(result.stderr)
+            prompt = wt / ".swarm-run" / "prompt.md"
+            if prompt.exists():
+                (logdir / "prompt.md").write_text(prompt.read_text())
+        except OSError as e:
+            self.log(f"could not save logs: {e}")
+
+    def _rate_limited(self, task: Task, result: RunResult) -> Outcome:
+        now = self.now()
+        task.status, task.claim_nonce = Status.READY, ""
+        task.last_error = f"rate limited: {result.error[:300]}"
+        self.board.update_task(task, ["status", "claim_nonce", "last_error"])
+        row = self.board.get_agent(task.agent) or AgentRow(
+            name=task.agent, provider=self.agents[task.agent].provider, host=self.host)
+        row.status = "cooldown"
+        row.cooldown_until = result.reset_at or (now + timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN))
+        row.note = f"rate limited at {now.isoformat(timespec='minutes')}"
+        self.board.upsert_agent(row)
+        self.log(f"[{task.id}] rate limited; {task.agent} cooling down until {row.cooldown_until}")
+        return Outcome(task, None, result, None, Status.READY)
+
+    def _publish(self, task: Task, wt: Path, attempt: int, result: RunResult) -> Outcome:
+        changed = self.ws.changed_files(wt)
+        report = parse_report(result.structured_output, wt, changed_files=changed)
+        flags = [f for f in task.flags if f not in TRANSIENT_FLAGS]
+        if report.synthesized:
+            flags.append("report_missing")
+        if any(not in_scope(f, task.scope) for f in changed):
+            flags.append("out_of_scope")
+        if any(f in ALWAYS_REVIEWED_DOCS for f in changed):
+            flags.append("docs_touched")
+        if result.timed_out:
+            flags.append("timeout")
+        task.flags, task.attempts, task.claim_nonce = flags, attempt, ""
+
+        # decision / debt logs live on the branch, one file per task, so parallel tasks never conflict
+        dec, debt = decisions_markdown(task, report), debts_markdown(task, report)
+        if dec:
+            (wt / "docs" / "decisions").mkdir(parents=True, exist_ok=True)
+            (wt / "docs" / "decisions" / f"{task.id}.md").write_text(dec)
+        if debt:
+            (wt / "docs" / "debt").mkdir(parents=True, exist_ok=True)
+            (wt / "docs" / "debt" / f"{task.id}.md").write_text(debt)
+        if dec or debt:
+            changed = self.ws.changed_files(wt)
+
+        verify = self.ws.run_script(wt, self.cfg.verify.fast, 900) if changed else None
+        verify_ok = verify.ok if verify is not None else None
+        verify_tail = verify.tail(1500) if verify is not None else ""
+
+        pr_url = task.pr_url
+        if changed:
+            self.ws.commit_all(wt, f"{task.id}: {(report.summary or 'work in progress')[:60]}")
+            push = self.ws.push(wt, task.branch)
+            if push.ok:
+                body = report_to_markdown(report, attempt=attempt, verify_ok=verify_ok, verify_tail=verify_tail,
+                                          pr_url="", flags=flags)
+                try:
+                    pr_url = self.ws.pr_create_or_update(task.branch, task.title_with_id(), body) or pr_url
+                except RuntimeError as e:
+                    self.log(f"[{task.id}] PR failed: {e}")
+            else:
+                self.log(f"[{task.id}] push failed: {push.err.strip()[:200]}")
+        task.pr_url = pr_url
+
+        md = report_to_markdown(report, attempt=attempt, verify_ok=verify_ok, verify_tail=verify_tail,
+                                pr_url=pr_url, flags=flags)
+        self.board.append_task_report(task, f"Report — attempt {attempt}", md)
+        if report.question:
+            self._file_question(task, report, report.question)
+
+        status = self._decide(task, report, result, changed, verify_ok, verify_tail)
+        task.status = status
+        self.board.update_task(task, PUBLISH_FIELDS)
+        self.log(f"[{task.id}] → {status.value}")
+        return Outcome(task, report, result, verify_ok, status)
+
+    def _decide(self, task: Task, report: Report, result: RunResult, changed: list[str],
+                verify_ok: bool | None, verify_tail: str) -> Status:
+        if report.status == "blocked":
+            return Status.BLOCKED
+        if report.status == "failed":
+            task.last_error = (report.summary or "model reported failure")[:1900]
+            return Status.FAILED
+        if not changed:
+            task.last_error = "timeout" if result.timed_out else ("no changes" if result.ok else result.error[:1900])
+            return Status.FAILED
+        if not result.ok and report.synthesized:
+            # the CLI ended abnormally (max turns, timeout, crash) but left work behind: continue on the branch
+            if task.attempts >= self.cfg.max_attempts:
+                task.last_error = result.error[:1900] or "abnormal end"
+                return Status.FAILED
+            task.feedback = (f"The previous attempt ended with: {result.error or 'unknown error'}. "
+                             "Continue from the current branch state, finish the task, and produce the report.")
+            task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+            return Status.CHANGES_REQUESTED
+        if verify_ok is False:
+            task.review_rounds += 1
+            if task.review_rounds > self.cfg.max_review_rounds:
+                self._file_question(task, report, {
+                    "kind": "blocking",
+                    "text": f"{task.id} keeps failing verify after {task.review_rounds} rounds. Cut, split, or fix by hand?",
+                    "options": ["cut", "split", "human fix"], "proceeding_with": ""}, context=verify_tail)
+                return Status.BLOCKED
+            task.feedback = "scripts/verify_fast.sh failed. Fix it:\n" + verify_tail[-1800:]
+            task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+            return Status.CHANGES_REQUESTED
+        task.feedback = ""
+        return Status.REVIEW if needs_review(task, self.cfg) else Status.MERGE_READY
+
+    def _file_question(self, task: Task, report: Report, q: dict, *, context: str = "") -> Question:
+        question = Question(
+            id="", text=q["text"][:190], kind=q.get("kind", "blocking"),
+            context=(context or report.summary)[:1900], options=list(q.get("options") or []),
+            proceeding_with=q.get("proceeding_with", ""),
+            impact="high" if q.get("kind") == "blocking" else "medium",
+            task_id=task.id, asked_by=task.agent or "", status="Open",
+        )
+        return self.board.create_question(question)
