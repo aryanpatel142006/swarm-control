@@ -65,14 +65,16 @@ class Server:
     def reap(self) -> int:
         now = self.now()
         stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
-        orphan_after = timedelta(seconds=2 * self.cfg.heartbeat_seconds)
+        orphan_after = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
         rows = {a.name: a for a in self.board.list_agents()}
         n = 0
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             row = rows.get(t.agent or "")
             alive = bool(row and row.last_heartbeat and (now - row.last_heartbeat) < stale)
             listed = bool(row and t.id in [x.strip() for x in row.current_task.split(",") if x.strip()])
-            recent = t.started is None or (now - t.started) < orphan_after  # unknown start: trust the heartbeat
+            # orphan check on the worker's own clock: its heartbeat vs the claim it wrote, never serve's clock
+            recent = (t.started is None or row is None or row.last_heartbeat is None
+                      or (row.last_heartbeat - t.started) < orphan_after)
             if alive and (listed or recent):
                 continue
             t.status, t.attempts, t.claim_nonce = Status.READY, t.attempts + 1, ""

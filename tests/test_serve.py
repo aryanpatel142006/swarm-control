@@ -226,3 +226,18 @@ def test_rebalance_moves_queued_work_to_idle_equal_agent(cfg, git_repo, tmp_path
     # a critical task is never moved, and nothing moves to a weaker agent
     board.create_task(Task(id="", title="crit", status=Status.READY, agent="codex-a", type="backend", importance="critical"))
     assert srv.rebalance() == 0
+
+
+def test_reap_orphan_rule_is_immune_to_clock_skew(cfg, git_repo, tmp_path):
+    """Timestamps written by another laptop are compared against that laptop's own heartbeat, never serve's clock."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    their_now = now + timedelta(minutes=7)   # the other laptop's clock runs 7 minutes ahead
+    board.upsert_agent(AgentRow(name="codex-a", last_heartbeat=their_now, current_task=""))
+    live = board.create_task(Task(id="", title="live", status=Status.RUNNING, agent="codex-a",
+                                  started=their_now - timedelta(seconds=30)))
+    stale = board.create_task(Task(id="", title="stale", status=Status.RUNNING, agent="codex-a",
+                                   started=their_now - timedelta(minutes=15)))
+    assert srv.reap() == 1
+    assert board.get_task(live.id).status is Status.RUNNING
+    assert board.get_task(stale.id).status is Status.READY
