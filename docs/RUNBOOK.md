@@ -46,10 +46,11 @@
 
 | What happened | Do this |
 |---|---|
-| A laptop died or slept | Restart `swarm run`. On start it requeues its own Running tasks with their branches intact; serve also reaps them within 10 minutes if the runner never comes back. Ctrl-C parks in-flight work on the branch and requeues it. |
+| A laptop died or slept | Restart `swarm run`. On start it requeues its own Running tasks with their branches intact (drilled: recovered within seconds). Serve also reaps them within 10 minutes if the runner never comes back. Ctrl-C or `kill <pid>` parks in-flight work on the branch and requeues it. |
 | serve died | Restart it. If it refuses ("another serve is running"), wait for the old heartbeat to go stale (10 min) or run `swarm serve --host <same name>`. |
 | Notion is down | Workers keep working and publish when it returns. Nothing to do. |
 | A provider is rate limited | `swarm status` shows cooldown. Non-critical work reroutes itself. `swarm reroute` to force it. |
 | main is broken | `swarm serve --no-merge`, fix main by hand, restart serve. |
 | A task keeps failing | It becomes a Question after 3 attempts. Cut, split, or fix by hand. |
+| One laptop idle while the other has a queue | serve rebalances one task per tick to an idle agent of equal strength; to move a specific card, `swarm assign T-012 --agent <name>` or drag it in Notion. |
 | Two agents fight over files | Give one task a dependency on the other; the next plan lint will warn about overlaps. |

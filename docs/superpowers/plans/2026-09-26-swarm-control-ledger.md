@@ -80,3 +80,15 @@ Final: minor (deferred): no threaded-runner test (all tests use SyncExecutor)
 - Observation: editing the installed package while a live driver runs broke one worker tick with a SyntaxError for ~1 minute. Do not hot-edit during a run.
 - Deferred minors fixed after the run: lazy config (--help anywhere), unknown-host and empty-logs errors, HTTP-date Retry-After, cut warns about dependents, reviewer uses the configured remote.
 - Still deferred: init idempotency; runner/serve shared worktree path race; heartbeat vs cooldown clobber; reroute ignores soft cap; SIGKILL on timeout; duplicate-ID race; InMemoryBoard thread safety; no threaded-runner test; status board columns come out alphabetical (Notion API cannot order groups).
+
+## Two-laptop simulation (Sept 27, 2026) — two clones on one Mac, serve + 2 runners as continuous loops
+- 8 mixed tasks + T-007 → 14/14 done (one intentionally-broken task escalated after 2 verify rounds and was cut). 20 Claude runs, $3.36 total.
+- Kill drill: `kill -9` on runner B mid-task → restart → "recovered orphaned run" within seconds, branch reused, no attempt burned. PASS.
+- Human channel: blocking question answered via `swarm answer` → resumed on branch → merged. PASS.
+- Reviewer: out_of_scope edits forced review on a normal task; high task reviewed; both approved and merged. PASS.
+- Dependency chain: T-012 and T-015 promoted only after their dependencies merged. PASS.
+- FOUND: reassigning a Ready card while a runner had already fetched it lost the reassignment (claim overwrote `agent`). FIXED: claim re-reads and backs off. (test_claim_backs_off_when_task_was_reassigned)
+- FOUND: Ctrl-C had no effect on runners started as background jobs (inherited SIG_IGN). FIXED: runner installs SIGINT/SIGTERM handlers that park work. (test_loop_installs_signal_handlers_that_park)
+- FOUND: two equal Claude agents → all queued work routed to one while the other idled. FIXED: serve rebalances one queued non-critical task per tick onto an idle agent at least as strong. (test_rebalance_moves_queued_work_to_idle_equal_agent)
+- FOUND: answering "cut" to a blocking question re-ran the task. FIXED. (test_relay_cut_answer_cuts_the_task)
+- Ruling: rebalance lets every idle equal-strength agent steal one task per tick (test adjusted from 1 to 2 moves) — cost if wrong: slightly more churn on a busy board.
