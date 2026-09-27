@@ -203,6 +203,7 @@ def test_init_decorates_everything_it_creates():
     decorated = {}
     views = []
     callouts = []
+    navs = []
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -223,7 +224,11 @@ def test_init_decorates_everything_it_creates():
             return httpx.Response(200, json={"results": [{"id": "status-block"}]})
         if req.method == "PATCH" and path.endswith("/children"):
             callouts.extend(b for b in body["children"] if b.get("type") == "callout")
+            navs.extend(b["paragraph"]["rich_text"] for b in body["children"] if b.get("type") == "paragraph")
             return httpx.Response(200, json={"results": body["children"]})
+        if req.method == "PATCH" and path.startswith("/v1/databases/") and "description" in body:
+            navs.append(body["description"])
+            return httpx.Response(200, json=body)
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
             return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
         if req.method == "POST" and path == "/v1/views":
@@ -245,6 +250,10 @@ def test_init_decorates_everything_it_creates():
     assert "icon-board.png?v=" in decorated["parent"]["icon"]["external"]["url"]
     assert "banner-tasks.png?v=" in decorated["db1"]["cover"]["external"]["url"]
     assert callouts and callouts[0]["callout"]["icon"]["type"] == "external"
+    assert ids["nav_ok"] == "true" and len(navs) == 5  # three database descriptions + two page paragraphs
+    labels = [seg["text"]["content"] for seg in navs[0] if seg["text"]["content"].strip("· ")]
+    assert labels == ["Dashboard", "Tasks", "Questions", "Agents", "Status"]
+    assert sum(1 for seg in navs[0] if seg["text"].get("link")) == 4  # the current one is not a link
 
 
 def test_decorate_uploads_when_no_public_url(tmp_path):

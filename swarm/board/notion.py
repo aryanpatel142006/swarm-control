@@ -276,6 +276,44 @@ def decorate_object(client: "NotionClient", kind: str, obj_id: str, key: str, as
     return "fallback"
 
 
+def notion_url(obj_id: str) -> str:
+    return "https://www.notion.so/" + obj_id.replace("-", "")
+
+
+def nav_rich_text(ids: dict, current: str | None = None) -> list[dict]:
+    """'Dashboard · Tasks · Questions · Agents · Status' with links; the current one is bold and unlinked."""
+    items = [("board", "Dashboard", "parent_page_id", "pages"), ("tasks", "Tasks", "tasks_db", "databases"),
+             ("questions", "Questions", "questions_db", "databases"), ("agents", "Agents", "agents_db", "databases"),
+             ("status", "Status", "status_page", "pages")]
+    out: list[dict] = []
+    for key, label, id_key, _ in items:
+        if out:
+            out.append({"type": "text", "text": {"content": "  ·  "}, "annotations": {"color": "gray"}})
+        if key == current or not ids.get(id_key):
+            out.append({"type": "text", "text": {"content": label}, "annotations": {"bold": True}})
+        else:
+            out.append({"type": "text", "text": {"content": label, "link": {"url": notion_url(ids[id_key])}}})
+    return out
+
+
+def add_navigation(client: "NotionClient", ids: dict) -> list[str]:
+    """Navigation links on every board object: database descriptions and a first paragraph on the pages."""
+    failed = []
+    for key, id_key in (("tasks", "tasks_db"), ("questions", "questions_db"), ("agents", "agents_db")):
+        try:
+            client.request("PATCH", f"/databases/{ids[id_key]}", json={"description": nav_rich_text(ids, key)})
+        except NotionError as e:
+            failed.append(f"{key}: {e}")
+    for key, id_key in (("status", "status_page"), ("board", "parent_page_id")):
+        try:
+            client.request("PATCH", f"/blocks/{ids[id_key]}/children", json={
+                "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": nav_rich_text(ids, key)}}],
+                "position": {"type": "start"}})
+        except NotionError as e:
+            failed.append(f"{key}: {e}")
+    return failed
+
+
 def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_DIR,
                    assets_url: str | None = ASSETS_URL_BASE) -> list[str]:
     """Decorate the parent page, the three databases, and the status page. Returns what failed entirely."""
@@ -463,6 +501,8 @@ class NotionBoard:
             ids["views_ok"] = f"false: {e}"
         failed = decorate_board(client, ids)
         ids["decor_ok"] = "true" if not failed else "false: " + "; ".join(failed)
+        nav_failed = add_navigation(client, ids)
+        ids["nav_ok"] = "true" if not nav_failed else "false: " + "; ".join(nav_failed)
         try:
             icon_url = asset_url("icon-board.png")
             client.request("PATCH", f"/blocks/{parent_page_id}/children", json={"children": [{
