@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>swarm-control — the plan</title>
+<style>
+  @page { size: Letter; margin: 16mm 15mm 18mm 15mm; }
+  :root {
+    --ink: #17202a; --muted: #5b6470; --line: #d9dee5; --panel: #f4f6f9;
+    --blue: #2457d6; --blue-soft: #e4ebfb; --green: #1e8f5a; --green-soft: #e1f3ea;
+    --amber: #b86e00; --amber-soft: #fbeedb; --red: #c93c37; --red-soft: #fbe3e2;
+    --purple: #6b4fd6; --purple-soft: #ece7fb; --gray-soft: #e9ecf0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font: 10.6pt/1.45 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; color: var(--ink); background: #fff; }
+  h1 { font-size: 26pt; line-height: 1.1; margin: 0 0 6pt; letter-spacing: -0.01em; }
+  h2 { font-size: 16pt; margin: 0 0 8pt; letter-spacing: -0.01em; }
+  h3 { font-size: 11.5pt; margin: 14pt 0 4pt; }
+  p { margin: 0 0 7pt; }
+  ul, ol { margin: 0 0 8pt 16pt; padding: 0; }
+  li { margin: 0 0 3pt; }
+  code { font: 9.3pt/1.4 "SF Mono", Menlo, Consolas, monospace; background: var(--panel); padding: 0 3px; border-radius: 3px; }
+  pre { font: 8.8pt/1.4 "SF Mono", Menlo, Consolas, monospace; background: var(--panel); padding: 8px 10px; border-radius: 6px; margin: 4pt 0 8pt; white-space: pre-wrap; }
+  table { border-collapse: collapse; width: 100%; margin: 4pt 0 10pt; font-size: 9.6pt; }
+  th, td { text-align: left; vertical-align: top; padding: 4pt 6pt; border-bottom: 1px solid var(--line); }
+  th { background: var(--panel); font-weight: 600; }
+  .page { break-before: page; }
+  .section-num { color: var(--blue); font-weight: 700; font-size: 9.5pt; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 2pt; }
+  .lead { font-size: 11.5pt; color: var(--muted); margin-bottom: 10pt; }
+  .callout { border-left: 3px solid var(--blue); background: var(--blue-soft); padding: 7pt 10pt; border-radius: 0 6px 6px 0; margin: 8pt 0 10pt; }
+  .callout.warn { border-color: var(--amber); background: var(--amber-soft); }
+  .callout.good { border-color: var(--green); background: var(--green-soft); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12pt; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10pt; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 8pt 10pt; background: #fff; }
+  .card h4 { margin: 0 0 4pt; font-size: 10.5pt; }
+  .card p { font-size: 9.6pt; color: var(--muted); margin: 0; }
+  .tag { display: inline-block; font-size: 8.4pt; font-weight: 600; padding: 1px 6px; border-radius: 10px; background: var(--gray-soft); color: var(--ink); }
+  .tag.blue { background: var(--blue-soft); color: var(--blue); }
+  .tag.green { background: var(--green-soft); color: var(--green); }
+  .tag.amber { background: var(--amber-soft); color: var(--amber); }
+  .tag.red { background: var(--red-soft); color: var(--red); }
+  .tag.purple { background: var(--purple-soft); color: var(--purple); }
+  figure { margin: 6pt 0 10pt; }
+  figcaption { font-size: 9pt; color: var(--muted); margin-top: 3pt; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  .cover { height: 240mm; display: flex; flex-direction: column; justify-content: space-between; }
+  .cover .meta { color: var(--muted); font-size: 10pt; }
+  .cover .principle { font-size: 14pt; line-height: 1.35; border-left: 4px solid var(--blue); padding-left: 12pt; margin: 18pt 0; }
+  .toc { columns: 2; column-gap: 24pt; font-size: 9.8pt; }
+  .toc div { break-inside: avoid; padding: 2pt 0; border-bottom: 1px dotted var(--line); }
+  .toc span { color: var(--blue); font-weight: 700; margin-right: 6pt; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 2pt 10pt; font-size: 9.8pt; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+  .small { font-size: 9pt; color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+  .footer-note { font-size: 8.8pt; color: var(--muted); margin-top: 12pt; border-top: 1px solid var(--line); padding-top: 6pt; }
+</style>
+</head>
+<body>
+
+<!-- ============================== COVER ============================== -->
+<section class="cover">
+  <div>
+    <div class="section-num">HackRU Fall 2026 · Oct 10–11 · 24 hours</div>
+    <h1>swarm-control<br><span style="color:var(--muted);font-weight:500">the plan, for one last look</span></h1>
+    <p class="lead">A small harness that lets two teammates run several AI coding agents in parallel across two laptops, with Notion as the shared board and GitHub as the truth, to build the selective-hearing project without one giant model session eating the token budget.</p>
+    <div class="principle">Agents execute autonomously in fresh, bounded contexts.<br>Humans own intent through Notion.<br>Merged, verified code is the only proof of progress.</div>
+    <div class="grid3">
+      <div class="card"><h4>What you get</h4><p>One command on each laptop. Tasks flow from a plan to Notion to the best agent to a reviewed PR to main, with questions surfacing in Notion when a human is needed.</p></div>
+      <div class="card"><h4>Why it saves tokens</h4><p>Every task is a fresh, size-capped session. Cheap work goes to cheap models and other providers. Fable and GPT-6 Astra are reserved for critical tasks.</p></div>
+      <div class="card"><h4>What it is not</h4><p>Not a framework, not a self-replanning AI company, not the hackathon project. About 3,000 lines of Python plus tests, built and rehearsed before Oct 10.</p></div>
+    </div>
+  </div>
+  <div class="meta">
+    <div class="kv">
+      <dt>Prepared</dt><dd>September 26, 2026</dd>
+      <dt>For</dt><dd>Aryan and teammate, HackRU Fall 2026</dd>
+      <dt>Status</dt><dd>Design complete. Waiting for green light before writing the build plan.</dd>
+      <dt>Source</dt><dd><code>swarm-control/docs/superpowers/specs/2026-09-26-swarm-control-design.md</code> (full spec, 20 sections)</dd>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== CONTENTS ============================== -->
+<section class="page">
+  <div class="section-num">Contents</div>
+  <div class="toc">
+    <div><span>01</span>The problem this solves</div>
+    <div><span>02</span>The system at a glance</div>
+    <div><span>03</span>What lives in Notion</div>
+    <div><span>04</span>Life of a task</div>
+    <div><span>05</span>Routing: best agent, right model</div>
+    <div><span>06</span>The worker loop</div>
+    <div><span>07</span>The control loop: review, merge, recover</div>
+    <div><span>08</span>The human channel</div>
+    <div><span>09</span>Shared docs and what each agent sees</div>
+    <div><span>10</span>Budget and subscription limits</div>
+    <div><span>11</span>Agent CLIs and models (verified)</div>
+    <div><span>12</span>Failure handling</div>
+    <div><span>13</span>Rules, security, and disclosure</div>
+    <div><span>14</span>Testing and rehearsal</div>
+    <div><span>15</span>Game day, hour by hour</div>
+    <div><span>16</span>Build phases and what I need from you</div>
+    <div><span>17</span>Risks and open items</div>
+    <div><span>18</span>Research this is based on</div>
+  </div>
+
+  <h3 style="margin-top:18pt">How to read this</h3>
+  <p>Each section is one idea with one diagram. The diagrams show the real mechanism, not decoration. If a section looks wrong, say the number and what to change. Everything here is also in the written spec, which is what the build plan will be generated from.</p>
+
+  <div class="callout">
+    <strong>What I need you to decide after reading:</strong> (1) green light on the design as a whole; (2) whether the default agent roster and strength scores in section 05 look right for the two of you; (3) whether laptop A (yours) is the one that runs the control loop and the orchestrator session.
+  </div>
+</section>
+
+<!-- ============================== 01 PROBLEM ============================== -->
+<section class="page">
+  <div class="section-num">01</div>
+  <h2>The problem this solves</h2>
+  <p class="lead">One long Fable session accumulates context, gets slower and more expensive every turn, and hits the 5-hour limit before the product is done. The swarm replaces one long session with many short, bounded ones, spread across providers.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker>
+    </defs>
+    <!-- left: one session -->
+    <text x="20" y="22" font-size="12" font-weight="700" fill="#17202a">One session, all day</text>
+    <rect x="20" y="34" width="330" height="190" rx="8" fill="#fbe3e2" stroke="#c93c37"/>
+    <g font-size="10" fill="#17202a">
+      <rect x="36" y="48" width="40" height="18" rx="3" fill="#fff" stroke="#c93c37"/><text x="42" y="61">task 1</text>
+      <rect x="36" y="72" width="90" height="18" rx="3" fill="#fff" stroke="#c93c37"/><text x="42" y="85">task 1 + task 2</text>
+      <rect x="36" y="96" width="150" height="18" rx="3" fill="#fff" stroke="#c93c37"/><text x="42" y="109">… + task 3 + every file read</text>
+      <rect x="36" y="120" width="220" height="18" rx="3" fill="#fff" stroke="#c93c37"/><text x="42" y="133">… + logs + retries + old plans</text>
+      <rect x="36" y="144" width="298" height="18" rx="3" fill="#fff" stroke="#c93c37"/><text x="42" y="157">… every turn re-reads all of it; cost per turn climbs</text>
+    </g>
+    <text x="36" y="190" font-size="10.5" fill="#c93c37" font-weight="700">5-hour limit hit at ~hour 9. Half the product missing.</text>
+    <text x="36" y="208" font-size="9.5" fill="#5b6470">One provider, one model, one queue, one point of failure.</text>
+
+    <!-- right: swarm -->
+    <text x="400" y="22" font-size="12" font-weight="700" fill="#17202a">Many bounded sessions, in parallel</text>
+    <rect x="400" y="34" width="340" height="190" rx="8" fill="#e1f3ea" stroke="#1e8f5a"/>
+    <g font-size="9.5" fill="#17202a">
+      <rect x="414" y="48" width="70" height="18" rx="3" fill="#fff" stroke="#2457d6"/><text x="419" y="61">T-01 opus</text>
+      <rect x="490" y="48" width="70" height="18" rx="3" fill="#fff" stroke="#6b4fd6"/><text x="495" y="61">T-02 sol</text>
+      <rect x="566" y="48" width="70" height="18" rx="3" fill="#fff" stroke="#b86e00"/><text x="571" y="61">T-03 flash</text>
+      <rect x="642" y="48" width="84" height="18" rx="3" fill="#fff" stroke="#2457d6"/><text x="647" y="61">T-04 sonnet</text>
+      <rect x="414" y="74" width="70" height="18" rx="3" fill="#fff" stroke="#2457d6"/><text x="419" y="87">T-05 opus</text>
+      <rect x="490" y="74" width="70" height="18" rx="3" fill="#fff" stroke="#6b4fd6"/><text x="495" y="87">T-06 astra</text>
+      <rect x="566" y="74" width="70" height="18" rx="3" fill="#fff" stroke="#b86e00"/><text x="571" y="87">T-07 flash</text>
+      <rect x="642" y="74" width="84" height="18" rx="3" fill="#fff" stroke="#6b4fd6"/><text x="647" y="87">T-08 luna</text>
+      <rect x="414" y="100" width="70" height="18" rx="3" fill="#fff" stroke="#2457d6"/><text x="419" y="113">T-09 fable</text>
+      <rect x="490" y="100" width="70" height="18" rx="3" fill="#fff" stroke="#6b4fd6"/><text x="495" y="113">T-10 sol</text>
+      <rect x="566" y="100" width="70" height="18" rx="3" fill="#fff" stroke="#2457d6"/><text x="571" y="113">T-11 haiku</text>
+      <rect x="642" y="100" width="84" height="18" rx="3" fill="#fff" stroke="#b86e00"/><text x="647" y="113">T-12 flash</text>
+    </g>
+    <text x="414" y="140" font-size="9.5" fill="#5b6470">Each box: fresh context, capped turns, one branch, one PR.</text>
+    <text x="414" y="156" font-size="9.5" fill="#5b6470">Blue = Claude, purple = Codex, orange = Gemini.</text>
+    <text x="414" y="190" font-size="10.5" fill="#1e8f5a" font-weight="700">Three subscriptions' limits instead of one. Cost per task is flat.</text>
+    <text x="414" y="208" font-size="9.5" fill="#5b6470">Best model only where the task is critical.</text>
+  </svg>
+  <figcaption>Left: what happens with a single long session. Right: the same work as bounded tasks spread over providers and model tiers.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>What you asked for</h4><p>One orchestrator that splits a plan into tasks in Notion. Each AI takes tasks from its column, works on a branch, reports back, and the orchestrator merges. A reviewer watching everything. A Notion view where agents ask you questions. Shared docs so every agent knows the whole app. The best AI and model for each kind of task.</p></div>
+    <div class="card"><h4>What I changed and why</h4><p>Columns are the <em>output</em> of routing, not fixed lanes, so the best agent gets each task. A small Python tool drives the loop deterministically instead of trusting a model to remember to loop. Merges are automatic when checks pass, manual in the last hours. Your friend's plan supplied worktrees, typed reports, debt tracking, and evidence over claims; I dropped the parts two people can't run in a day.</p></div>
+  </div>
+</section>
+
+<!-- ============================== 02 SYSTEM ============================== -->
+<section class="page">
+  <div class="section-num">02</div>
+  <h2>The system at a glance</h2>
+  <p class="lead">Three processes, two shared services. Notion is where humans look and steer. GitHub is where code lives. Each laptop runs one worker process for all its agents; one laptop also runs the control loop and the orchestrator session.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 420" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker>
+    </defs>
+    <!-- Laptop A -->
+    <rect x="20" y="20" width="330" height="170" rx="10" fill="#f4f6f9" stroke="#d9dee5"/>
+    <text x="34" y="42" font-size="12" font-weight="700">Laptop A (yours) · orchestrator host</text>
+    <rect x="34" y="54" width="300" height="34" rx="6" fill="#e4ebfb" stroke="#2457d6"/>
+    <text x="44" y="68" font-size="10" font-weight="600" fill="#2457d6">Orchestrator session</text>
+    <text x="44" y="81" font-size="9" fill="#17202a">You + Claude Opus 5.5 · swarm plan / add / assign / answer / status</text>
+    <rect x="34" y="96" width="300" height="34" rx="6" fill="#ece7fb" stroke="#6b4fd6"/>
+    <text x="44" y="110" font-size="10" font-weight="600" fill="#6b4fd6">swarm serve  (control loop, exactly one)</text>
+    <text x="44" y="123" font-size="9" fill="#17202a">reaper · question relay · deps · review · merge · reroute · status page</text>
+    <rect x="34" y="138" width="300" height="40" rx="6" fill="#e1f3ea" stroke="#1e8f5a"/>
+    <text x="44" y="152" font-size="10" font-weight="600" fill="#1e8f5a">swarm run  (worker loop)</text>
+    <text x="44" y="165" font-size="9" fill="#17202a">threads: claude-aryan ×2 · codex-aryan ×2 · …</text>
+
+    <!-- Laptop B -->
+    <rect x="410" y="20" width="330" height="170" rx="10" fill="#f4f6f9" stroke="#d9dee5"/>
+    <text x="424" y="42" font-size="12" font-weight="700">Laptop B (teammate)</text>
+    <rect x="424" y="54" width="300" height="34" rx="6" fill="#fff" stroke="#d9dee5" stroke-dasharray="3 3"/>
+    <text x="434" y="68" font-size="10" fill="#5b6470">(no orchestrator here; any laptop can open</text>
+    <text x="434" y="81" font-size="10" fill="#5b6470"> the Notion board and answer questions)</text>
+    <rect x="424" y="138" width="300" height="40" rx="6" fill="#e1f3ea" stroke="#1e8f5a"/>
+    <text x="434" y="152" font-size="10" font-weight="600" fill="#1e8f5a">swarm run  (worker loop)</text>
+    <text x="434" y="165" font-size="9" fill="#17202a">threads: codex-friend ×2 · agy-friend ×1 · claude-friend ×1</text>
+
+    <!-- Notion -->
+    <rect x="120" y="240" width="520" height="64" rx="10" fill="#fff" stroke="#17202a" stroke-width="1.5"/>
+    <text x="136" y="262" font-size="12" font-weight="700">NOTION · shared board (polled, ~50 req/min total, limit 180)</text>
+    <text x="136" y="280" font-size="10" fill="#17202a">Tasks DB · Questions DB · Agents DB · Status page</text>
+    <text x="136" y="294" font-size="9" fill="#5b6470">Boards: by Agent · by Status · Needs Human · Open Questions</text>
+
+    <!-- GitHub -->
+    <rect x="120" y="340" width="520" height="60" rx="10" fill="#fff" stroke="#17202a" stroke-width="1.5"/>
+    <text x="136" y="362" font-size="12" font-weight="700">GITHUB · project repo (source of truth for code)</text>
+    <text x="136" y="380" font-size="10" fill="#17202a">main · task/T-012 branches · PRs · docs/ · scripts/verify_*.sh · .swarm/config.yaml</text>
+    <text x="136" y="394" font-size="9" fill="#5b6470">Workers push branches and open PRs; serve rebases, verifies, squash-merges.</text>
+
+    <!-- arrows -->
+    <path d="M185 190 L185 240" stroke="#5b6470" stroke-width="1.4" marker-end="url(#a2)" marker-start="url(#a2)"/>
+    <path d="M575 190 L575 240" stroke="#5b6470" stroke-width="1.4" marker-end="url(#a2)" marker-start="url(#a2)"/>
+    <path d="M90 178 C 60 260, 60 330, 120 370" stroke="#1e8f5a" stroke-width="1.4" fill="none" marker-end="url(#a2)"/>
+    <path d="M670 178 C 700 260, 700 330, 640 370" stroke="#1e8f5a" stroke-width="1.4" fill="none" marker-end="url(#a2)"/>
+    <text x="24" y="300" font-size="9" fill="#1e8f5a">branches, PRs</text>
+    <text x="672" y="300" font-size="9" fill="#1e8f5a">branches, PRs</text>
+    <text x="195" y="220" font-size="9" fill="#5b6470">claim · report · questions</text>
+    <text x="585" y="220" font-size="9" fill="#5b6470">claim · report · questions</text>
+  </svg>
+  <figcaption>Every arrow is a plain HTTPS or git call. No webhooks, no tunnels, no server to host. If Notion is down, workers finish locally and publish later; git state is never corrupted.</figcaption>
+  </figure>
+
+  <table>
+    <tr><th style="width:150px">Process</th><th>Where</th><th>Job</th></tr>
+    <tr><td><code>swarm run</code></td><td>one per laptop</td><td>Polls the board once per cycle for all agents on this host. Each agent thread: claim a task, make a worktree, build a prompt, run the CLI headless, verify, push, open a PR, report.</td></tr>
+    <tr><td><code>swarm serve</code></td><td>laptop A only</td><td>Recovers dead tasks, relays your answers to blocked tasks, promotes tasks whose dependencies merged, runs the reviewer, merges, reroutes around rate limits, rewrites the status page every 15 minutes.</td></tr>
+    <tr><td>orchestrator session</td><td>laptop A</td><td>Interactive Claude Code in the project repo. Turns PLAN.md into tasks a milestone at a time, reads the status page, re-plans, answers questions. Never reads code.</td></tr>
+  </table>
+</section>
+
+<!-- ============================== 03 NOTION ============================== -->
+<section class="page">
+  <div class="section-num">03</div>
+  <h2>What lives in Notion</h2>
+  <p class="lead">Three databases and one page, created by <code>swarm init</code> with board views already configured. Humans only ever type in two fields: a question's Answer, and its Needs Follow-up checkbox. Everything else is written by the tool, and dragging a card between agent columns is respected.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="20" font-size="12" font-weight="700">Tasks · board "By Status"</text>
+    <g font-size="9.5">
+      <!-- columns -->
+      <g>
+        <rect x="20" y="30" width="92" height="250" rx="6" fill="#f4f6f9"/><text x="28" y="46" font-weight="700">Backlog</text>
+        <rect x="26" y="54" width="80" height="30" rx="4" fill="#fff" stroke="#d9dee5"/><text x="31" y="66" font-size="8.5">T-021 fusion</text><text x="31" y="78" font-size="8" fill="#5b6470">deps: T-014</text>
+        <rect x="26" y="90" width="80" height="30" rx="4" fill="#fff" stroke="#d9dee5"/><text x="31" y="102" font-size="8.5">T-022 e2e demo</text><text x="31" y="114" font-size="8" fill="#5b6470">deps: T-019</text>
+      </g>
+      <g>
+        <rect x="118" y="30" width="92" height="250" rx="6" fill="#e4ebfb"/><text x="126" y="46" font-weight="700" fill="#2457d6">Ready</text>
+        <rect x="124" y="54" width="80" height="30" rx="4" fill="#fff" stroke="#2457d6"/><text x="129" y="66" font-size="8.5">T-015 ws reconnect</text><text x="129" y="78" font-size="8" fill="#5b6470">codex-aryan · sol</text>
+        <rect x="124" y="90" width="80" height="30" rx="4" fill="#fff" stroke="#2457d6"/><text x="129" y="102" font-size="8.5">T-016 speaker card</text><text x="129" y="114" font-size="8" fill="#5b6470">claude-aryan · opus</text>
+      </g>
+      <g>
+        <rect x="216" y="30" width="92" height="250" rx="6" fill="#fbeedb"/><text x="224" y="46" font-weight="700" fill="#b86e00">Running</text>
+        <rect x="222" y="54" width="80" height="30" rx="4" fill="#fff" stroke="#b86e00"/><text x="227" y="66" font-size="8.5">T-012 degraded UI</text><text x="227" y="78" font-size="8" fill="#5b6470">claude-aryan · 14 min</text>
+        <rect x="222" y="90" width="80" height="30" rx="4" fill="#fff" stroke="#b86e00"/><text x="227" y="102" font-size="8.5">T-013 diarize</text><text x="227" y="114" font-size="8" fill="#5b6470">agy-friend · 6 min</text>
+        <rect x="222" y="126" width="80" height="30" rx="4" fill="#fff" stroke="#b86e00"/><text x="227" y="138" font-size="8.5">T-014 track ids</text><text x="227" y="150" font-size="8" fill="#5b6470">codex-friend · 21 min</text>
+      </g>
+      <g>
+        <rect x="314" y="30" width="92" height="250" rx="6" fill="#ece7fb"/><text x="322" y="46" font-weight="700" fill="#6b4fd6">Review</text>
+        <rect x="320" y="54" width="80" height="30" rx="4" fill="#fff" stroke="#6b4fd6"/><text x="325" y="66" font-size="8.5">T-010 events api</text><text x="325" y="78" font-size="8" fill="#5b6470">PR #14 · high</text>
+      </g>
+      <g>
+        <rect x="412" y="30" width="92" height="250" rx="6" fill="#e1f3ea"/><text x="420" y="46" font-weight="700" fill="#1e8f5a">Merge Ready</text>
+        <rect x="418" y="54" width="80" height="30" rx="4" fill="#fff" stroke="#1e8f5a"/><text x="423" y="66" font-size="8.5">T-009 audio capture</text><text x="423" y="78" font-size="8" fill="#5b6470">PR #12 · approved</text>
+      </g>
+      <g>
+        <rect x="510" y="30" width="92" height="250" rx="6" fill="#fbe3e2"/><text x="518" y="46" font-weight="700" fill="#c93c37">Blocked</text>
+        <rect x="516" y="54" width="80" height="30" rx="4" fill="#fff" stroke="#c93c37"/><text x="521" y="66" font-size="8.5">T-011 select UX</text><text x="521" y="78" font-size="8" fill="#5b6470">Q-004 open</text>
+      </g>
+      <g>
+        <rect x="608" y="30" width="92" height="250" rx="6" fill="#e9ecf0"/><text x="616" y="46" font-weight="700" fill="#5b6470">Done</text>
+        <rect x="614" y="54" width="80" height="22" rx="4" fill="#fff" stroke="#d9dee5"/><text x="619" y="68" font-size="8.5">T-001 … T-008</text>
+      </g>
+    </g>
+    <text x="20" y="296" font-size="9" fill="#5b6470">Also: Changes Requested (back to the same worker), Failed (retry ladder), Cut. A second board groups the same cards by Agent.</text>
+  </svg>
+  <figcaption>The board you'll actually look at. Each card carries type, importance, size, agent, model, branch, PR, attempts, and its reports in the page body.</figcaption>
+  </figure>
+
+  <div class="grid3">
+    <div class="card"><h4>Tasks</h4><p>ID, title, description, acceptance criteria, type, importance, size, milestone, priority, agent, model, effort, status, depends-on, scope (globs the worker may edit), feedback, branch, PR, attempts, timestamps. Reports append to the page body per attempt.</p></div>
+    <div class="card"><h4>Questions</h4><p>Question, kind (blocking or fyi), context, options, "proceeding with", impact, linked task, asked by, status, <strong>Answer</strong>, <strong>Needs Follow-up</strong>. The Open column is your inbox.</p></div>
+    <div class="card"><h4>Agents</h4><p>Name, provider, laptop, status (idle, running, cooldown, offline), current task, last heartbeat, cooldown-until, runs, tokens in and out, cost. Both laptops see each other's health here.</p></div>
+  </div>
+  <p class="small" style="margin-top:8pt">Notion has no atomic "claim". Contention is avoided by design because each worker only claims cards in its own agent column, and guarded by writing a random nonce, waiting 1.5 s, and re-reading. All writes retry on rate limits honoring Retry-After.</p>
+</section>
+
+<!-- ============================== 04 LIFE OF A TASK ============================== -->
+<section class="page">
+  <div class="section-num">04</div>
+  <h2>Life of a task</h2>
+  <p class="lead">A task moves through a fixed set of states. Every transition is made by the tool, from evidence, never from an agent's claim that it is done.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 370" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker>
+    </defs>
+    <g font-size="10" font-weight="700" text-anchor="middle">
+      <rect x="20" y="120" width="90" height="36" rx="18" fill="#f4f6f9" stroke="#5b6470"/><text x="65" y="142" fill="#17202a">Backlog</text>
+      <rect x="140" y="120" width="90" height="36" rx="18" fill="#e4ebfb" stroke="#2457d6"/><text x="185" y="142" fill="#2457d6">Ready</text>
+      <rect x="260" y="120" width="90" height="36" rx="18" fill="#fbeedb" stroke="#b86e00"/><text x="305" y="142" fill="#b86e00">Running</text>
+      <rect x="380" y="120" width="90" height="36" rx="18" fill="#ece7fb" stroke="#6b4fd6"/><text x="425" y="142" fill="#6b4fd6">Review</text>
+      <rect x="500" y="120" width="100" height="36" rx="18" fill="#e1f3ea" stroke="#1e8f5a"/><text x="550" y="142" fill="#1e8f5a">Merge Ready</text>
+      <rect x="640" y="120" width="90" height="36" rx="18" fill="#1e8f5a" stroke="#1e8f5a"/><text x="685" y="142" fill="#fff">Done</text>
+      <rect x="20" y="250" width="90" height="36" rx="18" fill="#fbe3e2" stroke="#c93c37"/><text x="65" y="272" fill="#c93c37">Failed</text>
+      <rect x="260" y="250" width="130" height="36" rx="18" fill="#fff" stroke="#b86e00"/><text x="325" y="272" fill="#b86e00">Changes Requested</text>
+      <rect x="560" y="250" width="90" height="36" rx="18" fill="#fbe3e2" stroke="#c93c37"/><text x="605" y="272" fill="#c93c37">Blocked</text>
+    </g>
+    <g stroke="#5b6470" stroke-width="1.3" fill="none" marker-end="url(#a4)">
+      <path d="M110 138 L140 138"/>
+      <path d="M230 138 L260 138"/>
+      <path d="M350 138 L380 138"/>
+      <path d="M470 138 L500 138"/>
+      <path d="M600 138 L640 138"/>
+      <!-- skip review -->
+      <path d="M305 120 C 340 60, 500 60, 550 120"/>
+      <!-- running -> changes requested (verify fail) -->
+      <path d="M296 156 L308 250"/>
+      <!-- changes requested -> running (same worker) -->
+      <path d="M342 250 L330 156"/>
+      <!-- review -> changes requested -->
+      <path d="M418 156 L378 250"/>
+      <!-- running -> blocked -->
+      <path d="M345 156 L580 250"/>
+      <!-- running -> failed -->
+      <path d="M270 156 L100 250"/>
+      <!-- failed -> ready -->
+      <path d="M90 250 C 120 210, 150 190, 170 156"/>
+      <!-- blocked -> ready (answer relayed), routed under the bottom row -->
+      <path d="M605 286 L605 322 L185 322 L185 156"/>
+    </g>
+    <g font-size="8.6" fill="#5b6470">
+      <text x="112" y="130">deps done</text>
+      <text x="232" y="130">claimed</text>
+      <text x="352" y="130">PR + report</text>
+      <text x="472" y="130">approved</text>
+      <text x="600" y="130">merged</text>
+      <text x="360" y="72">normal/low tasks that pass verify skip review</text>
+      <text x="292" y="200" text-anchor="end">verify fails ↓</text>
+      <text x="292" y="212" text-anchor="end">↑ back to the same worker</text>
+      <text x="402" y="238">reviewer findings</text>
+      <text x="475" y="188">stuck → Question</text>
+      <text x="150" y="238" text-anchor="end">CLI error / timeout</text>
+      <text x="140" y="196">retry ladder</text>
+      <text x="395" y="316" text-anchor="middle">your Answer relayed into Feedback</text>
+    </g>
+    <text x="20" y="352" font-size="9" fill="#5b6470">Retry ladder for Failed: attempt 1 same agent · attempt 2 one model tier up (other agent if close) · attempt 3 asks you.</text>
+    <text x="20" y="365" font-size="9" fill="#5b6470">Stale Running (no heartbeat 10 min) → Ready. A rebase conflict at merge also sends the task to Changes Requested.</text>
+  </svg>
+  <figcaption>State machine for one task. Solid arrows are transitions the tool makes from verify results, reviewer verdicts, merge outcomes, or your answers.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>What "done" means</h4><p>The branch was rebased on the latest main, the fast verify script passed on the rebased tree, the PR was squash-merged, and the task's decisions and temporary hacks were appended to the repo's decision and debt logs. Not "the agent said it finished."</p></div>
+    <div class="card"><h4>When review is skipped</h4><p>Default policy reviews critical and high tasks, anything that touched the contracts or design docs, anything with a missing report, and anything that edited files outside its scope. Normal and low tasks that pass verify merge directly. In the last four hours you flip the policy to review everything and merge by hand.</p></div>
+  </div>
+</section>
+
+<!-- ============================== 05 ROUTING ============================== -->
+<section class="page">
+  <div class="section-num">05</div>
+  <h2>Routing: best agent, right model</h2>
+  <p class="lead">Every task carries a type, an importance, and a size. A deterministic table lookup picks the agent with the highest strength for that type, then the model tier from importance. No model decides who works on what.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker></defs>
+    <rect x="20" y="30" width="150" height="150" rx="8" fill="#f4f6f9" stroke="#d9dee5"/>
+    <text x="30" y="50" font-size="10.5" font-weight="700">Task T-016</text>
+    <text x="30" y="70" font-size="9.5">type: <tspan font-weight="600">frontend</tspan></text>
+    <text x="30" y="86" font-size="9.5">importance: <tspan font-weight="600">critical</tspan></text>
+    <text x="30" y="102" font-size="9.5">size: <tspan font-weight="600">M</tspan></text>
+    <text x="30" y="118" font-size="9.5">scope: frontend/src/**</text>
+    <text x="30" y="140" font-size="9" fill="#5b6470">"Speaker selection card,</text>
+    <text x="30" y="153" font-size="9" fill="#5b6470"> the thing judges see first"</text>
+    <path d="M170 105 L205 105" stroke="#5b6470" stroke-width="1.4" marker-end="url(#a5)"/>
+
+    <rect x="205" y="30" width="200" height="150" rx="8" fill="#fff" stroke="#2457d6"/>
+    <text x="215" y="50" font-size="10.5" font-weight="700" fill="#2457d6">1 · score by type</text>
+    <g font-size="9.5">
+      <text x="215" y="72">claude-aryan  frontend = <tspan font-weight="700">5</tspan></text>
+      <text x="215" y="88">claude-friend frontend = <tspan font-weight="700">5</tspan></text>
+      <text x="215" y="104">codex-aryan   frontend = 3</text>
+      <text x="215" y="120">agy-friend    frontend = 3</text>
+    </g>
+    <text x="215" y="146" font-size="9" fill="#5b6470">tie → shortest queue → cheaper</text>
+    <text x="215" y="160" font-size="9" fill="#5b6470">skip agents in cooldown / over cap*</text>
+    <path d="M405 105 L440 105" stroke="#5b6470" stroke-width="1.4" marker-end="url(#a5)"/>
+
+    <rect x="440" y="30" width="150" height="150" rx="8" fill="#fff" stroke="#2457d6"/>
+    <text x="450" y="50" font-size="10.5" font-weight="700" fill="#2457d6">2 · tier by importance</text>
+    <g font-size="9.5">
+      <text x="450" y="72">critical → <tspan font-weight="700">best</tspan></text>
+      <text x="450" y="88">high → high</text>
+      <text x="450" y="104">normal → mid</text>
+      <text x="450" y="120">low → low</text>
+    </g>
+    <text x="450" y="146" font-size="9" fill="#5b6470">then type overrides:</text>
+    <text x="450" y="160" font-size="9" fill="#5b6470">claude.frontend.best = opus</text>
+    <path d="M590 105 L625 105" stroke="#5b6470" stroke-width="1.4" marker-end="url(#a5)"/>
+
+    <rect x="625" y="30" width="115" height="150" rx="8" fill="#e1f3ea" stroke="#1e8f5a"/>
+    <text x="635" y="50" font-size="10.5" font-weight="700" fill="#1e8f5a">Result</text>
+    <text x="635" y="76" font-size="9.5">agent:</text><text x="635" y="90" font-size="10" font-weight="700">claude-aryan</text>
+    <text x="635" y="112" font-size="9.5">model:</text><text x="635" y="126" font-size="10" font-weight="700">opus 5.5</text>
+    <text x="635" y="148" font-size="9.5">effort:</text><text x="635" y="162" font-size="10" font-weight="700">high</text>
+    <text x="20" y="200" font-size="9" fill="#5b6470">* critical tasks ignore cooldown and cap filters; they wait for the best agent unless another scores within one point. Scope overlap prefers the agent already working in those files.</text>
+  </svg>
+  <figcaption>Your example, traced. A critical frontend task lands on Claude running Opus 5.5, because Opus currently outranks Fable on the WebDev Arena leaderboard. Fable is used for critical, large, long-horizon tasks where it leads.</figcaption>
+  </figure>
+
+  <h3>Default strength table (1 = weak, 5 = strongest), editable in config</h3>
+  <table>
+    <tr><th>Task type</th><th>Claude Code</th><th>Codex</th><th>Gemini / Antigravity</th><th>Evidence behind the default</th></tr>
+    <tr><td>frontend, docs, research, bugfix, integration</td><td><span class="tag blue">5</span></td><td>3–4</td><td>3–4</td><td>WebDev Arena (Sep 25 2026): Opus 5.5 #1, Astra #2, Fable #3. Practitioner reviews: Claude for design and multi-file work.</td></tr>
+    <tr><td>backend, realtime, tests, infra</td><td>4</td><td><span class="tag purple">5</span></td><td>2–3</td><td>Reviews agree Codex "does what you said" on backend; strong at PR-review bug catching.</td></tr>
+    <tr><td>ml_audio, ml_fusion, eval</td><td><span class="tag blue">4</span></td><td>3–4</td><td>3–4</td><td>Terminal-Bench 2.1: Fable 5.1 tops; MLE-bench: Gemini 3 Pro and Opus within 1.3 points.</td></tr>
+    <tr><td>ml_vision (video/image input)</td><td>4</td><td>3</td><td><span class="tag amber">4</span></td><td>Gemini accepts video and audio natively; cheapest bulk option.</td></tr>
+  </table>
+  <table>
+    <tr><th>Tier</th><th>Claude</th><th>Codex</th><th>Antigravity</th><th>Used for</th></tr>
+    <tr><td><strong>best</strong></td><td>Fable 5.1 (Opus 5.5 for frontend)</td><td>GPT-6 Astra · xhigh</td><td>Gemini 3.1 Pro</td><td>critical only</td></tr>
+    <tr><td><strong>high</strong></td><td>Opus 5.5 · high</td><td>GPT-6 Astra · high</td><td>Gemini 3.1 Pro</td><td>high</td></tr>
+    <tr><td><strong>mid</strong></td><td>Sonnet 5 · medium</td><td>GPT-6 Sol · medium</td><td>Gemini 3.8 Flash</td><td>normal</td></tr>
+    <tr><td><strong>low</strong></td><td>Haiku 4.5</td><td>GPT-6 Luna</td><td>Gemini 3.8 Flash</td><td>low</td></tr>
+  </table>
+  <p class="small">Override any assignment with <code>swarm assign T-016 --agent codex-aryan --model gpt-6-astra</code>, or drag the card to another agent's column. Rerouting runs automatically for Ready tasks whose agent is offline, rate-limited, or over its spend cap.</p>
+</section>
+
+<!-- ============================== 06 WORKER LOOP ============================== -->
+<section class="page">
+  <div class="section-num">06</div>
+  <h2>The worker loop</h2>
+  <p class="lead">One <code>swarm run</code> per laptop. It polls once for all its agents, hands each task to a free slot, and runs the eight steps below in an isolated git worktree. The model only edits and commits; the tool pushes, opens the PR, and reports.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 305" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker></defs>
+    <g font-size="9.5">
+      <!-- row 1 -->
+      <rect x="20" y="20" width="165" height="70" rx="8" fill="#e4ebfb" stroke="#2457d6"/>
+      <text x="30" y="38" font-weight="700" fill="#2457d6">1 · Claim</text>
+      <text x="30" y="54">Status → Running + nonce,</text><text x="30" y="68">wait 1.5 s, re-read.</text><text x="30" y="82" fill="#5b6470">Nonce changed → skip.</text>
+      <path d="M185 55 L205 55" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <rect x="205" y="20" width="165" height="70" rx="8" fill="#fff" stroke="#d9dee5"/>
+      <text x="215" y="38" font-weight="700">2 · Worktree</text>
+      <text x="215" y="54">git fetch; worktree add</text><text x="215" y="68">task/T-016 from origin/main</text><text x="215" y="82" fill="#5b6470">(reuse branch on retry); setup deps</text>
+      <path d="M370 55 L390 55" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <rect x="390" y="20" width="165" height="70" rx="8" fill="#fff" stroke="#d9dee5"/>
+      <text x="400" y="38" font-weight="700">3 · Compile prompt</text>
+      <text x="400" y="54">rules + task card + feedback</text><text x="400" y="68">+ only the docs for this type</text><text x="400" y="82" fill="#5b6470">+ report schema · 6–12k tokens</text>
+      <path d="M555 55 L575 55" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <rect x="575" y="20" width="165" height="70" rx="8" fill="#fbeedb" stroke="#b86e00"/>
+      <text x="585" y="38" font-weight="700" fill="#b86e00">4 · Run CLI headless</text>
+      <text x="585" y="54">claude -p / codex exec / agy -p</text><text x="585" y="68">model + effort from routing</text><text x="585" y="82" fill="#5b6470">capped: turns, minutes, budget</text>
+      <!-- down -->
+      <path d="M657 90 L657 110" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <!-- row 2 (right to left) -->
+      <rect x="575" y="110" width="165" height="70" rx="8" fill="#fff" stroke="#d9dee5"/>
+      <text x="585" y="128" font-weight="700">5 · Parse report</text>
+      <text x="585" y="144">structured output, or</text><text x="585" y="158">.swarm/report.json, or</text><text x="585" y="172" fill="#5b6470">synthesized from git diff (flagged)</text>
+      <path d="M575 145 L555 145" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <rect x="390" y="110" width="165" height="70" rx="8" fill="#e1f3ea" stroke="#1e8f5a"/>
+      <text x="400" y="128" font-weight="700" fill="#1e8f5a">6 · Verify (always)</text>
+      <text x="400" y="144">scope check on changed files</text><text x="400" y="158">scripts/verify_fast.sh ≤ 60 s</text><text x="400" y="172" fill="#5b6470">the tool runs it, not the model</text>
+      <path d="M390 145 L370 145" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <rect x="205" y="110" width="165" height="70" rx="8" fill="#fff" stroke="#d9dee5"/>
+      <text x="215" y="128" font-weight="700">7 · Push + PR</text>
+      <text x="215" y="144">commit leftovers, push branch,</text><text x="215" y="158">gh pr create (body = report</text><text x="215" y="172" fill="#5b6470">summary + verify tail)</text>
+      <path d="M205 145 L185 145" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <rect x="20" y="110" width="165" height="70" rx="8" fill="#ece7fb" stroke="#6b4fd6"/>
+      <text x="30" y="128" font-weight="700" fill="#6b4fd6">8 · Publish</text>
+      <text x="30" y="144">report → card body; PR link;</text><text x="30" y="158">Review / Merge Ready / Blocked</text><text x="30" y="172" fill="#5b6470">(+ Question) / Failed. Dispose wt.</text>
+      <!-- loop arrow -->
+      <path d="M100 180 L100 215 L100 230" stroke="#5b6470" stroke-width="1.3" fill="none"/>
+      <path d="M100 230 L140 230" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a6)"/>
+      <text x="146" y="234" font-size="9.5" fill="#5b6470">next task in my column, or sleep 15 s</text>
+    </g>
+    <rect x="390" y="205" width="350" height="88" rx="8" fill="#f4f6f9" stroke="#d9dee5"/>
+    <text x="400" y="222" font-size="9.5" font-weight="700">Caps by task size</text>
+    <g font-size="9.2">
+      <text x="400" y="240">S · 30 turns · 20 min · $3 &nbsp;&nbsp; M · 60 turns · 40 min · $8 &nbsp;&nbsp; L · 120 turns · 75 min · $20</text>
+      <text x="400" y="256" fill="#5b6470">Timeout or CLI error → Failed, retry ladder.</text>
+      <text x="400" y="270" fill="#5b6470">Rate limit → back to Ready, provider cools down, no attempt used.</text>
+      <text x="400" y="284" fill="#5b6470">Heartbeat every 60 s: the other laptop sees this agent is alive.</text>
+    </g>
+  </svg>
+  <figcaption>The report the model must produce: status, summary, files changed, tests run, temporary hacks (debts), decisions with impact, and an optional question. Claude and Codex return it as validated structured output; other CLIs write a file.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>Why a tool drives the loop</h4><p>A model asked to "keep looping" forgets, drifts, or stops. A 300-line Python loop does not. It also gives you restarts: kill it, start it again, and it resumes from the board.</p></div>
+    <div class="card"><h4>Why the model never pushes</h4><p>Codex stays in its write-only sandbox, Claude needs no network permission, and nothing an agent does can reach GitHub except through the tool with your own <code>gh</code> login.</p></div>
+  </div>
+</section>
+
+<!-- ============================== 07 CONTROL LOOP ============================== -->
+<section class="page">
+  <div class="section-num">07</div>
+  <h2>The control loop: review, merge, recover</h2>
+  <p class="lead"><code>swarm serve</code> runs on laptop A every 30 seconds and does the seven things below, in order. It is the "agent that constantly reviews all the work" you asked for, split into a deterministic part (verify, rebase, merge, recover) and a model part (the reviewer).</p>
+
+  <figure>
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker></defs>
+    <g font-size="9.3">
+      <rect x="20" y="20" width="100" height="62" rx="8" fill="#fbe3e2" stroke="#c93c37"/><text x="30" y="38" font-weight="700" fill="#c93c37">1 Reaper</text><text x="30" y="54">Running with stale</text><text x="30" y="67">heartbeat → Ready</text>
+      <rect x="126" y="20" width="100" height="62" rx="8" fill="#fbeedb" stroke="#b86e00"/><text x="136" y="38" font-weight="700" fill="#b86e00">2 Relay</text><text x="136" y="54">your Answers →</text><text x="136" y="67">Feedback, unblock</text>
+      <rect x="232" y="20" width="100" height="62" rx="8" fill="#e4ebfb" stroke="#2457d6"/><text x="242" y="38" font-weight="700" fill="#2457d6">3 Promote</text><text x="242" y="54">deps all Done →</text><text x="242" y="67">Backlog → Ready</text>
+      <rect x="338" y="20" width="100" height="62" rx="8" fill="#ece7fb" stroke="#6b4fd6"/><text x="348" y="38" font-weight="700" fill="#6b4fd6">4 Review</text><text x="348" y="54">verify_full, then</text><text x="348" y="67">reviewer model</text>
+      <rect x="444" y="20" width="100" height="62" rx="8" fill="#e1f3ea" stroke="#1e8f5a"/><text x="454" y="38" font-weight="700" fill="#1e8f5a">5 Merge</text><text x="454" y="54">rebase, verify_fast,</text><text x="454" y="67">squash, logs</text>
+      <rect x="550" y="20" width="100" height="62" rx="8" fill="#fff" stroke="#d9dee5"/><text x="560" y="38" font-weight="700">6 Reroute</text><text x="560" y="54">agent offline /</text><text x="560" y="67">cooldown / over cap</text>
+      <rect x="656" y="20" width="84" height="62" rx="8" fill="#fff" stroke="#d9dee5"/><text x="666" y="38" font-weight="700">7 Status</text><text x="666" y="54">page every</text><text x="666" y="67">15 min</text>
+      <path d="M120 51 L126 51 M226 51 L232 51 M332 51 L338 51 M438 51 L444 51 M544 51 L550 51 M650 51 L656 51" stroke="#5b6470" stroke-width="1.3"/>
+    </g>
+    <!-- reviewer detail -->
+    <rect x="20" y="100" width="350" height="140" rx="8" fill="#f4f6f9" stroke="#d9dee5"/>
+    <text x="30" y="118" font-size="10.5" font-weight="700" fill="#6b4fd6">Reviewer (model part)</text>
+    <g font-size="9.3">
+      <text x="30" y="136">Gate: does policy require review? (critical/high, contracts or</text>
+      <text x="30" y="149">design docs touched, missing report, out-of-scope edits). Else → Merge Ready.</text>
+      <text x="30" y="167">Deterministic first: fresh worktree, <tspan font-family="Menlo,monospace">verify_full.sh</tspan>.</text>
+      <text x="30" y="180">Fails → Changes Requested, no model tokens spent.</text>
+      <text x="30" y="198">Then a <tspan font-weight="700">different model family</tspan> (Codex GPT-6 Sol by default), read-only,</text>
+      <text x="30" y="211">gets acceptance criteria + diff + worker report + verify output.</text>
+      <text x="30" y="229">Verdict: approve · request changes (≤ 2 rounds) · escalate → Question.</text>
+    </g>
+    <!-- status page detail -->
+    <rect x="390" y="100" width="350" height="140" rx="8" fill="#f4f6f9" stroke="#d9dee5"/>
+    <text x="400" y="118" font-size="10.5" font-weight="700">Status page (the "are we on track" view)</text>
+    <g font-size="9.3" font-family="Menlo,monospace">
+      <text x="400" y="138">13.5 h left · claude ok · codex ok · agy cooldown 9 m</text>
+      <text x="400" y="152">M1 vertical slice   8/8 done</text>
+      <text x="400" y="166">M2 core            11/17 done · 3 running · 1 blocked</text>
+      <text x="400" y="180">M3 polish           0/9  · not started</text>
+      <text x="400" y="194">Needs you: Q-004 (T-011 select UX), T-018 failed ×3</text>
+      <text x="400" y="208">Spend 5h: claude $31/40 · codex 1.2M tok · agy 0.4M tok</text>
+      <text x="400" y="226" fill="#c93c37">RISK: M2 has 6 open tasks and 3.5 h before M3 must start.</text>
+    </g>
+  </svg>
+  <figcaption>Whether to re-plan stays a human call. You read the risk line, then add, cut, split, or reassign tasks from the orchestrator session in one command each.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>Merge, exactly</h4><p>Fresh worktree of the branch, rebase onto main, run fast verify on the rebased tree, force-push with lease, squash-merge via <code>gh</code>, mark Done, append the task's decisions and debts to <code>docs/DECISIONS.md</code> and <code>docs/DEBT.md</code>, then promote dependents. Conflicts go back to the same worker with the file list.</p></div>
+    <div class="card"><h4>Two modes</h4><p>Automatic merging is the default because a broken main is caught by the verify script before it lands. At T-4h you switch to <code>--manual</code>: serve lists Merge Ready PRs and you pick which land. Only one serve can run; a lock row in the Agents DB stops a second one.</p></div>
+  </div>
+</section>
+
+<!-- ============================== 08 HUMAN CHANNEL ============================== -->
+<section class="page">
+  <div class="section-num">08</div>
+  <h2>The human channel</h2>
+  <p class="lead">Agents never stop for reversible decisions. They ask in Notion in two ways, and you answer in Notion or in the orchestrator session. Both write the same field, and the control loop carries the answer to the right task within 30 seconds.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 290" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6470"/></marker></defs>
+    <!-- blocking -->
+    <rect x="20" y="20" width="350" height="250" rx="10" fill="#fbe3e2" stroke="#c93c37"/>
+    <text x="32" y="42" font-size="12" font-weight="700" fill="#c93c37">Kind: blocking · "I can't continue without you"</text>
+    <g font-size="9.5">
+      <rect x="32" y="56" width="326" height="52" rx="6" fill="#fff" stroke="#d9dee5"/>
+      <text x="40" y="72" font-weight="700">Q-004 · T-011 speaker selection</text>
+      <text x="40" y="86">"Tap the face overlay, or tap a chip in a rail? The design doc</text>
+      <text x="40" y="99">doesn't say, and it changes the whole component tree."</text>
+      <text x="32" y="126">Task → <tspan fill="#c93c37" font-weight="700">Blocked</tspan>. Partial work is committed and pushed.</text>
+      <text x="32" y="142">Worker slot moves on to the next task. Nothing idles.</text>
+      <path d="M195 150 L195 172" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a8)"/>
+      <rect x="32" y="176" width="326" height="40" rx="6" fill="#e4ebfb" stroke="#2457d6"/>
+      <text x="40" y="192" font-weight="700" fill="#2457d6">You: type in Answer (Notion) or  swarm answer Q-004 "chips"</text>
+      <text x="40" y="207">Both laptops can do this. No status to flip.</text>
+      <path d="M195 216 L195 236" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a8)"/>
+      <text x="32" y="252" fill="#17202a">Relay: answer → Feedback, task → <tspan fill="#2457d6" font-weight="700">Ready</tspan>. Same worker, same branch.</text>
+    </g>
+    <!-- fyi -->
+    <rect x="390" y="20" width="350" height="250" rx="10" fill="#fbeedb" stroke="#b86e00"/>
+    <text x="402" y="42" font-size="12" font-weight="700" fill="#b86e00">Kind: fyi · "Big call made, proceeding unless told no"</text>
+    <g font-size="9.5">
+      <rect x="402" y="56" width="326" height="52" rx="6" fill="#fff" stroke="#d9dee5"/>
+      <text x="410" y="72" font-weight="700">Q-007 · T-014 identity persistence</text>
+      <text x="410" y="86">"Keeping the selected speaker for 3 s through occlusion, then</text>
+      <text x="410" y="99">degrading. Impact: high. Alternatives: 1 s, 5 s, never."</text>
+      <text x="402" y="126">Task <tspan fill="#b86e00" font-weight="700">keeps running</tspan>. Decision logged in the report.</text>
+      <text x="402" y="142">Question shows in the Open column with impact = high.</text>
+      <path d="M565 150 L565 172" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a8)"/>
+      <rect x="402" y="176" width="326" height="40" rx="6" fill="#e4ebfb" stroke="#2457d6"/>
+      <text x="410" y="192" font-weight="700" fill="#2457d6">You: "make it 5 s" + tick Needs Follow-up</text>
+      <text x="410" y="207">Or leave it: silence means the provisional choice stands.</text>
+      <path d="M565 216 L565 236" stroke="#5b6470" stroke-width="1.3" marker-end="url(#a8)"/>
+      <text x="402" y="252" fill="#17202a">Relay: follow-up task created with your answer, routed.</text>
+    </g>
+  </svg>
+  <figcaption>Two kinds of question, two outcomes. The one lesson from the only published attempt at "Notion as a Claude Code queue" was that it died for lack of exactly this channel.</figcaption>
+  </figure>
+
+  <div class="grid3">
+    <div class="card"><h4>Who asks</h4><p>Workers (stuck, or a high-impact call), the reviewer (escalate after two rounds), and the planner (ambiguity in PLAN.md).</p></div>
+    <div class="card"><h4>Where it shows</h4><p>Questions board, Open column, sorted by impact. Also the "Needs you" line on the status page and in <code>swarm status</code>.</p></div>
+    <div class="card"><h4>Paper trail</h4><p>Every decision agents report is appended to <code>docs/DECISIONS.md</code> on merge, so the pitch and judge Q&amp;A have receipts.</p></div>
+  </div>
+</section>
+
+<!-- ============================== 09 DOCS ============================== -->
+<section class="page">
+  <div class="section-num">09</div>
+  <h2>Shared docs and what each agent sees</h2>
+  <p class="lead">Every agent on every laptop reads the same docs because they live in the repo and each worktree is cut from the latest main. Nobody gets everything. The prompt inlines only the docs for the task's type and points to the rest by path.</p>
+
+  <table>
+    <tr><th style="width:190px">File</th><th>Holds</th><th>Who writes it</th></tr>
+    <tr><td><code>PLAN.md</code></td><td>Product, demo story, milestones, success criteria. The input to <code>swarm plan</code>.</td><td>You, with the orchestrator, at kickoff; orchestrator thereafter</td></tr>
+    <tr><td><code>docs/ARCHITECTURE.md</code></td><td>Components, data flow, how to run, the ML pipeline section.</td><td>Backend and integration tasks propose; orchestrator approves</td></tr>
+    <tr><td><code>docs/DESIGN.md</code></td><td>UX principles, tokens, the UI state machine, component list, screenshots.</td><td>Frontend tasks (always reviewed)</td></tr>
+    <tr><td><code>docs/CONTRACTS.md</code></td><td>API endpoints, WebSocket events, JSON schemas.</td><td>Backend tasks (always reviewed; must list affected consumers)</td></tr>
+    <tr><td><code>docs/DECISIONS.md</code>, <code>docs/DEBT.md</code></td><td>Append-only logs of decisions and temporary hacks.</td><td>The merge step</td></tr>
+    <tr><td><code>AGENTS.md</code> (+ one-line <code>CLAUDE.md</code>, <code>GEMINI.md</code>)</td><td>Worker rules: stay in scope, commit as you go, run verify, list every hack, ask via a question, end with the report.</td><td>Ships with the template</td></tr>
+  </table>
+
+  <figure>
+  <svg viewBox="0 0 760 190" xmlns="http://www.w3.org/2000/svg">
+    <g font-size="9.5">
+      <text x="20" y="20" font-size="11" font-weight="700">Docs inlined into the prompt, by task type</text>
+      <!-- header row -->
+      <g font-weight="700" fill="#5b6470">
+        <text x="200" y="46">PLAN.md#summary</text>
+        <text x="320" y="46">AGENTS.md</text>
+        <text x="410" y="46">DESIGN.md</text>
+        <text x="500" y="46">CONTRACTS.md</text>
+        <text x="610" y="46">ARCHITECTURE.md</text>
+      </g>
+      <!-- rows -->
+      <g>
+        <text x="20" y="72" font-weight="600">frontend</text>
+        <circle cx="240" cy="68" r="6" fill="#2457d6"/><circle cx="350" cy="68" r="6" fill="#2457d6"/><circle cx="440" cy="68" r="6" fill="#2457d6"/><circle cx="545" cy="68" r="6" fill="#2457d6"/><circle cx="660" cy="68" r="6" fill="#fff" stroke="#d9dee5"/>
+        <text x="20" y="98" font-weight="600">backend / realtime</text>
+        <circle cx="240" cy="94" r="6" fill="#2457d6"/><circle cx="350" cy="94" r="6" fill="#2457d6"/><circle cx="440" cy="94" r="6" fill="#fff" stroke="#d9dee5"/><circle cx="545" cy="94" r="6" fill="#2457d6"/><circle cx="660" cy="94" r="6" fill="#2457d6"/>
+        <text x="20" y="124" font-weight="600">ml_audio / vision / fusion</text>
+        <circle cx="240" cy="120" r="6" fill="#2457d6"/><circle cx="350" cy="120" r="6" fill="#2457d6"/><circle cx="440" cy="120" r="6" fill="#fff" stroke="#d9dee5"/><circle cx="545" cy="120" r="6" fill="#2457d6"/><text x="552" y="124" font-size="8" fill="#5b6470">#events</text><circle cx="660" cy="120" r="6" fill="#2457d6"/><text x="667" y="124" font-size="8" fill="#5b6470">#ml</text>
+        <text x="20" y="150" font-weight="600">integration / docs</text>
+        <circle cx="240" cy="146" r="6" fill="#2457d6"/><circle cx="350" cy="146" r="6" fill="#2457d6"/><circle cx="440" cy="146" r="6" fill="#2457d6"/><circle cx="545" cy="146" r="6" fill="#2457d6"/><circle cx="660" cy="146" r="6" fill="#2457d6"/>
+        <text x="20" y="176" font-weight="600">tests / eval / bugfix</text>
+        <circle cx="240" cy="172" r="6" fill="#2457d6"/><circle cx="350" cy="172" r="6" fill="#2457d6"/><circle cx="440" cy="172" r="6" fill="#fff" stroke="#d9dee5"/><circle cx="545" cy="172" r="6" fill="#fff" stroke="#d9dee5"/><circle cx="660" cy="172" r="6" fill="#fff" stroke="#d9dee5"/>
+      </g>
+    </g>
+  </svg>
+  <figcaption>Filled = inlined. Hollow = referenced by path; the agent reads it on demand. A "#section" pulls one heading only. Target prompt size is 6–12k tokens including the task card and report schema.</figcaption>
+  </figure>
+
+  <div class="callout good"><strong>Your ask, answered:</strong> yes to a plan doc and a design doc. I added contracts (so frontend, backend, and ML agree on event shapes without talking) and architecture (so integration tasks know how pieces fit). The mapping above is config, so you can change who sees what on the day.</div>
+</section>
+
+<!-- ============================== 10 BUDGET ============================== -->
+<section class="page">
+  <div class="section-num">10</div>
+  <h2>Budget and subscription limits</h2>
+  <p class="lead">This is the reason the system exists. Seven mechanisms, all configuration, keep any one subscription from becoming the bottleneck and keep the expensive models for the work that deserves them.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg">
+    <g font-size="9.5">
+      <text x="20" y="20" font-size="11" font-weight="700">Where tokens go, by importance (illustrative share of ~40 tasks)</text>
+      <!-- bars -->
+      <text x="20" y="52" font-weight="600">critical (≈10%)</text>
+      <rect x="150" y="40" width="60" height="16" fill="#2457d6"/><text x="216" y="52">Fable / Opus 5.5 / GPT-6 Astra · always reviewed · waits for the best agent</text>
+      <text x="20" y="82" font-weight="600">high (≈25%)</text>
+      <rect x="150" y="70" width="150" height="16" fill="#6b4fd6"/><text x="306" y="82">Opus 5.5 / Astra · reviewed · may spill to next-best agent when queues are deep</text>
+      <text x="20" y="112" font-weight="600">normal (≈50%)</text>
+      <rect x="150" y="100" width="300" height="16" fill="#1e8f5a"/><text x="456" y="112">Sonnet 5 / GPT-6 Sol / Gemini 3.8 Flash · merges on passing verify</text>
+      <text x="20" y="142" font-weight="600">low (≈15%)</text>
+      <rect x="150" y="130" width="90" height="16" fill="#b86e00"/><text x="246" y="142">Haiku / Luna / Flash · docs, scripts, cleanup</text>
+      <text x="20" y="176" fill="#5b6470">API list price per 1M output tokens, for scale: Fable $50 · Astra $50 · Opus 5.5 $20 · Sonnet 5 $10 · Sol $10 · Flash $3.75 · Haiku $5 · Luna $0.50.</text>
+      <text x="20" y="192" fill="#5b6470">Your subscriptions cover the runs; these numbers only show why routing normal work away from the top tier matters.</text>
+    </g>
+  </svg>
+  </figure>
+
+  <table>
+    <tr><th style="width:190px">Mechanism</th><th>What it does</th><th>Default</th></tr>
+    <tr><td>Fresh context per task</td><td>No session outlives one task. Cost per task is flat instead of climbing.</td><td>S 30 turns · M 60 · L 120</td></tr>
+    <tr><td>Tier by importance</td><td>Best models only for critical work; evidence-based exceptions per type.</td><td>see section 05</td></tr>
+    <tr><td>Concurrency caps</td><td>Per provider per laptop, because Claude subscriptions have been observed to 429 around six parallel sessions.</td><td>claude 3 · codex 3 · agy 2</td></tr>
+    <tr><td>Usage ledger</td><td>Every run logs tokens and cost (where the CLI reports it) per agent, to a local file and the Agents DB.</td><td>always on</td></tr>
+    <tr><td>Soft caps</td><td>Above 80% of an agent's 5-hour cap, it stops receiving normal and low work.</td><td>claude $40 / 5 h, tunable</td></tr>
+    <tr><td>Cooldown + reroute</td><td>A rate-limit error parks the provider until its reset time (or 15 min) and reroutes non-critical Ready tasks. No attempt is consumed.</td><td>automatic</td></tr>
+    <tr><td>Cheap orchestration</td><td>Orchestrator on Opus 5.5, never reads code. Planner is one structured call per milestone. Reviewer on GPT-6 Sol, only on high+ tasks.</td><td>config</td></tr>
+  </table>
+
+  <div class="callout warn"><strong>Fable specifically:</strong> on your Max plan Fable is included only up to half the weekly limit, and it is not the top model for frontend. The default config spends Fable only on critical, large, long-horizon tasks (multi-file ML and integration), which is where the benchmarks put it first.</div>
+</section>
+
+<!-- ============================== 11 CLIs ============================== -->
+<section class="page">
+  <div class="section-num">11</div>
+  <h2>Agent CLIs and models (verified Sep 26, 2026)</h2>
+  <p class="lead">One adapter per provider behind one interface. The roster you bring on the day is config; a generic adapter covers anything with a prompt flag (Copilot CLI, Cursor CLI, Muse, or whatever appears by October).</p>
+
+  <table>
+    <tr><th style="width:110px">Provider</th><th>Headless invocation the runner uses</th><th>Status</th></tr>
+    <tr><td><strong>Claude Code</strong><br><span class="small">v2.1.283</span></td><td><code>claude -p --output-format json --permission-mode bypassPermissions --model {m} --effort {e} --max-turns {n} --max-budget-usd {b} --append-system-prompt-file rules.md --json-schema {report}</code> with the prompt on stdin. Returns cost, usage, session id, and validated structured output.</td><td><span class="tag green">verified</span></td></tr>
+    <tr><td><strong>Codex</strong><br><span class="small">v0.157.1</span></td><td><code>codex exec --json -C {wt} -m {m} -c model_reasoning_effort={e} --sandbox workspace-write --output-schema report.json -</code>. JSONL events with token usage (no dollar figure).</td><td><span class="tag green">verified</span></td></tr>
+    <tr><td><strong>Antigravity</strong><br><span class="small">replaces Gemini CLI</span></td><td><code>agy -p … --model={m} --approval-mode yolo --output-format json</code>. Gemini CLI dropped personal and AI Pro accounts on Jun 18, 2026; your Gemini Pro subscription works in Antigravity. Flags are third-party sourced.</td><td><span class="tag amber">experimental, verify at rehearsal</span></td></tr>
+    <tr><td><strong>Gemini CLI</strong><br><span class="small">API key only</span></td><td><code>gemini -p --output-format json --approval-mode yolo -m {m}</code>. Fallback if Antigravity fails; free API key is Flash-only, 250 req/day.</td><td><span class="tag green">verified</span></td></tr>
+    <tr><td><strong>Grok Build</strong><br><span class="small">v1.0.41</span></td><td><code>grok -p --prompt-file p.md --output-format json --always-approve --max-turns {n} --cwd {wt} --model {m}</code>. Needs SuperGrok or an xAI key.</td><td><span class="tag green">verified</span></td></tr>
+    <tr><td><strong>generic</strong></td><td>A command template with <code>{prompt_file} {model} {cwd}</code> placeholders; report via file only.</td><td><span class="tag">any</span></td></tr>
+  </table>
+
+  <h3>Models and knobs</h3>
+  <table>
+    <tr><th>Family</th><th>Selectable</th><th>Reasoning knob</th><th>Subscription notes</th></tr>
+    <tr><td>Anthropic</td><td>fable (5.1), opus (5.5, default), sonnet (5), haiku (4.5); 1M context on Opus, Sonnet, Fable</td><td><code>--effort low…max</code></td><td>Pro: Opus/Sonnet/Haiku, Fable by credits. Max: Fable up to 50% of weekly. 5-hour rolling window shared with claude.ai.</td></tr>
+    <tr><td>OpenAI</td><td>gpt-6-astra (best), gpt-6-sol (mid), gpt-6-luna (cheap); gpt-5.5 retires Oct 14</td><td><code>model_reasoning_effort low…ultra</code></td><td>Plus per 5 h: Astra 5–45, Sol 15–150, Luna 350–3,000 messages. Pro 5×/20× multiply that. CLI and cloud share one pool.</td></tr>
+    <tr><td>Google</td><td>gemini-3.1-pro, gemini-3.8-flash (Antigravity)</td><td>none documented</td><td>AI Pro: 5-hour refresh plus weekly cap, no published numbers. Free: "meaningful weekly quota."</td></tr>
+  </table>
+
+</section>
+
+<!-- ============================== 12 FAILURES ============================== -->
+<section class="page">
+  <div class="section-num">12</div>
+  <h2>Failure handling</h2>
+  <p class="lead">Everything that can fail on a hackathon night, and what the tool does about it without waking you up.</p>
+
+  <table>
+    <tr><th style="width:190px">Failure</th><th style="width:170px">Detected by</th><th>Response</th></tr>
+    <tr><td>Worker process dies or laptop sleeps</td><td>heartbeat older than 10 min</td><td>Task back to Ready, attempts +1, pushed branch reused. At most one task's uncommitted work is lost.</td></tr>
+    <tr><td>CLI error or timeout</td><td>exit code, timer</td><td>Failed → retry ladder: same agent, then one tier up (other agent if within one point), then a question to you.</td></tr>
+    <tr><td>Rate limit on a provider</td><td>parsed error</td><td>Provider in cooldown until reset (or 15 min), visible on both laptops. Task back to Ready, no attempt spent. Non-critical work rerouted.</td></tr>
+    <tr><td>Verify script fails</td><td>non-zero exit</td><td>Changes Requested with the failure tail; same worker, same branch.</td></tr>
+    <tr><td>Rebase conflict at merge</td><td>git</td><td>Changes Requested with the conflicting file list; same worker resolves.</td></tr>
+    <tr><td>Notion unreachable</td><td>HTTP errors after 5 retries</td><td>Worker finishes locally and retries publishing; serve skips the cycle. Git state is never touched by Notion state.</td></tr>
+    <tr><td>Provider CLI missing on a laptop</td><td><code>swarm doctor</code>, spawn error</td><td>Agent marked offline; its Ready tasks rerouted.</td></tr>
+    <tr><td>Model didn't write the report</td><td>parser</td><td>Report synthesized from the diff and verify output, flagged, forced through review regardless of policy.</td></tr>
+    <tr><td>Model edited files outside its scope</td><td>diff vs scope globs</td><td>Flagged in the report; forced through review. Not auto-reverted, because that could destroy the actual work.</td></tr>
+    <tr><td>Two control loops started</td><td>lock row in Agents DB</td><td>Second refuses to start unless the first's heartbeat is stale.</td></tr>
+    <tr><td>Task type nobody is strong at</td><td>router</td><td>Assigned to the top scorer anyway with a note. Nothing is ever left unassigned.</td></tr>
+    <tr><td>Antigravity adapter broken</td><td>doctor smoke test</td><td>Agent disabled; Gemini via API key or the other providers take its share.</td></tr>
+  </table>
+
+  <div class="callout"><strong>The recovery drill in rehearsal:</strong> start ten tasks over three agents on two laptops, kill one <code>swarm run</code> mid-task, and confirm the task is reaped and finished by the next attempt, that nothing merges twice, and that the status page reflects it within a minute.</div>
+</section>
+
+<!-- ============================== 13 RULES ============================== -->
+<section class="page">
+  <div class="section-num">13</div>
+  <h2>Rules, security, and disclosure</h2>
+
+  <div class="grid2">
+    <div>
+      <h3>HackRU and MLH rules (verified)</h3>
+      <ul>
+        <li><strong>Oct 10–11, 2026</strong>, Busch Student Center, 24 hours, hacking 12:00 PM Saturday to 12:00 PM Sunday, teams of up to 4.</li>
+        <li>Fall 2025 rules (2026 not yet posted): "You are not allowed to submit a project that has been built before the start of hacking." MLH standard rules add that teams may use libraries, frameworks, and open-source code, and must allow generative AI tools.</li>
+        <li>MLH asks teams to be transparent about AI tools used, listing them in the submission.</li>
+        <li>Judging: functionality and execution, creativity and innovation, technical difficulty. In-person table judging, no demo video required, one track only.</li>
+      </ul>
+      <div class="callout good"><strong>How we stay clean:</strong> swarm-control is a dev tool in its own public repo, dated before Oct 10, never submitted as the project. The project template contains only structure, empty docs, and verify scripts, no product code. The Devpost writeup lists the harness and every model used. I'd still email the organizers a one-liner to confirm; it costs nothing.</div>
+    </div>
+    <div>
+      <h3>Security and blast radius</h3>
+      <ul>
+        <li>Worker CLIs run with full tool permission, but only inside a worktree of the project repo. Never run <code>swarm run</code> from a home directory.</li>
+        <li>Secrets are environment variables. <code>.env</code> is gitignored. Prompts never include them.</li>
+        <li>Codex keeps its workspace-write sandbox. Claude's bypass mode is accepted for a hackathon.</li>
+        <li>Only the tool pushes and merges, using your own <code>gh</code> login. Models never touch the network.</li>
+        <li>Nothing deletes branches except the squash-merge cleanup after success.</li>
+        <li>Notion: one internal connection token shared by both laptops, scoped to one parent page. Teammate joins as a page guest so a free workspace's 1,000-block cap for multi-member workspaces doesn't apply.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 14 TESTING ============================== -->
+<section class="page">
+  <div class="section-num">14</div>
+  <h2>Testing and rehearsal</h2>
+  <p class="lead">Four layers, from no-network unit tests to a real two-laptop rehearsal. The harness is "ready" only when the last layer has been run once, end to end, in under 90 minutes from kickoff to first merged PR.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 170" xmlns="http://www.w3.org/2000/svg">
+    <g font-size="9.5">
+      <rect x="20" y="20" width="170" height="130" rx="8" fill="#f4f6f9" stroke="#d9dee5"/>
+      <text x="30" y="40" font-size="11" font-weight="700">1 · Unit (pytest)</text>
+      <text x="30" y="60">config validation</text><text x="30" y="75">router, every rule</text><text x="30" y="90">prompt compiler + budget</text><text x="30" y="105">report parser + fallbacks</text><text x="30" y="120">adapters vs recorded output</text><text x="30" y="135">Notion client, mocked</text>
+      <rect x="205" y="20" width="170" height="130" rx="8" fill="#e4ebfb" stroke="#2457d6"/>
+      <text x="215" y="40" font-size="11" font-weight="700" fill="#2457d6">2 · End to end, local</text>
+      <text x="215" y="60">in-memory board</text><text x="215" y="75">bare git remote in tmp</text><text x="215" y="90">fake agent script</text><text x="215" y="105">6 tasks, 2 agents, deps</text><text x="215" y="120">one blocked, one failed,</text><text x="215" y="135">one reaped</text>
+      <rect x="390" y="20" width="170" height="130" rx="8" fill="#ece7fb" stroke="#6b4fd6"/>
+      <text x="400" y="40" font-size="11" font-weight="700" fill="#6b4fd6">3 · Notion integration</text>
+      <text x="400" y="60">init on a throwaway page</text><text x="400" y="75">create / claim / report</text><text x="400" y="90">board views exist</text><text x="400" y="105">forced 429 retry path</text><text x="400" y="120">markdown report append</text>
+      <rect x="575" y="20" width="165" height="130" rx="8" fill="#e1f3ea" stroke="#1e8f5a"/>
+      <text x="585" y="40" font-size="11" font-weight="700" fill="#1e8f5a">4 · Rehearsal</text>
+      <text x="585" y="60">both laptops, real CLIs</text><text x="585" y="75">toy project from template</text><text x="585" y="90">10 tasks over 3 agents</text><text x="585" y="105">kill a runner mid-task</text><text x="585" y="120">force a review round</text><text x="585" y="135">measure tokens per size</text>
+    </g>
+  </svg>
+  </figure>
+
+  <div class="grid2">
+    <div class="card"><h4>What rehearsal tunes</h4><p>Turn and minute caps per task size, the Claude concurrency ceiling on your plan, soft caps, and whether the Antigravity adapter works headless. These are the numbers I can't know without running it.</p></div>
+    <div class="card"><h4>What I'll report after it</h4><p>A short table: tasks run, tokens per size, time per size, failures and how they recovered, and the config I changed. If something doesn't hold up, you'll hear it before Oct 10, not during.</p></div>
+  </div>
+</section>
+
+<!-- ============================== 15 GAME DAY ============================== -->
+<section class="page">
+  <div class="section-num">15</div>
+  <h2>Game day, hour by hour</h2>
+  <p class="lead">Full runbook ships with the tool. This is the shape of the day.</p>
+
+  <figure>
+  <svg viewBox="0 0 760 236" xmlns="http://www.w3.org/2000/svg">
+    <g font-size="9.3">
+      <!-- axis -->
+      <line x1="30" y1="60" x2="730" y2="60" stroke="#17202a" stroke-width="2"/>
+      <g fill="#17202a" font-weight="700" text-anchor="middle">
+        <text x="30" y="48">12:00</text><text x="147" y="48">4 PM</text><text x="263" y="48">8 PM</text><text x="380" y="48">12 AM</text><text x="497" y="48">4 AM</text><text x="613" y="48">8 AM</text><text x="730" y="48">12:00</text>
+      </g>
+      <g stroke="#17202a" stroke-width="2"><line x1="30" y1="54" x2="30" y2="66"/><line x1="147" y1="54" x2="147" y2="66"/><line x1="263" y1="54" x2="263" y2="66"/><line x1="380" y1="54" x2="380" y2="66"/><line x1="497" y1="54" x2="497" y2="66"/><line x1="613" y1="54" x2="613" y2="66"/><line x1="730" y1="54" x2="730" y2="66"/></g>
+      <!-- phase bar -->
+      <rect x="30" y="72" width="22" height="22" fill="#2457d6"/>
+      <rect x="52" y="72" width="87" height="22" fill="#6b4fd6"/>
+      <rect x="139" y="72" width="241" height="22" fill="#1e8f5a"/>
+      <rect x="380" y="72" width="233" height="22" fill="#b86e00"/>
+      <rect x="613" y="72" width="59" height="22" fill="#c93c37"/>
+      <rect x="672" y="72" width="58" height="22" fill="#17202a"/>
+      <!-- legend rows, staggered so nothing collides -->
+      <rect x="30" y="106" width="9" height="9" fill="#2457d6"/><text x="44" y="114"><tspan font-weight="700" fill="#2457d6">0:00–0:45</tspan> · PLAN.md, design principles, first contracts, plan M1</text>
+      <rect x="30" y="126" width="9" height="9" fill="#6b4fd6"/><text x="44" y="134"><tspan font-weight="700" fill="#6b4fd6">M1 vertical slice (≈3 h)</tspan> · audio in → one speaker → UI, end to end</text>
+      <rect x="30" y="146" width="9" height="9" fill="#1e8f5a"/><text x="44" y="154"><tspan font-weight="700" fill="#1e8f5a">M2 core (to ≈12 h)</tspan> · separation, tracking, fusion, realtime, UI states · plan M2 when M1 is 70% done</text>
+      <rect x="30" y="166" width="9" height="9" fill="#b86e00"/><text x="44" y="174"><tspan font-weight="700" fill="#b86e00">M3 polish (to T-4h)</tspan> · latency, degraded states, demo path, debt · plan M3 when M2 is 70% done</text>
+      <rect x="30" y="186" width="9" height="9" fill="#c93c37"/><text x="44" y="194"><tspan font-weight="700" fill="#c93c37">T-4h</tspan> · review everything, manual merge, bugfix and polish tasks only</text>
+      <rect x="30" y="206" width="9" height="9" fill="#17202a"/><text x="44" y="214"><tspan font-weight="700">T-2h</tspan> · freeze, rehearse the demo, pitch notes from DECISIONS.md</text>
+      <text x="30" y="228" fill="#5b6470">Hourly: swarm status → risk line → re-plan in one command if needed. Answer Open questions within minutes; they're the only thing that waits on you.</text>
+    </g>
+  </svg>
+  </figure>
+
+  <table>
+    <tr><th style="width:110px">When</th><th style="width:140px">Who</th><th>What</th></tr>
+    <tr><td>Before</td><td>both</td><td><code>swarm doctor</code> green on both laptops. Notion page shared. Template repo instantiated. <code>gh auth</code> done. Laptop A on power with sleep disabled.</td></tr>
+    <tr><td>0:00–0:30</td><td>you two + orchestrator</td><td>Write <code>PLAN.md</code>: product, demo story, milestones. Sketch design principles and the first event contracts. This is the highest-leverage half hour of the day.</td></tr>
+    <tr><td>0:30–0:45</td><td>orchestrator</td><td><code>swarm plan PLAN.md --milestone M1</code>. Read the proposed tasks, fix any, apply.</td></tr>
+    <tr><td>0:45</td><td>laptop A, then both</td><td><code>caffeinate -i swarm serve</code>; <code>swarm run</code> on both laptops.</td></tr>
+    <tr><td>0:45–1:30</td><td>you two</td><td>Do not hand-code. Watch the Questions board, answer fast, fix the verify script if it misbehaves on the real project.</td></tr>
+    <tr><td>hourly</td><td>orchestrator</td><td><code>swarm status</code>. Plan the next milestone at 70%. Cut or split anything the risk line names.</td></tr>
+    <tr><td>T-4h</td><td>you two</td><td>Flip to review-everything and manual merge. Only bugfix and polish tasks.</td></tr>
+    <tr><td>T-2h</td><td>you two</td><td>Freeze. Demo rehearsal. Presentation notes from the decisions log.</td></tr>
+  </table>
+</section>
+
+<!-- ============================== 16 BUILD PHASES ============================== -->
+<section class="page">
+  <div class="section-num">16</div>
+  <h2>Build phases and what I need from you</h2>
+  <p class="lead">Reliability first, intelligence last. Each phase leaves a working, tested tool.</p>
+
+  <table>
+    <tr><th style="width:36px">#</th><th style="width:200px">Phase</th><th>Delivers</th><th style="width:170px">Proof it works</th></tr>
+    <tr><td>1</td><td>Models, config, board interface</td><td>Dataclasses, config loader and validation, Board protocol, in-memory board.</td><td>unit tests</td></tr>
+    <tr><td>2</td><td>Notion board</td><td><code>init</code>, create/claim/query/update, markdown reports, views, retries.</td><td>integration test on a throwaway page</td></tr>
+    <tr><td>3</td><td>Workspace</td><td>Worktree add/reuse/dispose, commit, push, PR create via <code>gh</code>.</td><td>unit tests on a tmp bare remote</td></tr>
+    <tr><td>4</td><td>Adapters</td><td>Claude, Codex, generic first; Antigravity, Gemini, Grok after. Output parsing, rate-limit detection.</td><td>tests against recorded outputs; <code>doctor</code> smoke</td></tr>
+    <tr><td>5</td><td>Router + prompt + report</td><td>Routing rules, doc selection, report schema and fallbacks.</td><td>unit tests, <code>--dry-run</code></td></tr>
+    <tr><td>6</td><td>Runner</td><td><code>swarm run</code>: threads, claim, the eight steps, publish outcomes, heartbeat.</td><td>end-to-end with fake agent</td></tr>
+    <tr><td>7</td><td>Serve</td><td>Reaper, relay, promotion, merge, reroute, status page, lock.</td><td>end-to-end: blocked, failed, reaped</td></tr>
+    <tr><td>8</td><td>Reviewer + planner</td><td>Review gate and run; <code>swarm plan</code> with schema and conflict lint; <code>split</code>.</td><td>real run on a toy repo</td></tr>
+    <tr><td>9</td><td>Template + runbook + docs</td><td><code>hackathon-base</code>, <code>ORCHESTRATOR.md</code>, <code>RUNBOOK.md</code>, README.</td><td>fresh clone to first PR in 90 min</td></tr>
+    <tr><td>10</td><td>Rehearsal</td><td>Both laptops, real CLIs, kill-and-recover, tune caps.</td><td>report to you</td></tr>
+  </table>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>From you, before I start</h4>
+      <ul style="margin-bottom:0">
+        <li>Green light on this document.</li>
+        <li>A Notion page to be the parent, and an internal connection token (I'll give exact steps; five minutes).</li>
+        <li>A throwaway GitHub repo for testing, and <code>gh auth login</code> on this Mac.</li>
+        <li>Whether laptop A is yours.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>From your teammate, before rehearsal</h4>
+      <ul style="margin-bottom:0">
+        <li>Which CLIs and subscriptions they have (Codex on ChatGPT Plus or Pro? Claude? Gemini Pro?).</li>
+        <li>Their laptop OS. Python 3.11+ and <code>gh</code> installed.</li>
+        <li>Guest access to the Notion page.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout"><strong>After the green light</strong> I write the implementation PLAN.md and stop. No code until you say start.</div>
+</section>
+
+<!-- ============================== 17 RISKS ============================== -->
+<section class="page">
+  <div class="section-num">17</div>
+  <h2>Risks and open items</h2>
+
+  <table>
+    <tr><th style="width:250px">Risk</th><th>Likelihood</th><th>What I'm doing about it</th></tr>
+    <tr><td>Antigravity headless flags don't work as documented by third parties</td><td><span class="tag amber">medium</span></td><td>Adapter marked experimental; <code>doctor</code> smoke test disables it; Gemini via API key and the other providers absorb its share.</td></tr>
+    <tr><td>Notion public API blocked on a free workspace</td><td><span class="tag amber">low–medium</span></td><td><code>doctor</code> tests it first thing. Fallback is one month of Plus on one workspace. A GitHub-Issues board backend is a possible second implementation but out of scope unless this fails.</td></tr>
+    <tr><td>Claude concurrency ceiling lower than three per laptop</td><td><span class="tag amber">medium</span></td><td>Caps are config; rehearsal measures the real number; cooldown and reroute handle surprises on the day.</td></tr>
+    <tr><td>Task decomposition too coupled, agents collide</td><td><span class="tag red">medium–high</span></td><td>Scope globs per task, dependencies, contracts-first tasks in M0/M1, conflict lint in <code>swarm plan</code>, scope affinity in routing, rebase conflicts routed back to the same worker. Still the biggest human-skill factor on the day.</td></tr>
+    <tr><td>Verify scripts flaky on the real project</td><td><span class="tag amber">medium</span></td><td>Template ships lint + unit + smoke; first 45 minutes of game day include fixing them; a flaky verify sends tasks to Changes Requested, not to main.</td></tr>
+    <tr><td>Model ids or CLI flags change before Oct 10</td><td><span class="tag amber">medium</span></td><td>All ids and commands in config; <code>doctor</code> checks each; one-line edits.</td></tr>
+    <tr><td>Reviewer too lenient or too strict</td><td><span class="tag">low</span></td><td>Bounded to two rounds, then escalates to you. Policy tiers keep it off trivial work.</td></tr>
+    <tr><td>You get pulled into hand-coding and stop answering questions</td><td><span class="tag amber">medium</span></td><td>The runbook's rule for the first hour. Questions are the only thing that waits on you; everything else keeps moving.</td></tr>
+  </table>
+
+  <h3>Decisions I made for you (say so if you disagree)</h3>
+  <ul>
+    <li>Notion over GitHub Issues as the board, because you asked for it and its risks are cheap to mitigate.</li>
+    <li>A Python tool drives the loop; models don't loop themselves.</li>
+    <li>Auto-merge on passing verify until T-4h, then manual.</li>
+    <li>Orchestrator on Opus 5.5; reviewer on Codex GPT-6 Sol; Fable reserved for critical large tasks.</li>
+    <li>Four shared docs, not two: plan, design, contracts, architecture.</li>
+    <li>The harness lives in its own public repo and is disclosed.</li>
+  </ul>
+</section>
+
+<!-- ============================== 18 RESEARCH ============================== -->
+<section class="page">
+  <div class="section-num">18</div>
+  <h2>Research this is based on</h2>
+  <p class="lead">Four research passes on Sep 26, 2026, against official docs, leaderboards, and primary sources. Nothing in the design rests on memory alone.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Patterns that every working system converged on</h3>
+      <ul>
+        <li><strong>Worktree per task, branch named after the task, cleanup on done.</strong> ApiariTools/swarm, claude-squad, vibe-kanban, Conductor, Codex app.</li>
+        <li><strong>Leased claims with bounded retries; a reaper requeues stale work.</strong> desplega-ai/agent-swarm, the only open-source project found with real multi-machine workers.</li>
+        <li><strong>Durable progress files that every session reads first.</strong> Anthropic's long-running-agent harness (Nov 2025) and its quickstart.</li>
+        <li><strong>One task per fresh context, capped iterations, tests as backpressure.</strong> The "Ralph" loop and Anthropic's plugin.</li>
+        <li><strong>Separate the agent doing the work from the agent judging it.</strong> Anthropic, Mar 2026: "a strong lever," and evaluators only pay off near the capability boundary.</li>
+        <li><strong>Keep a blocked / needs-human status.</strong> The one published Notion-to-Claude-Code pipeline was abandoned for lack of it.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Facts verified against primary sources</h3>
+      <ul>
+        <li>Notion API version 2026-03-11: data sources, database and view creation, markdown page endpoints, 180 req/min, no compare-and-set, webhooks need a public URL.</li>
+        <li>Claude Code 2.1.283 headless flags, structured output, effort levels, session resume, and the reported 429 behavior around six concurrent sessions.</li>
+        <li>Codex 0.157.1 <code>exec</code> flags, JSONL output, sandbox modes, reasoning effort, per-5-hour message estimates by plan.</li>
+        <li>Gemini CLI personal-account shutdown (Jun 18, 2026) and the move to Antigravity; Grok Build headless mode.</li>
+        <li>WebDev Arena (Sep 25, 2026), Terminal-Bench 2.1, MLE-bench, and 2026 practitioner comparisons behind the routing defaults, with the caveat that benchmark boards disagree and the newest models are days old.</li>
+        <li>HackRU Fall 2026 dates and format; Fall 2025 rules; MLH member-event rules on prior work and AI tools.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer-note">Your teammate's PLAN.md supplied the invariants this borrows: worktrees, typed reports, debt records for every shortcut, decision receipts, evidence over claims, and a planner that stays high-level. What it left out on purpose: leases as a service, a capacity controller, a steering compiler, a chronicler agent, and an event bus. Two people in 24 hours need a tool, not a company.</div>
+</section>
+
+</body>
+</html>
