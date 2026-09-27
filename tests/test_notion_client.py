@@ -197,3 +197,36 @@ def test_board_questions_agents_status():
     assert board.get_agent("claude-a").runs == 2 and len(board.list_agents()) == 1
     board.write_status_page("status text")
     assert store["blocks"]["sb"]["code"]["rich_text"][0]["text"]["content"] == "status text"
+
+
+def test_init_decorates_everything_it_creates():
+    decorated = {}
+    counter = {"n": 0}
+
+    def handler(req: httpx.Request):
+        path = req.url.path
+        body = json.loads(req.content) if req.content else {}
+        if req.method == "POST" and path == "/v1/databases":
+            counter["n"] += 1
+            return httpx.Response(200, json={"id": f"db{counter['n']}", "data_sources": [{"id": f"ds{counter['n']}"}]})
+        if req.method == "POST" and path == "/v1/pages":
+            return httpx.Response(200, json={"id": "status-page"})
+        if req.method == "GET" and path.endswith("/children"):
+            return httpx.Response(200, json={"results": [{"id": "status-block"}]})
+        if req.method == "GET" and path.startswith("/v1/data_sources/"):
+            return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
+        if req.method == "POST" and path == "/v1/views":
+            return httpx.Response(200, json={"id": "view"})
+        if req.method == "PATCH" and (path.startswith("/v1/databases/") or path.startswith("/v1/pages/")):
+            decorated[path.split("/")[3]] = body
+            return httpx.Response(200, json=body)
+        return httpx.Response(500, json={"message": f"unhandled {req.method} {path}"})
+
+    client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    ids = NotionBoard.init(client, "parent", ["claude-a"])
+    assert ids["views_ok"] == "true"
+    for key in ("db1", "db2", "db3", "status-page", "parent"):
+        assert decorated[key]["icon"]["type"] == "emoji", key
+        assert decorated[key]["cover"]["external"]["url"].startswith("https://"), key
+    assert decorated["parent"]["icon"]["emoji"] == "🐝"
+    assert decorated["db1"]["icon"]["emoji"] != decorated["db2"]["icon"]["emoji"]

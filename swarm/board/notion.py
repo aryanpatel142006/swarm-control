@@ -125,6 +125,20 @@ class NotionClient:
     def get_data_source(self, ds_id: str) -> dict:
         return self.request("GET", f"/data_sources/{ds_id}")
 
+    def decorate(self, kind: str, obj_id: str, *, emoji: str | None = None, icon_url: str | None = None,
+                 cover_url: str | None = None) -> dict:
+        """Set icon and cover on a page or database. kind is 'pages' or 'databases'."""
+        body: dict = {}
+        if emoji:
+            body["icon"] = {"type": "emoji", "emoji": emoji}
+        elif icon_url:
+            body["icon"] = {"type": "external", "external": {"url": icon_url}}
+        if cover_url:
+            body["cover"] = {"type": "external", "external": {"url": cover_url}}
+        if not body:
+            return {}
+        return self.request("PATCH", f"/{kind}/{obj_id}", json=body)
+
     def create_view(self, database_id: str, ds_id: str, name: str, kind: str, configuration: dict) -> dict:
         return self.request("POST", "/views", json={
             "database_id": database_id, "data_source_id": ds_id, "name": name, "type": kind,
@@ -174,6 +188,33 @@ def markdown_to_blocks(md: str) -> list[dict]:
         i += 1
     flush()
     return blocks
+
+
+# Icons and covers applied by `swarm init` to everything it creates (covers are Notion's own public images).
+COVER_BASE = "https://www.notion.so/images/page-cover/"
+DECOR = {
+    "parent": ("🐝", COVER_BASE + "gradients_11.jpg"),
+    "tasks": ("🗂️", COVER_BASE + "gradients_8.png"),
+    "questions": ("❓", COVER_BASE + "gradients_10.jpg"),
+    "agents": ("🤖", COVER_BASE + "gradients_5.png"),
+    "status": ("📊", COVER_BASE + "gradients_4.png"),
+}
+
+
+def decorate_board(client: "NotionClient", ids: dict) -> list[str]:
+    """Apply DECOR to the parent page, the three databases, and the status page. Returns what failed."""
+    targets = [("pages", ids.get("parent_page_id"), DECOR["parent"]), ("databases", ids.get("tasks_db"), DECOR["tasks"]),
+               ("databases", ids.get("questions_db"), DECOR["questions"]),
+               ("databases", ids.get("agents_db"), DECOR["agents"]), ("pages", ids.get("status_page"), DECOR["status"])]
+    failed = []
+    for kind, obj_id, (emoji, cover) in targets:
+        if not obj_id:
+            continue
+        try:
+            client.decorate(kind, obj_id, emoji=emoji, cover_url=cover)
+        except NotionError as e:
+            failed.append(f"{kind}/{obj_id}: {e}")
+    return failed
 
 
 # ---------- board ----------
@@ -315,4 +356,6 @@ class NotionBoard:
                 "card_layout": "compact"})
         except (NotionError, KeyError) as e:  # views API is new; fall back to manual instructions
             ids["views_ok"] = f"false: {e}"
+        failed = decorate_board(client, ids)
+        ids["decor_ok"] = "true" if not failed else "false: " + "; ".join(failed)
         return ids
