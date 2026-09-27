@@ -70,3 +70,13 @@ Final: minor (deferred): reroute ignores soft cap; per-task get_agent in tick re
 Final: minor (deferred): timeout SIGKILLs the CLI (spec says TERM then KILL); rate-limit regex includes bare `capacity`/`overloaded`
 Final: minor (deferred): duplicate-ID race between `swarm add` and a serve follow-up; InMemoryBoard not thread-safe for `--memory run`
 Final: minor (deferred): no threaded-runner test (all tests use SyncExecutor)
+
+## Live tryout (Sept 27, 2026) — real Notion, real GitHub, real Claude Code, one laptop
+- Scenario 1: 4 tasks (haiku/sonnet/opus by importance) → 4 PRs merged, decision logs on main, dependency promotion worked. Costs: $0.08–$0.31 per task.
+- Scenario 2: a task instructed to ask a blocking question → Blocked + Q-002 on the board → `swarm answer` → resumed on its branch (reuse) → merged. A high task → reviewer (sonnet, read-only) approved → merged. 6/6 done.
+- Defect found and fixed live: `gh pr merge` right after a force-push races GitHub's mergeability recompute ("not mergeable"); the merger now polls `gh pr view --json mergeable` until it settles and retries once. (test_merge_waits_for_github_mergeability_after_push)
+- Defect found and fixed live: answering a merge-failed question re-ran the task instead of retrying the merge; relay now maps "retry"→Merge Ready, "merged"→Done. (test_relay_on_merge_failed_task_retries_merge_or_marks_done)
+- Observation: a sleeping Mac pauses every process; 30-second serve ticks stretched to hours. Runbook now says `caffeinate -dims` for both loops and disable sleep.
+- Observation: editing the installed package while a live driver runs broke one worker tick with a SyntaxError for ~1 minute. Do not hot-edit during a run.
+- Deferred minors fixed after the run: lazy config (--help anywhere), unknown-host and empty-logs errors, HTTP-date Retry-After, cut warns about dependents, reviewer uses the configured remote.
+- Still deferred: init idempotency; runner/serve shared worktree path race; heartbeat vs cooldown clobber; reroute ignores soft cap; SIGKILL on timeout; duplicate-ID race; InMemoryBoard thread safety; no threaded-runner test; status board columns come out alphabetical (Notion API cannot order groups).
