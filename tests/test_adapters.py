@@ -154,3 +154,12 @@ def test_claude_workers_skip_user_mcp_servers(tmp_path):
     argv, _ = ClaudeAdapter().build_command(spec(tmp_path))
     assert "--strict-mcp-config" in argv
     assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": {}}
+
+
+def test_claude_loads_only_requested_mcp_servers(tmp_path):
+    known = {"magic": {"type": "http", "url": "https://magic.example/mcp"},
+             "motion": {"command": "npx", "args": ["motion-mcp"]}}
+    a = ClaudeAdapter(mcp_lookup=lambda: known)
+    argv, _ = a.build_command(spec(tmp_path, mcp=["magic", "nope"]))
+    cfg = json.loads(argv[argv.index("--mcp-config") + 1])
+    assert cfg == {"mcpServers": {"magic": known["magic"]}} and "--strict-mcp-config" in argv

@@ -51,3 +51,14 @@ def test_notion_ids_roundtrip(project_dir):
     save_notion_ids(cfg, {"tasks_db": "db1", "tasks_ds": "ds1"})
     cfg2 = load_config(project_dir / ".swarm" / "config.yaml")
     assert cfg2.notion.tasks_db == "db1" and cfg2.notion.tasks_ds == "ds1"
+
+
+def test_mcp_by_type_and_agent_mcp(project_dir, sample_config_dict):
+    sample_config_dict["mcp_by_type"] = {"frontend": ["magic", "playwright"]}
+    sample_config_dict["agents"]["claude-a"]["mcp"] = ["context7"]
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.mcp_by_type == {"frontend": ["magic", "playwright"]}
+    assert cfg.agents["claude-a"].mcp == ["context7"] and cfg.agents["codex-a"].mcp == []
+    assert cfg.mcp_for("frontend", cfg.agents["claude-a"]) == ["magic", "playwright", "context7"]
+    assert cfg.mcp_for("backend", cfg.agents["codex-a"]) == []

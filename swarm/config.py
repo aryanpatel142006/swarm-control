@@ -47,6 +47,7 @@ class AgentConfig:
     experimental: bool = False
     command_template: str | None = None
     extra_args: list[str] = field(default_factory=list)
+    mcp: list[str] = field(default_factory=list)          # MCP server names this agent always gets
 
 
 @dataclass
@@ -104,6 +105,11 @@ class Config:
     reviewer: RoleConfig | None
     planner: RoleConfig | None
     notion: NotionIds
+    mcp_by_type: dict[str, list[str]] = field(default_factory=dict)
+
+    def mcp_for(self, task_type: str, agent: AgentConfig) -> list[str]:
+        """MCP servers a worker run gets: the task type's list, then the agent's own, no duplicates."""
+        return list(dict.fromkeys(list(self.mcp_by_type.get(task_type, [])) + list(agent.mcp)))
 
     def agents_on_host(self, host: str) -> list[AgentConfig]:
         return [a for a in self.agents.values() if a.host == host]
@@ -164,6 +170,7 @@ def load_config(path: Path | str) -> Config:
             soft_cap_5h_usd=a.get("soft_cap_5h_usd"), sandbox=a.get("sandbox"),
             experimental=bool(a.get("experimental", False)),
             command_template=a.get("command_template"), extra_args=list(a.get("extra_args") or []),
+            mcp=[str(m) for m in (a.get("mcp") or [])],
         )
     if not agents:
         raise ConfigError("at least one agent is required")
@@ -215,6 +222,7 @@ def load_config(path: Path | str) -> Config:
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),
         planner=_role(raw.get("planner"), agents, "planner"),
         notion=NotionIds(**{k: str(v) for k, v in notion_raw.items() if k in NotionIds.__dataclass_fields__}),
+        mcp_by_type={k: [str(m) for m in (v or [])] for k, v in (raw.get("mcp_by_type") or {}).items()},
     )
 
 

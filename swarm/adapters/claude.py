@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 from ..models import RunResult, Usage
 from .base import RATE_LIMIT_RE, Adapter, RunSpec, last_json_object, parse_reset_at
@@ -8,9 +10,25 @@ from .base import RATE_LIMIT_RE, Adapter, RunSpec, last_json_object, parse_reset
 READ_ONLY_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(ls:*),Bash(cat:*)"
 
 
+def user_mcp_servers() -> dict:
+    """MCP servers configured for this laptop's Claude Code (user scope), by name."""
+    servers: dict = {}
+    for path in (Path.home() / ".claude.json",):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        servers.update(data.get("mcpServers") or {})
+    return servers
+
+
 class ClaudeAdapter(Adapter):
     """Claude Code headless: `claude -p --output-format json` with validated structured output."""
     name = "claude"
+
+    def __init__(self, agent_cfg=None, mcp_lookup=user_mcp_servers):
+        super().__init__(agent_cfg)
+        self.mcp_lookup = mcp_lookup
 
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
         argv = ["claude", "-p", "--output-format", "json", "--model", spec.model,
@@ -25,8 +43,10 @@ class ClaudeAdapter(Adapter):
             argv += ["--max-budget-usd", str(spec.budget_usd)]
         if spec.schema:
             argv += ["--json-schema", json.dumps(spec.schema)]
-        # a worker needs no MCP servers; the user's personal ones would add every tool schema to each run's context
-        argv += ["--mcp-config", json.dumps({"mcpServers": {}}), "--strict-mcp-config"]
+        # only the MCP servers this task type asks for; every extra server adds its tool schemas to the run's context
+        known = self.mcp_lookup() if spec.mcp else {}
+        chosen = {name: known[name] for name in spec.mcp if name in known}
+        argv += ["--mcp-config", json.dumps({"mcpServers": chosen}), "--strict-mcp-config"]
         argv += list(spec.extra_args)
         return argv, spec.prompt_file.read_bytes()
 

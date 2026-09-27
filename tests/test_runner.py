@@ -356,3 +356,12 @@ def test_harness_written_logs_are_never_out_of_scope(cfg, git_repo, tmp_path):
     t = ready_task(board)
     out = r.run_task(t)
     assert out.status is Status.MERGE_READY and "out_of_scope" not in board.get_task(t.id).flags
+
+
+def test_runner_passes_mcp_servers_by_task_type(cfg, git_repo, tmp_path):
+    cfg.mcp_by_type = {"frontend": ["magic"]}
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    r.run_task(ready_task(board, type="frontend", agent="claude-a", model="sonnet"))
+    r.run_task(ready_task(board, type="backend", agent="claude-a", model="sonnet"))
+    assert adapter.specs[0].mcp == ["magic"] and adapter.specs[1].mcp == []

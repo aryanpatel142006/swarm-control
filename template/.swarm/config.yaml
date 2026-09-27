@@ -43,6 +43,12 @@ routing:
     # GPT-6 Astra #2, Fable 5.1 #3. So critical frontend runs Opus, and Fable is kept for long-horizon work.
     claude: { frontend: { best: opus } }
 
+# MCP servers a worker may use, by task type (names from that laptop's `claude mcp list`). Off by default:
+# every server adds its tool schemas to each run's context, so give them only to the tasks they help.
+mcp_by_type:
+  frontend: []              # e.g. [magic, playwright] for UI generation and live-browser checks
+  research: []              # e.g. [context7] for current library docs
+
 docs_by_type:               # what gets inlined into a worker's prompt; everything else is referenced by path
   _all:        [PLAN.md#summary]   # AGENTS.md is auto-loaded by every CLI (via CLAUDE.md / GEMINI.md), never inline it
   frontend:    [docs/DESIGN.md, docs/CONTRACTS.md]

@@ -243,7 +243,7 @@ class Runner:
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=limit.turns,
                            budget_usd=limit.budget_usd, timeout_s=limit.minutes * 60, cwd=wt,
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
-                           extra_args=list(agent_cfg.extra_args))
+                           extra_args=list(agent_cfg.extra_args), mcp=self.cfg.mcp_for(task.type, agent_cfg))
             result = self.adapter_factory(agent_cfg).run(spec)
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,

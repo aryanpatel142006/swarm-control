@@ -59,6 +59,7 @@ class RunSpec:
     read_only: bool = False
     sandbox: str | None = None
     extra_args: list[str] = field(default_factory=list)
+    mcp: list[str] = field(default_factory=list)      # MCP server names to enable for this run
 
 
 class Adapter:
