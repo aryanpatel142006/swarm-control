@@ -205,12 +205,18 @@ def test_init_decorates_everything_it_creates():
 
     def handler(req: httpx.Request):
         path = req.url.path
+        if req.method == "POST" and path.startswith("/v1/file_uploads/") and path.endswith("/send"):
+            assert req.headers["content-type"].startswith("multipart/form-data")
+            return httpx.Response(200, json={"status": "uploaded"})
         body = json.loads(req.content) if req.content else {}
         if req.method == "POST" and path == "/v1/databases":
             counter["n"] += 1
             return httpx.Response(200, json={"id": f"db{counter['n']}", "data_sources": [{"id": f"ds{counter['n']}"}]})
         if req.method == "POST" and path == "/v1/pages":
             return httpx.Response(200, json={"id": "status-page"})
+        if req.method == "POST" and path == "/v1/file_uploads":
+            counter["n"] += 1
+            return httpx.Response(200, json={"id": f"up{counter['n']}", "status": "pending"})
         if req.method == "GET" and path.endswith("/children"):
             return httpx.Response(200, json={"results": [{"id": "status-block"}]})
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
@@ -225,8 +231,26 @@ def test_init_decorates_everything_it_creates():
     client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
     ids = NotionBoard.init(client, "parent", ["claude-a"])
     assert ids["views_ok"] == "true"
+    assert ids["decor_ok"] == "true"
     for key in ("db1", "db2", "db3", "status-page", "parent"):
-        assert decorated[key]["icon"]["type"] == "emoji", key
-        assert decorated[key]["cover"]["external"]["url"].startswith("https://"), key
-    assert decorated["parent"]["icon"]["emoji"] == "🐝"
-    assert decorated["db1"]["icon"]["emoji"] != decorated["db2"]["icon"]["emoji"]
+        assert decorated[key]["icon"]["type"] == "file_upload", key
+        assert decorated[key]["cover"]["type"] == "file_upload", key
+    assert len({decorated[k]["icon"]["file_upload"]["id"] for k in decorated}) == 5  # one upload per object
+
+
+def test_decorate_falls_back_to_emoji_without_assets(tmp_path):
+    from swarm.board.notion import decorate_board
+    decorated = {}
+
+    def handler(req: httpx.Request):
+        path = req.url.path
+        if req.method == "PATCH":
+            decorated[path.split("/")[3]] = json.loads(req.content)
+            return httpx.Response(200, json={})
+        return httpx.Response(500, json={"message": f"unexpected {req.method} {path}"})
+
+    client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    failed = decorate_board(client, {"parent_page_id": "parent", "tasks_db": "db1"}, assets_dir=tmp_path / "none")
+    assert failed == []
+    assert decorated["parent"]["icon"] == {"type": "emoji", "emoji": "🐝"}
+    assert decorated["db1"]["cover"]["external"]["url"].startswith("https://www.notion.so/images/page-cover/")

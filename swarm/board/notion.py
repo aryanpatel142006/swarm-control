@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from pathlib import Path
 from typing import Callable, Iterable
 
 import httpx
@@ -28,11 +29,10 @@ class NotionClient:
     def __init__(self, token: str, *, version: str = VERSION, transport=None,
                  sleep: Callable[[float], None] = time.sleep, timeout: float = 30.0):
         self._sleep = sleep
-        self._http = httpx.Client(
-            base_url=API, transport=transport, timeout=timeout,
-            headers={"Authorization": f"Bearer {token}", "Notion-Version": version,
-                     "Content-Type": "application/json"},
-        )
+        self._transport, self._timeout = transport, timeout
+        self._auth = {"Authorization": f"Bearer {token}", "Notion-Version": version}
+        self._http = httpx.Client(base_url=API, transport=transport, timeout=timeout,
+                                  headers={**self._auth, "Content-Type": "application/json"})
 
     def request(self, method: str, path: str, json: dict | None = None) -> dict:
         attempt = 0
@@ -125,15 +125,32 @@ class NotionClient:
     def get_data_source(self, ds_id: str) -> dict:
         return self.request("GET", f"/data_sources/{ds_id}")
 
+    def upload_file(self, path: Path, content_type: str = "image/png") -> str:
+        """Two-step Notion file upload; returns the file_upload id to reference from icon/cover/blocks."""
+        created = self.request("POST", "/file_uploads", json={"mode": "single_part", "filename": path.name,
+                                                                "content_type": content_type})
+        fid = created["id"]
+        with httpx.Client(base_url=API, transport=self._transport, timeout=max(self._timeout, 120),
+                          headers=self._auth) as raw, path.open("rb") as f:
+            resp = raw.post(f"/file_uploads/{fid}/send", files={"file": (path.name, f, content_type)})
+        if resp.status_code >= 400:
+            raise NotionError(resp.status_code, "upload_failed", resp.text[:200])
+        return fid
+
     def decorate(self, kind: str, obj_id: str, *, emoji: str | None = None, icon_url: str | None = None,
-                 cover_url: str | None = None) -> dict:
+                 cover_url: str | None = None, icon_upload: str | None = None,
+                 cover_upload: str | None = None) -> dict:
         """Set icon and cover on a page or database. kind is 'pages' or 'databases'."""
         body: dict = {}
-        if emoji:
+        if icon_upload:
+            body["icon"] = {"type": "file_upload", "file_upload": {"id": icon_upload}}
+        elif emoji:
             body["icon"] = {"type": "emoji", "emoji": emoji}
         elif icon_url:
             body["icon"] = {"type": "external", "external": {"url": icon_url}}
-        if cover_url:
+        if cover_upload:
+            body["cover"] = {"type": "file_upload", "file_upload": {"id": cover_upload}}
+        elif cover_url:
             body["cover"] = {"type": "external", "external": {"url": cover_url}}
         if not body:
             return {}
@@ -201,17 +218,37 @@ DECOR = {
 }
 
 
-def decorate_board(client: "NotionClient", ids: dict) -> list[str]:
-    """Apply DECOR to the parent page, the three databases, and the status page. Returns what failed."""
-    targets = [("pages", ids.get("parent_page_id"), DECOR["parent"]), ("databases", ids.get("tasks_db"), DECOR["tasks"]),
-               ("databases", ids.get("questions_db"), DECOR["questions"]),
-               ("databases", ids.get("agents_db"), DECOR["agents"]), ("pages", ids.get("status_page"), DECOR["status"])]
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"   # shipped with the package
+ASSET_KEY = {"parent": "board", "tasks": "tasks", "questions": "questions", "agents": "agents", "status": "status"}
+
+
+def decorate_object(client: "NotionClient", kind: str, obj_id: str, key: str, assets_dir: Path = ASSETS_DIR) -> str:
+    """Custom icon + banner from the packaged art; falls back to emoji + Notion gradient. Returns which was used."""
+    emoji, cover_url = DECOR[key]
+    icon_png = Path(assets_dir) / f"icon-{ASSET_KEY[key]}.png"
+    banner_png = Path(assets_dir) / f"banner-{ASSET_KEY[key]}.png"
+    if icon_png.exists() and banner_png.exists():
+        try:
+            client.decorate(kind, obj_id, icon_upload=client.upload_file(icon_png),
+                            cover_upload=client.upload_file(banner_png))
+            return "custom"
+        except (NotionError, OSError):
+            pass
+    client.decorate(kind, obj_id, emoji=emoji, cover_url=cover_url)
+    return "fallback"
+
+
+def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_DIR) -> list[str]:
+    """Decorate the parent page, the three databases, and the status page. Returns what failed entirely."""
+    targets = [("pages", ids.get("parent_page_id"), "parent"), ("databases", ids.get("tasks_db"), "tasks"),
+               ("databases", ids.get("questions_db"), "questions"), ("databases", ids.get("agents_db"), "agents"),
+               ("pages", ids.get("status_page"), "status")]
     failed = []
-    for kind, obj_id, (emoji, cover) in targets:
+    for kind, obj_id, key in targets:
         if not obj_id:
             continue
         try:
-            client.decorate(kind, obj_id, emoji=emoji, cover_url=cover)
+            decorate_object(client, kind, obj_id, key, assets_dir)
         except NotionError as e:
             failed.append(f"{kind}/{obj_id}: {e}")
     return failed

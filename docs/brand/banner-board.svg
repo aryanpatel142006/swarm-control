@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 500" width="1500" height="500"><defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1b2140"/><stop offset="1" stop-color="#2a3a7a"/></linearGradient>
+    <radialGradient id="node" cx="0.4" cy="0.35" r="0.7"><stop offset="0" stop-color="#ffd76a"/><stop offset="1" stop-color="#f0a22b"/></radialGradient>
+  </defs><rect width="1500" height="500" fill="url(#bg)"/><circle cx="1320" cy="80" r="360" fill="#f0a22b" fill-opacity="0.07"/><circle cx="180" cy="520" r="300" fill="#f0a22b" fill-opacity="0.06"/><g transform="translate(300 250) scale(0.62) translate(-256 -256)"><g stroke="#f0a22b" stroke-opacity="0.45" stroke-width="10.0" stroke-linecap="round">
+<line x1="256" y1="256" x2="256.0" y2="118.0"/>
+<line x1="256" y1="256" x2="376.0" y2="188.0"/>
+<line x1="256" y1="256" x2="376.0" y2="326.0"/>
+<line x1="256" y1="256" x2="256.0" y2="394.0"/>
+<line x1="256" y1="256" x2="136.0" y2="326.0"/>
+<line x1="256" y1="256" x2="136.0" y2="188.0"/>
+</g>
+<circle cx="256" cy="256" r="138.0" fill="none" stroke="#f0a22b" stroke-opacity="0.18" stroke-width="6.0"/>
+<circle cx="256.0" cy="118.0" r="30.0" fill="url(#node)"/>
+<circle cx="376.0" cy="188.0" r="24.0" fill="url(#node)"/>
+<circle cx="376.0" cy="326.0" r="32.0" fill="url(#node)"/>
+<circle cx="256.0" cy="394.0" r="22.0" fill="url(#node)"/>
+<circle cx="136.0" cy="326.0" r="28.0" fill="url(#node)"/>
+<circle cx="136.0" cy="188.0" r="34.0" fill="url(#node)"/>
+<circle cx="256" cy="256" r="58.0" fill="url(#node)"/>
+<circle cx="256" cy="256" r="58.0" fill="none" stroke="#1b2140" stroke-width="8.0"/>
+<circle cx="256" cy="256" r="22.0" fill="#1b2140"/></g><text x="560" y="228" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" font-weight="600" letter-spacing="14" fill="#f0a22b">SWARM CONTROL</text><text x="556" y="330" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="112" font-weight="700" fill="#ffffff">Swarm</text></svg>

@@ -23,6 +23,9 @@ swarm = "swarm.cli:app"
 [tool.setuptools.packages.find]
 include = ["swarm*"]
 
+[tool.setuptools.package-data]
+swarm = ["assets/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
