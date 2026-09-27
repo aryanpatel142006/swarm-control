@@ -1,6 +1,8 @@
 """Notion API client (httpx, retries) and the NotionBoard implementation of the Board protocol."""
 from __future__ import annotations
 
+import hashlib
+import os
 import random
 import re
 import time
@@ -103,12 +105,12 @@ class NotionClient:
                 return out
             cursor = data.get("next_cursor")
 
-    def create_page(self, ds_id: str, props: dict, children: list | None = None, icon: str | None = None) -> dict:
+    def create_page(self, ds_id: str, props: dict, children: list | None = None, icon: dict | None = None) -> dict:
         body: dict = {"parent": {"type": "data_source_id", "data_source_id": ds_id}, "properties": props}
         if children:
             body["children"] = children[:100]
         if icon:
-            body["icon"] = {"type": "emoji", "emoji": icon}
+            body["icon"] = icon
         return self.request("POST", "/pages", json=body)
 
     def create_child_page(self, parent_page_id: str, title: str, children: list | None = None) -> dict:
@@ -243,23 +245,39 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"   # shipped with 
 ASSET_KEY = {"parent": "board", "tasks": "tasks", "questions": "questions", "agents": "agents", "status": "status"}
 
 
-def decorate_object(client: "NotionClient", kind: str, obj_id: str, key: str, assets_dir: Path = ASSETS_DIR) -> str:
-    """Custom icon + banner from the packaged art; falls back to emoji + Notion gradient. Returns which was used."""
+# Public URL of the packaged art. Notion renders external images reliably and they never expire, unlike
+# API file uploads, which were observed to 404 from Notion's storage a few hours after attaching.
+ASSETS_URL_BASE = os.environ.get(
+    "SWARM_ASSETS_URL", "https://raw.githubusercontent.com/aryanpatel142006/swarm-control/main/swarm/assets/")
+
+
+def decorate_object(client: "NotionClient", kind: str, obj_id: str, key: str, assets_dir: Path = ASSETS_DIR,
+                    assets_url: str | None = ASSETS_URL_BASE) -> str:
+    """Custom icon + banner: linked from the public repo, else uploaded, else emoji + Notion gradient."""
     emoji, cover_url = DECOR[key]
-    icon_png = Path(assets_dir) / f"icon-{ASSET_KEY[key]}.png"
-    banner_png = Path(assets_dir) / f"banner-{ASSET_KEY[key]}.png"
+    name = ASSET_KEY[key]
+    if assets_url:
+        try:
+            client.decorate(kind, obj_id, icon_url=asset_url(f"icon-{name}.png", assets_url),
+                            cover_url=asset_url(f"banner-{name}.png", assets_url))
+            return "external"
+        except NotionError:
+            pass
+    icon_png = Path(assets_dir) / f"icon-{name}.png"
+    banner_png = Path(assets_dir) / f"banner-{name}.png"
     if icon_png.exists() and banner_png.exists():
         try:
             client.decorate(kind, obj_id, icon_upload=client.upload_file(icon_png),
                             cover_upload=client.upload_file(banner_png))
-            return "custom"
+            return "upload"
         except (NotionError, OSError):
             pass
     client.decorate(kind, obj_id, emoji=emoji, cover_url=cover_url)
     return "fallback"
 
 
-def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_DIR) -> list[str]:
+def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_DIR,
+                   assets_url: str | None = ASSETS_URL_BASE) -> list[str]:
     """Decorate the parent page, the three databases, and the status page. Returns what failed entirely."""
     targets = [("pages", ids.get("parent_page_id"), "parent"), ("databases", ids.get("tasks_db"), "tasks"),
                ("databases", ids.get("questions_db"), "questions"), ("databases", ids.get("agents_db"), "agents"),
@@ -269,17 +287,34 @@ def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_
         if not obj_id:
             continue
         try:
-            decorate_object(client, kind, obj_id, key, assets_dir)
+            decorate_object(client, kind, obj_id, key, assets_dir, assets_url)
         except NotionError as e:
             failed.append(f"{kind}/{obj_id}: {e}")
     return failed
 
 
-# Row icons so cards read at a glance on the board.
-TYPE_ICON = {"frontend": "🎨", "backend": "⚙️", "realtime": "⚡", "ml_audio": "🔊", "ml_vision": "👁️", "ml_fusion": "🔗",
-             "eval": "📏", "tests": "🧪", "docs": "📝", "research": "🔍", "bugfix": "🐛", "integration": "🧩", "infra": "🛠️"}
-QUESTION_ICON = {"blocking": "❓", "fyi": "💡"}
-AGENT_ICON = "🤖"
+_ASSET_HASHES: dict[str, str] = {}
+
+
+def asset_url(filename: str, assets_url: str | None = None) -> str | None:
+    """Public URL of a packaged image, with a content hash so Notion never serves a stale cached copy."""
+    base = ASSETS_URL_BASE if assets_url is None else assets_url
+    if not base:
+        return None
+    if filename not in _ASSET_HASHES:
+        path = ASSETS_DIR / filename
+        try:
+            _ASSET_HASHES[filename] = hashlib.md5(path.read_bytes()).hexdigest()[:8]
+        except OSError:
+            _ASSET_HASHES[filename] = "0"
+    return f"{base}{filename}?v={_ASSET_HASHES[filename]}"
+
+
+def row_icon(kind: str, value: str) -> dict | None:
+    """Icon object for a task type, question kind, or agent row; None when no public art is configured."""
+    name = {"type": f"type-{value}", "question": f"q-{value}", "agent": "serve" if value == "serve" else "agent"}[kind]
+    url = asset_url(f"icon-{name}.png")
+    return {"type": "external", "external": {"url": url}} if url else None
 
 
 # ---------- board ----------
@@ -304,7 +339,7 @@ class NotionBoard:
         if not task.id:
             task.id = self.next_task_id()
         children = markdown_to_blocks(task.description) if task.description else None
-        page = self.c.create_page(self.ids.tasks_ds, np.task_to_props(task), children, icon=TYPE_ICON.get(task.type))
+        page = self.c.create_page(self.ids.tasks_ds, np.task_to_props(task), children, icon=row_icon("type", task.type))
         task.page_id = page["id"]
         return task
 
@@ -347,7 +382,7 @@ class NotionBoard:
             t = self.get_task(q.task_id)
             task_page = t.page_id if t else None
         page = self.c.create_page(self.ids.questions_ds, np.question_to_props(q, task_page_id=task_page),
-                                  icon=QUESTION_ICON.get(q.kind, "❓"))
+                                  icon=row_icon("question", q.kind))
         q.page_id = page["id"]
         return q
 
@@ -372,8 +407,7 @@ class NotionBoard:
             self.c.update_page(page["id"], np.agent_to_props(row))
             row.page_id = page["id"]
         else:
-            created = self.c.create_page(self.ids.agents_ds, np.agent_to_props(row),
-                                         icon="🛰️" if row.name == "serve" else AGENT_ICON)
+            created = self.c.create_page(self.ids.agents_ds, np.agent_to_props(row), icon=row_icon("agent", row.name))
             row.page_id = created["id"]
         return row
 
@@ -429,4 +463,17 @@ class NotionBoard:
             ids["views_ok"] = f"false: {e}"
         failed = decorate_board(client, ids)
         ids["decor_ok"] = "true" if not failed else "false: " + "; ".join(failed)
+        try:
+            icon_url = asset_url("icon-board.png")
+            client.request("PATCH", f"/blocks/{parent_page_id}/children", json={"children": [{
+                "object": "block", "type": "callout", "callout": {
+                    "icon": {"type": "external", "external": {"url": icon_url}} if icon_url else {"type": "emoji", "emoji": "🐝"},
+                    "color": "gray_background",
+                    "rich_text": _rt("Swarm mission control. Tasks: what every agent is doing (boards By Status and By Agent; "
+                                     "Needs Human lists Blocked and Failed). Questions: agents asking you something. Type in "
+                                     "Answer; tick Needs Follow-up if an fyi decision must change. Agents: heartbeat, cooldown, "
+                                     "spend per laptop. Status: the summary page, rewritten every 15 minutes by swarm serve.")}}],
+                "position": {"type": "start"}})
+        except NotionError:
+            pass
         return ids

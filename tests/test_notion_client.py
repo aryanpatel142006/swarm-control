@@ -202,6 +202,7 @@ def test_board_questions_agents_status():
 def test_init_decorates_everything_it_creates():
     decorated = {}
     views = []
+    callouts = []
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -220,6 +221,9 @@ def test_init_decorates_everything_it_creates():
             return httpx.Response(200, json={"id": f"up{counter['n']}", "status": "pending"})
         if req.method == "GET" and path.endswith("/children"):
             return httpx.Response(200, json={"results": [{"id": "status-block"}]})
+        if req.method == "PATCH" and path.endswith("/children"):
+            callouts.extend(b for b in body["children"] if b.get("type") == "callout")
+            return httpx.Response(200, json={"results": body["children"]})
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
             return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
         if req.method == "POST" and path == "/v1/views":
@@ -236,9 +240,33 @@ def test_init_decorates_everything_it_creates():
     assert ids["decor_ok"] == "true"
     assert views == ["By Status", "By Agent", "Needs Human", "Open Questions"]
     for key in ("db1", "db2", "db3", "status-page", "parent"):
-        assert decorated[key]["icon"]["type"] == "file_upload", key
-        assert decorated[key]["cover"]["type"] == "file_upload", key
-    assert len({decorated[k]["icon"]["file_upload"]["id"] for k in decorated}) == 5  # one upload per object
+        assert decorated[key]["icon"]["type"] == "external", key
+        assert decorated[key]["cover"]["external"]["url"].startswith("https://raw.githubusercontent.com/"), key
+    assert "icon-board.png?v=" in decorated["parent"]["icon"]["external"]["url"]
+    assert "banner-tasks.png?v=" in decorated["db1"]["cover"]["external"]["url"]
+    assert callouts and callouts[0]["callout"]["icon"]["type"] == "external"
+
+
+def test_decorate_uploads_when_no_public_url(tmp_path):
+    from swarm.board.notion import decorate_object
+    decorated, uploads = {}, {"n": 0}
+
+    def handler(req: httpx.Request):
+        path = req.url.path
+        if req.method == "POST" and path.startswith("/v1/file_uploads/") and path.endswith("/send"):
+            return httpx.Response(200, json={"status": "uploaded"})
+        if req.method == "POST" and path == "/v1/file_uploads":
+            uploads["n"] += 1
+            return httpx.Response(200, json={"id": f"up{uploads['n']}"})
+        if req.method == "PATCH":
+            decorated[path.split("/")[3]] = json.loads(req.content)
+            return httpx.Response(200, json={})
+        return httpx.Response(500, json={"message": f"unexpected {req.method} {path}"})
+
+    client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    from swarm.board.notion import ASSETS_DIR
+    assert decorate_object(client, "pages", "p1", "tasks", ASSETS_DIR, assets_url=None) == "upload"
+    assert decorated["p1"]["icon"]["type"] == "file_upload" and uploads["n"] == 2
 
 
 def test_decorate_falls_back_to_emoji_without_assets(tmp_path):
@@ -253,7 +281,8 @@ def test_decorate_falls_back_to_emoji_without_assets(tmp_path):
         return httpx.Response(500, json={"message": f"unexpected {req.method} {path}"})
 
     client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
-    failed = decorate_board(client, {"parent_page_id": "parent", "tasks_db": "db1"}, assets_dir=tmp_path / "none")
+    failed = decorate_board(client, {"parent_page_id": "parent", "tasks_db": "db1"}, assets_dir=tmp_path / "none",
+                            assets_url=None)
     assert failed == []
     assert decorated["parent"]["icon"] == {"type": "emoji", "emoji": "🐝"}
     assert decorated["db1"]["cover"]["external"]["url"].startswith("https://www.notion.so/images/page-cover/")
@@ -281,5 +310,7 @@ def test_rows_are_created_with_icons():
     t = board.create_task(Task(id="", title="ui", type="frontend"))
     q = board.create_question(Question(id="", text="why?", kind="fyi", task_id=t.id))
     a = board.upsert_agent(AgentRow(name="claude-a", provider="claude"))
-    icons = {pid: (page.get("icon") or {}).get("emoji") for ds in ("ds-tasks", "ds-q", "ds-agents") for pid, page in store[ds].items()}
-    assert icons[t.page_id] == "🎨" and icons[q.page_id] == "💡" and icons[a.page_id] == "🤖"
+    icons = {pid: (page.get("icon") or {}).get("external", {}).get("url", "")
+             for ds in ("ds-tasks", "ds-q", "ds-agents") for pid, page in store[ds].items()}
+    assert "icon-type-frontend.png?v=" in icons[t.page_id]
+    assert "icon-q-fyi.png?v=" in icons[q.page_id] and "icon-agent.png?v=" in icons[a.page_id]

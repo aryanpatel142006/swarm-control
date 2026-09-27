@@ -109,13 +109,40 @@ def render(svg_path: Path, png_path: Path, w: int, h: int) -> None:
 
 
 def render_banner(kind: str, png_path: Path) -> None:
-    """Banners are generative canvas art (docs/brand/banner.html), rendered at 2x then downscaled for smoothness."""
-    big = png_path.with_name(png_path.stem + "@2x.png")
-    subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2",
-                    "--window-size=1500,500", "--virtual-time-budget=8000", f"--screenshot={big}",
+    """Banners are generative canvas art (docs/brand/banner.html) drawn at 2400×800 for retina covers."""
+    subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+                    "--window-size=2400,800", "--virtual-time-budget=15000", f"--screenshot={png_path}",
                     f"file://{HERE / 'banner.html'}?kind={kind}"], check=True, capture_output=True)
-    subprocess.run(["sips", "-z", "500", "1500", str(big), "--out", str(png_path)], check=True, capture_output=True)
-    big.unlink()
+
+
+# ---------- small row icons: one per task type, question kind, and agent ----------
+GOLD, VIOLET, CORAL, TEAL = "#f5b942", "#a893ff", "#ff8570", "#4fdcc4"
+ROW_ICONS = {  # name: (accent, glyph builder)
+    "type-frontend":    (GOLD,   lambda a: f'<rect x="120" y="140" width="272" height="232" rx="26" fill="none" stroke="{a}" stroke-width="22"/><rect x="120" y="140" width="272" height="60" rx="26" fill="{a}"/><rect x="150" y="230" width="90" height="112" rx="14" fill="{a}" fill-opacity="0.5"/>'),
+    "type-backend":     (GOLD,   lambda a: f'<rect x="120" y="120" width="272" height="80" rx="20" fill="{a}"/><rect x="120" y="216" width="272" height="80" rx="20" fill="{a}" fill-opacity="0.7"/><rect x="120" y="312" width="272" height="80" rx="20" fill="{a}" fill-opacity="0.45"/><circle cx="160" cy="160" r="14" fill="#1b2140"/><circle cx="160" cy="256" r="14" fill="#1b2140"/><circle cx="160" cy="352" r="14" fill="#1b2140"/>'),
+    "type-realtime":    (GOLD,   lambda a: f'<polygon points="292,96 150,292 250,292 220,416 362,220 262,220" fill="{a}"/>'),
+    "type-ml_audio":    (VIOLET, lambda a: "".join(f'<rect x="{112+i*40}" y="{256-h/2}" width="22" height="{h}" rx="11" fill="{a}" fill-opacity="{0.55+0.45*(i%2)}"/>' for i, h in enumerate([60, 140, 220, 300, 200, 120, 240, 80]))),
+    "type-ml_vision":   (VIOLET, lambda a: f'<path d="M80 256 C160 130, 352 130, 432 256 C352 382, 160 382, 80 256 Z" fill="none" stroke="{a}" stroke-width="24"/><circle cx="256" cy="256" r="70" fill="{a}"/><circle cx="256" cy="256" r="30" fill="#1b2140"/>'),
+    "type-ml_fusion":   (VIOLET, lambda a: f'<circle cx="150" cy="180" r="46" fill="{a}"/><circle cx="362" cy="180" r="46" fill="{a}"/><circle cx="256" cy="352" r="46" fill="{a}"/><path d="M150 180 L362 180 L256 352 Z" fill="none" stroke="{a}" stroke-width="18" stroke-opacity="0.6"/>'),
+    "type-eval":        (VIOLET, lambda a: f'<circle cx="256" cy="256" r="150" fill="none" stroke="{a}" stroke-width="20"/><circle cx="256" cy="256" r="92" fill="none" stroke="{a}" stroke-width="20" stroke-opacity="0.6"/><circle cx="256" cy="256" r="36" fill="{a}"/>'),
+    "type-tests":       (CORAL,  lambda a: f'<path d="M206 96 L306 96 L306 200 L392 372 C410 408, 386 430, 350 430 L162 430 C126 430, 102 408, 120 372 L206 200 Z" fill="none" stroke="{a}" stroke-width="22" stroke-linejoin="round"/><path d="M150 330 L362 330 L392 372 C410 408, 386 430, 350 430 L162 430 C126 430, 102 408, 120 372 Z" fill="{a}"/>'),
+    "type-bugfix":      (CORAL,  lambda a: f'<ellipse cx="256" cy="286" rx="110" ry="130" fill="{a}"/><circle cx="256" cy="150" r="56" fill="{a}"/><path d="M146 240 L86 200 M146 300 L80 310 M146 360 L96 410 M366 240 L426 200 M366 300 L432 310 M366 360 L416 410" stroke="{a}" stroke-width="20" stroke-linecap="round"/><path d="M256 180 L256 400" stroke="#1b2140" stroke-width="16"/>'),
+    "type-docs":        (TEAL,   lambda a: f'<rect x="136" y="96" width="240" height="320" rx="24" fill="none" stroke="{a}" stroke-width="22"/>' + "".join(f'<rect x="176" y="{160+i*54}" width="{160 if i<3 else 90}" height="20" rx="10" fill="{a}" fill-opacity="0.8"/>' for i in range(4))),
+    "type-research":    (TEAL,   lambda a: f'<circle cx="222" cy="222" r="120" fill="none" stroke="{a}" stroke-width="26"/><path d="M310 310 L420 420" stroke="{a}" stroke-width="34" stroke-linecap="round"/>'),
+    "type-integration": (GOLD,   lambda a: f'<path d="M110 200 L200 200 L200 150 C200 110, 260 110, 260 150 L260 200 L360 200 L360 290 C400 290, 400 350, 360 350 L360 420 L260 420 L260 380 C260 340, 200 340, 200 380 L200 420 L110 420 Z" fill="{a}"/>'),
+    "type-infra":       (GOLD,   lambda a: f'<rect x="110" y="110" width="292" height="92" rx="18" fill="{a}"/><rect x="110" y="210" width="292" height="92" rx="18" fill="{a}" fill-opacity="0.75"/><rect x="110" y="310" width="292" height="92" rx="18" fill="{a}" fill-opacity="0.5"/>' + "".join(f'<circle cx="{362}" cy="{156+i*100}" r="16" fill="#1b2140"/>' for i in range(3))),
+    "q-blocking":       (CORAL,  lambda a: f'<circle cx="256" cy="256" r="160" fill="{a}"/><text x="256" y="318" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="210" font-weight="700" fill="#1b2140">?</text>'),
+    "q-fyi":            (TEAL,   lambda a: f'<circle cx="256" cy="256" r="160" fill="{a}"/><circle cx="256" cy="176" r="24" fill="#1b2140"/><rect x="232" y="224" width="48" height="140" rx="16" fill="#1b2140"/>'),
+    "agent":            (TEAL,   lambda a: f'<circle cx="256" cy="256" r="150" fill="none" stroke="{a}" stroke-width="10" stroke-opacity="0.35"/>' + "".join(f'<line x1="256" y1="256" x2="{256+int(150*__import__("math").cos(t))}" y2="{256+int(150*__import__("math").sin(t))}" stroke="{a}" stroke-width="10" stroke-opacity="0.5"/><circle cx="{256+int(150*__import__("math").cos(t))}" cy="{256+int(150*__import__("math").sin(t))}" r="26" fill="{a}"/>' for t in [i*1.0472 for i in range(6)]) + f'<circle cx="256" cy="256" r="60" fill="{a}"/><circle cx="256" cy="256" r="24" fill="#1b2140"/>'),
+    "serve":            (VIOLET, lambda a: f'<path d="M120 300 A150 150 0 0 1 390 190" fill="none" stroke="{a}" stroke-width="22" stroke-linecap="round"/><path d="M160 340 A100 100 0 0 1 350 240" fill="none" stroke="{a}" stroke-width="22" stroke-linecap="round" stroke-opacity="0.7"/><circle cx="256" cy="330" r="40" fill="{a}"/><rect x="236" y="330" width="40" height="110" rx="14" fill="{a}"/>'),
+}
+
+
+def row_icon_svg(name: str) -> str:
+    accent, glyph = ROW_ICONS[name]
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">'
+            f'<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{NAVY}"/><stop offset="1" stop-color="{NAVY2}"/></linearGradient></defs>'
+            f'<rect width="512" height="512" rx="112" fill="url(#bg)"/>{glyph(accent)}</svg>')
 
 
 def main() -> None:
@@ -126,6 +153,11 @@ def main() -> None:
         render(isvg, ASSETS / f"icon-{kind}.png", 512, 512)
         render_banner(kind, ASSETS / f"banner-{kind}.png")
         print("built", kind)
+    for name in ROW_ICONS:
+        svg = HERE / f"icon-{name}.svg"
+        svg.write_text(row_icon_svg(name))
+        render(svg, ASSETS / f"icon-{name}.png", 256, 256)
+    print("built", len(ROW_ICONS), "row icons")
 
 
 if __name__ == "__main__":

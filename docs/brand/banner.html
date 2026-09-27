@@ -3,93 +3,142 @@
 <head>
 <meta charset="utf-8">
 <title>swarm banner</title>
-<style>html,body{margin:0;background:#10152b}canvas{display:block}</style>
+<style>html,body{margin:0;background:#0b0f22}canvas{display:block}</style>
 </head>
 <body>
-<canvas id="c" width="1500" height="500"></canvas>
+<canvas id="c" width="2400" height="800"></canvas>
 <script>
-// Generative banner: a swarm drawn as light. ?kind=board|tasks|questions|agents|status. Deterministic per kind.
+// Generative banner v2: a swarm of light over a nebula. ?kind=board|tasks|questions|agents|status
+// Deterministic per kind. Design space is 1500×500, drawn at 2400×800 for retina covers.
 const kind = new URLSearchParams(location.search).get("kind") || "board";
-const W = 1500, H = 500;
+const W = 2400, H = 800, S = W / 1500;
 const cv = document.getElementById("c"), g = cv.getContext("2d");
+g.scale(S, S);
+const DW = 1500, DH = 500;
 
 let seed = { board: 1101, tasks: 2202, questions: 3303, agents: 4404, status: 5505 }[kind] || 7;
 const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
 const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 
-const ACCENT = { board: [255, 179, 71], tasks: [246, 196, 83], questions: [255, 133, 112],
-                 agents: [79, 220, 196], status: [168, 147, 255] }[kind];
-const LABEL = { board: "swarm", tasks: "tasks", questions: "questions", agents: "agents", status: "status" }[kind];
+const THEME = {
+  board:     { accent: [255, 184, 77],  accent2: [255, 236, 190], nebula: [[58, 44, 120], [120, 72, 96]],  label: "swarm" },
+  tasks:     { accent: [250, 200, 90],  accent2: [255, 240, 200], nebula: [[46, 52, 120], [110, 84, 80]],  label: "tasks" },
+  questions: { accent: [255, 128, 108], accent2: [255, 214, 200], nebula: [[70, 40, 110], [130, 60, 90]],  label: "questions" },
+  agents:    { accent: [72, 222, 200],  accent2: [200, 255, 244], nebula: [[34, 60, 120], [50, 110, 120]], label: "agents" },
+  status:    { accent: [172, 150, 255], accent2: [230, 224, 255], nebula: [[50, 40, 120], [96, 60, 130]],  label: "status" },
+}[kind];
 const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
-const LINE = [159, 214, 255];
+const LINE = [170, 216, 255];
 
-// ---------- sky ----------
-const sky = g.createLinearGradient(0, 0, 0, H);
-sky.addColorStop(0, "#10152b"); sky.addColorStop(0.55, "#232a63"); sky.addColorStop(1, "#3b2a55");
-g.fillStyle = sky; g.fillRect(0, 0, W, H);
-const ember = g.createRadialGradient(1150, 560, 0, 1150, 560, 760);
-ember.addColorStop(0, "rgba(205,110,75,0.38)"); ember.addColorStop(1, "rgba(205,110,75,0)");
-g.fillStyle = ember; g.fillRect(0, 0, W, H);
-const haze = g.createRadialGradient(330, 250, 0, 330, 250, 520);
-haze.addColorStop(0, rgba(ACCENT, 0.10)); haze.addColorStop(1, rgba(ACCENT, 0));
-g.fillStyle = haze; g.fillRect(0, 0, W, H);
-if (kind === "tasks") {  // four soft gates the lanes pass through
-  for (const gx of [330, 560, 790, 1020]) {
-    const gg = g.createLinearGradient(gx - 26, 0, gx + 26, 0);
-    gg.addColorStop(0, rgba(ACCENT, 0)); gg.addColorStop(0.5, rgba(ACCENT, 0.10)); gg.addColorStop(1, rgba(ACCENT, 0));
-    g.fillStyle = gg; g.fillRect(gx - 26, 95, 52, 310);
+// ---------- value noise (fbm) for the nebula ----------
+const GRID = 64, grid = [];
+for (let i = 0; i < GRID * GRID; i++) grid.push(rnd());
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const at = (a, b) => grid[((b % GRID + GRID) % GRID) * GRID + ((a % GRID + GRID) % GRID)];
+  return lerp(lerp(at(xi, yi), at(xi + 1, yi), u), lerp(at(xi, yi + 1), at(xi + 1, yi + 1), u), v);
+}
+function fbm(x, y) {
+  let a = 0, amp = 0.5, f = 1;
+  for (let o = 0; o < 5; o++) { a += amp * vnoise(x * f, y * f); amp *= 0.5; f *= 2.1; }
+  return a;
+}
+
+// ---------- sky: gradient + two nebula clouds + horizon ember ----------
+const sky = g.createLinearGradient(0, 0, 0, DH);
+sky.addColorStop(0, "#0b0f22"); sky.addColorStop(0.5, "#1b2050"); sky.addColorStop(1, "#33244a");
+g.fillStyle = sky; g.fillRect(0, 0, DW, DH);
+{
+  const cell = 4;
+  for (let y = 0; y < DH; y += cell) for (let x = 0; x < DW; x += cell) {
+    const n1 = fbm(x / 420 + 3.1, y / 260 + 1.7), n2 = fbm(x / 300 + 9.2, y / 300 + 4.4);
+    const m1 = clamp((n1 - 0.42) * 2.2, 0, 1) * (0.5 + 0.5 * (1 - Math.abs(y - 240) / 260));
+    const m2 = clamp((n2 - 0.48) * 2.6, 0, 1) * (x / DW);
+    if (m1 > 0.02) { g.fillStyle = rgba(THEME.nebula[0], 0.22 * m1); g.fillRect(x, y, cell, cell); }
+    if (m2 > 0.02) { g.fillStyle = rgba(THEME.nebula[1], 0.18 * m2); g.fillRect(x, y, cell, cell); }
   }
 }
-for (let i = 0; i < 260; i++) {  // stars
-  g.fillStyle = `rgba(255,255,255,${0.12 + rnd() * 0.4})`;
-  g.beginPath(); g.arc(rnd() * W, rnd() * H, 0.4 + rnd() * 1.3, 0, 7); g.fill();
+const ember = g.createRadialGradient(1180, 590, 0, 1180, 590, 820);
+ember.addColorStop(0, "rgba(214,116,80,0.34)"); ember.addColorStop(1, "rgba(214,116,80,0)");
+g.fillStyle = ember; g.fillRect(0, 0, DW, DH);
+const haze = g.createRadialGradient(330, 250, 0, 330, 250, 560);
+haze.addColorStop(0, rgba(THEME.accent, 0.12)); haze.addColorStop(1, rgba(THEME.accent, 0));
+g.fillStyle = haze; g.fillRect(0, 0, DW, DH);
+
+// ---------- stars: dust, mid, and a few bright ones with flares ----------
+for (let i = 0; i < 700; i++) {
+  const tint = rnd() < 0.15 ? [200, 220, 255] : [255, 255, 255];
+  g.fillStyle = rgba(tint, 0.10 + rnd() * 0.30);
+  g.beginPath(); g.arc(rnd() * DW, rnd() * DH, 0.3 + rnd() * 0.9, 0, 7); g.fill();
+}
+for (let i = 0; i < 90; i++) {
+  const x = rnd() * DW, y = rnd() * DH, r = 0.8 + rnd() * 1.4;
+  g.fillStyle = rgba([255, 250, 240], 0.5 + rnd() * 0.5); g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+}
+g.globalCompositeOperation = "lighter";
+for (let i = 0; i < 14; i++) {
+  const x = 700 + rnd() * 780, y = 30 + rnd() * 440, r = 2 + rnd() * 2.2;
+  const flare = g.createRadialGradient(x, y, 0, x, y, r * 9);
+  flare.addColorStop(0, "rgba(255,250,235,0.9)"); flare.addColorStop(0.2, "rgba(255,240,220,0.25)"); flare.addColorStop(1, "rgba(255,240,220,0)");
+  g.fillStyle = flare; g.beginPath(); g.arc(x, y, r * 9, 0, 7); g.fill();
+  g.strokeStyle = "rgba(255,250,240,0.35)"; g.lineWidth = 0.7;
+  g.beginPath(); g.moveTo(x - r * 7, y); g.lineTo(x + r * 7, y); g.moveTo(x, y - r * 7); g.lineTo(x, y + r * 7); g.stroke();
 }
 
-// ---------- particle fields ----------
+// ---------- particle fields (semantic per database) ----------
 const HUB = { x: 330, y: 250 };
 const AGENT_HUBS = [{ x: 210, y: 150 }, { x: 470, y: 120 }, { x: 640, y: 330 }, { x: 300, y: 390 }];
 const RING = { x: 340, y: 250, r: 150 };
-if (kind === "agents") {  // the clusters talk to each other
+
+if (kind === "tasks") {
+  for (const gx of [330, 560, 790, 1020]) {
+    const gg = g.createLinearGradient(gx - 30, 0, gx + 30, 0);
+    gg.addColorStop(0, rgba(THEME.accent, 0)); gg.addColorStop(0.5, rgba(THEME.accent, 0.12)); gg.addColorStop(1, rgba(THEME.accent, 0));
+    g.fillStyle = gg; g.fillRect(gx - 30, 90, 60, 320);
+  }
+}
+if (kind === "agents") {
   g.lineWidth = 1.2;
   for (let i = 0; i < AGENT_HUBS.length; i++) for (let j = i + 1; j < AGENT_HUBS.length; j++) {
-    g.strokeStyle = rgba(LINE, 0.16); g.beginPath();
+    g.strokeStyle = rgba(LINE, 0.18); g.beginPath();
     g.moveTo(AGENT_HUBS[i].x, AGENT_HUBS[i].y); g.lineTo(AGENT_HUBS[j].x, AGENT_HUBS[j].y); g.stroke();
   }
 }
 
 function spawn() {
+  const depth = rnd();
   switch (kind) {
-    case "board": {  // most from the right, streaming in; some already orbiting
-      if (rnd() < 0.7) return { x: 700 + rnd() * 850, y: 40 + rnd() * 420, life: 70 + rnd() * 60 };
-      const a = rnd() * Math.PI * 2, r = 90 + rnd() * 160;
-      return { x: HUB.x + Math.cos(a) * r, y: HUB.y + Math.sin(a) * r, life: 60 + rnd() * 40 };
+    case "board": {
+      if (rnd() < 0.72) return { x: 700 + rnd() * 880, y: 30 + rnd() * 440, life: 70 + rnd() * 70, depth };
+      const a = rnd() * Math.PI * 2, r = 90 + rnd() * 170;
+      return { x: HUB.x + Math.cos(a) * r, y: HUB.y + Math.sin(a) * r, life: 60 + rnd() * 40, depth };
     }
-    case "tasks": {  // five lanes entering from the left
+    case "tasks": {
       const lane = Math.floor(rnd() * 5);
-      return { x: -60 + rnd() * 900, y: 130 + lane * 60 + (rnd() - 0.5) * 18, lane, life: 80 + rnd() * 60 };
+      return { x: -60 + rnd() * 900, y: 130 + lane * 60 + (rnd() - 0.5) * 16, lane, life: 80 + rnd() * 70, depth };
     }
-    case "questions": {  // on the ring, but never in the gap (between -0.35 and 0.45 rad, top-right)
-      let a; do { a = rnd() * Math.PI * 2; } while (a > -0.35 + Math.PI * 2 || (a > -0.35 && a < 0.45));
-      const r = RING.r + (rnd() - 0.5) * 36;
-      return { x: RING.x + Math.cos(a) * r, y: RING.y + Math.sin(a) * r, life: 60 + rnd() * 50 };
+    case "questions": {
+      let a; do { a = rnd() * Math.PI * 2; } while (a > -0.35 && a < 0.45);
+      const r = RING.r + (rnd() - 0.5) * 34;
+      return { x: RING.x + Math.cos(a) * r, y: RING.y + Math.sin(a) * r, life: 60 + rnd() * 50, depth };
     }
-    case "agents": {  // around one of four hubs, a few travelers between hubs
+    case "agents": {
       const h = AGENT_HUBS[Math.floor(rnd() * AGENT_HUBS.length)];
-      const a = rnd() * Math.PI * 2, r = 30 + rnd() * 70;
-      const traveler = rnd() < 0.12;
-      return { x: h.x + Math.cos(a) * r, y: h.y + Math.sin(a) * r, hub: h, traveler,
+      const a = rnd() * Math.PI * 2, r = 30 + rnd() * 70, traveler = rnd() < 0.12;
+      return { x: h.x + Math.cos(a) * r, y: h.y + Math.sin(a) * r, hub: h, traveler, depth,
                life: traveler ? 160 + rnd() * 80 : 60 + rnd() * 50 };
     }
-    case "status": {  // along a rising curve, denser and wider at the start, tight at the tip
+    case "status": {
       const t = Math.pow(rnd(), 0.8);
       const x = lerp(110, 640, t), y = lerp(410, 110, t) - Math.sin(t * Math.PI) * 60;
       const spread = lerp(85, 14, t);
-      return { x: x + (rnd() - 0.5) * spread, y: y + (rnd() - 0.5) * spread, t, life: 50 + rnd() * 40 };
+      return { x: x + (rnd() - 0.5) * spread, y: y + (rnd() - 0.5) * spread, t, life: 50 + rnd() * 40, depth };
     }
   }
 }
-
-function field(p) {  // returns velocity for a particle
+function field(p) {
   switch (kind) {
     case "board": {
       const dx = HUB.x - p.x, dy = HUB.y - p.y, d = Math.hypot(dx, dy) + 1e-3;
@@ -98,13 +147,11 @@ function field(p) {  // returns velocity for a particle
     }
     case "tasks": {
       const gate = Math.sin(p.x / 140) * 0.6;
-      const slow = p.x > 1080 ? Math.max(0.15, 1 - (p.x - 1080) / 90) : 1;   // they pile up at the end
+      const slow = p.x > 1080 ? Math.max(0.15, 1 - (p.x - 1080) / 90) : 1;
       return { vx: (2.2 + p.lane * 0.15) * slow, vy: gate * 0.5 * slow + (130 + p.lane * 60 - p.y) * 0.05 };
     }
     case "questions": {
-      const dx = p.x - RING.x, dy = p.y - RING.y, d = Math.hypot(dx, dy) + 1e-3;
-      const a = Math.atan2(dy, dx);
-      // stop before the gap so the loop stays open
+      const dx = p.x - RING.x, dy = p.y - RING.y, d = Math.hypot(dx, dy) + 1e-3, a = Math.atan2(dy, dx);
       const nextA = a + 0.02;
       if (nextA > -0.35 && nextA < 0.45) return { vx: 0, vy: 0 };
       return { vx: -Math.sin(a) * 1.8 + (RING.r - d) * 0.02 * Math.cos(a), vy: Math.cos(a) * 1.8 + (RING.r - d) * 0.02 * Math.sin(a) };
@@ -119,27 +166,26 @@ function field(p) {  // returns velocity for a particle
       return { vx: -dy / d * 1.6 + (60 - d) * 0.01 * dx / d, vy: dx / d * 1.6 + (60 - d) * 0.01 * dy / d };
     }
     case "status": {
-      const t = Math.min(1, Math.max(0, (p.x - 110) / 530));
+      const t = clamp((p.x - 110) / 530, 0, 1);
       const slope = (-300 / 530) - Math.cos(t * Math.PI) * Math.PI * 60 / 530;
       return { vx: 1.8, vy: slope * 1.8 };
     }
   }
 }
 
-// ---------- draw trails ----------
-g.globalCompositeOperation = "lighter";
+// ---------- trails, depth-aware ----------
+const N = { board: 560, tasks: 440, questions: 380, agents: 440, status: 400 }[kind];
 const particles = [];
-const N = { board: 520, tasks: 420, questions: 360, agents: 420, status: 380 }[kind];
 for (let i = 0; i < N; i++) particles.push(spawn());
+particles.sort((a, b) => a.depth - b.depth);
 for (const p of particles) {
   let x = p.x, y = p.y;
   const steps = Math.floor(p.life);
-  g.lineWidth = 1.1;
+  g.lineWidth = 0.6 + p.depth * 1.2;
   for (let s = 0; s < steps; s++) {
     const v = field({ ...p, x, y });
-    const nx = x + v.vx, ny = y + v.vy;
-    const fade = s / steps;
-    g.strokeStyle = rgba(ACCENT, 0.035 + fade * 0.07);
+    const nx = x + v.vx, ny = y + v.vy, fade = s / steps;
+    g.strokeStyle = rgba(THEME.accent, (0.02 + fade * 0.06) * (0.4 + 0.6 * p.depth));
     g.beginPath(); g.moveTo(x, y); g.lineTo(nx, ny); g.stroke();
     x = nx; y = ny;
     if (v.vx === 0 && v.vy === 0) break;
@@ -147,49 +193,62 @@ for (const p of particles) {
   p.ex = x; p.ey = y;
 }
 
-// ---------- constellation lines between nearby heads ----------
+// ---------- constellation lines ----------
 let links = 0;
-for (let i = 0; i < particles.length && links < 700; i++) {
-  for (let j = i + 1; j < particles.length && links < 700; j++) {
-    const a = particles[i], b = particles[j];
-    const d = Math.hypot(a.ex - b.ex, a.ey - b.ey);
+for (let i = 0; i < particles.length && links < 800; i++) {
+  for (let j = i + 1; j < particles.length && links < 800; j++) {
+    const a = particles[i], b = particles[j], d = Math.hypot(a.ex - b.ex, a.ey - b.ey);
     if (d < 46) {
-      g.strokeStyle = rgba(LINE, 0.10 * (1 - d / 46));
-      g.lineWidth = 0.8;
-      g.beginPath(); g.moveTo(a.ex, a.ey); g.lineTo(b.ex, b.ey); g.stroke();
-      links++;
+      g.strokeStyle = rgba(LINE, 0.11 * (1 - d / 46)); g.lineWidth = 0.7;
+      g.beginPath(); g.moveTo(a.ex, a.ey); g.lineTo(b.ex, b.ey); g.stroke(); links++;
     }
   }
 }
 
-// ---------- glowing heads ----------
-function glow(x, y, r, c, a) {
+// ---------- heads: far = pinpoints, near = bokeh discs with a warm core ----------
+function glow(x, y, r, c, a, core = true) {
   const grd = g.createRadialGradient(x, y, 0, x, y, r * 5);
   grd.addColorStop(0, rgba(c, a)); grd.addColorStop(0.25, rgba(c, a * 0.35)); grd.addColorStop(1, rgba(c, 0));
   g.fillStyle = grd; g.beginPath(); g.arc(x, y, r * 5, 0, 7); g.fill();
-  g.fillStyle = rgba([255, 250, 235], Math.min(1, a + 0.3)); g.beginPath(); g.arc(x, y, r * 0.55, 0, 7); g.fill();
+  if (core) { g.fillStyle = rgba(THEME.accent2, Math.min(1, a + 0.3)); g.beginPath(); g.arc(x, y, r * 0.55, 0, 7); g.fill(); }
+}
+function bokeh(x, y, r, c, a) {
+  const grd = g.createRadialGradient(x, y, 0, x, y, r);
+  grd.addColorStop(0, rgba(c, a * 0.55)); grd.addColorStop(0.8, rgba(c, a * 0.7)); grd.addColorStop(1, rgba(c, 0));
+  g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
 }
 for (const p of particles) {
   const near = kind === "board" ? 1 - Math.min(1, Math.hypot(p.ex - HUB.x, p.ey - HUB.y) / 700) : 0.6;
-  const progress = kind === "tasks" ? Math.min(1, Math.max(0, p.ex / 1150)) : 1;
-  const r = (1.2 + rnd() * 2.2 + near * 1.2) * (kind === "status" ? 0.8 : 1);
-  glow(p.ex, p.ey, r, ACCENT, (0.25 + rnd() * 0.35) * (0.5 + 0.5 * progress));
+  const progress = kind === "tasks" ? clamp(p.ex / 1150, 0, 1) : 1;
+  const base = (0.25 + rnd() * 0.35) * (0.5 + 0.5 * progress);
+  if (p.depth > 0.92) bokeh(p.ex, p.ey, 7 + rnd() * 9, THEME.accent, base * 0.5);
+  else glow(p.ex, p.ey, (1.0 + rnd() * 2.0 + near * 1.2) * (0.5 + p.depth) * (kind === "status" ? 0.8 : 1), THEME.accent, base * (0.5 + 0.5 * p.depth));
 }
-// focal points
-if (kind === "board") glow(HUB.x, HUB.y, 9, ACCENT, 0.95);
-if (kind === "agents") for (const h of AGENT_HUBS) glow(h.x, h.y, 6, ACCENT, 0.9);
-if (kind === "status") glow(640, 110, 5, ACCENT, 0.7);
-if (kind === "questions") {  // the lone particle in the gap
-  const a = 0.05, r = RING.r;
-  glow(RING.x + Math.cos(a) * r, RING.y + Math.sin(a) * r, 7, [255, 245, 225], 0.95);
+function focal(x, y, r) {
+  glow(x, y, r, THEME.accent, 0.95);
+  for (const k of [2.6, 4.2]) { g.strokeStyle = rgba(THEME.accent2, 0.10); g.lineWidth = 1; g.beginPath(); g.arc(x, y, r * k, 0, 7); g.stroke(); }
 }
+if (kind === "board") focal(HUB.x, HUB.y, 9);
+if (kind === "agents") for (const h of AGENT_HUBS) focal(h.x, h.y, 6);
+if (kind === "status") focal(640, 110, 5);
+if (kind === "questions") { const a = 0.05; focal(RING.x + Math.cos(a) * RING.r, RING.y + Math.sin(a) * RING.r, 7); }
 g.globalCompositeOperation = "source-over";
+
+// ---------- vignette + grain ----------
+const vig = g.createRadialGradient(DW * 0.5, DH * 0.5, DH * 0.5, DW * 0.5, DH * 0.5, DW * 0.75);
+vig.addColorStop(0, "rgba(0,0,0,0)"); vig.addColorStop(1, "rgba(0,0,0,0.42)");
+g.fillStyle = vig; g.fillRect(0, 0, DW, DH);
+for (let i = 0; i < 26000; i++) { g.fillStyle = `rgba(255,255,255,${rnd() * 0.04})`; g.fillRect(rnd() * DW, rnd() * DH, 1, 1); }
 
 // ---------- the word ----------
 g.font = '600 66px "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif';
 g.textAlign = "right"; g.textBaseline = "middle";
-g.fillStyle = "rgba(255,255,255,0.14)"; g.fillText(LABEL, 1402, 254);  // soft echo
-g.fillStyle = "rgba(255,255,255,0.92)"; g.fillText(LABEL, 1400, 250);
+g.fillStyle = "rgba(0,0,0,0.25)"; g.fillText(THEME.label, 1402, 254);
+g.fillStyle = "rgba(255,255,255,0.94)"; g.fillText(THEME.label, 1400, 250);
+const tw = g.measureText(THEME.label).width;
+const ul = g.createLinearGradient(1400 - tw, 0, 1400, 0);
+ul.addColorStop(0, rgba(THEME.accent, 0)); ul.addColorStop(1, rgba(THEME.accent, 0.9));
+g.fillStyle = ul; g.fillRect(1400 - tw, 296, tw, 2);
 document.title = "done";
 </script>
 </body>
