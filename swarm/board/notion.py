@@ -329,7 +329,9 @@ def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_
     """Decorate the parent page, the three databases, and the status page. Returns what failed entirely."""
     targets = [("pages", ids.get("home_page") or ids.get("parent_page_id"), "parent"),
                ("databases", ids.get("tasks_db"), "tasks"), ("databases", ids.get("questions_db"), "questions"),
-               ("databases", ids.get("agents_db"), "agents"), ("pages", ids.get("status_page"), "status")]
+               ("databases", ids.get("agents_db"), "agents")]
+    if ids.get("status_page") and ids["status_page"] != ids.get("home_page"):
+        targets.append(("pages", ids["status_page"], "status"))
     failed = []
     for kind, obj_id, key in targets:
         if not obj_id:
@@ -473,11 +475,21 @@ class NotionBoard:
     # ----- init -----
     @staticmethod
     def init(client: NotionClient, parent_page_id: str, agent_names: list[str], project: str = "") -> dict:
-        """One dashboard page per project: how-to, Agents, Questions for you, then Tasks and Status as their own
-        pages (a task opened from a full-page table gets the whole screen)."""
+        """One dashboard page per project under the parent: how-to, Agents, Questions for you, then two columns:
+        a tile that opens the Tasks board (a full page next to the dashboard, so a task opens full-screen) and
+        the live Status block. Layout as the user arranged it by hand on Sep 28, 2026."""
         ids: dict = {"parent_page_id": parent_page_id}
-        home = client.create_child_page(parent_page_id, f"Swarm · {project or 'project'}")
-        ids["home_page"] = home["id"]
+        label = project or "project"
+        icon_url = asset_url("icon-board.png")
+        home = client.create_child_page(parent_page_id, f"Swarm · {label}", [{
+            "object": "block", "type": "callout", "callout": {
+                "icon": ({"type": "external", "external": {"url": icon_url}} if icon_url
+                         else {"type": "emoji", "emoji": "🐝"}),
+                "color": "gray_background",
+                "rich_text": _rt("Agents first, then answer anything under Questions for you. Tasks opens the full "
+                                 "board; Status refreshes every few minutes (read the RISK lines first). Cards move "
+                                 "on their own: drag one to Cut to drop it, or to Ready to retry it.")}}])
+        ids["home_page"] = ids["status_page"] = home["id"]
 
         client.append_blocks(home["id"], [_heading("Agents")])
         agents = client.create_database(home["id"], "Agents", np.AGENTS_SCHEMA, inline=True)
@@ -485,21 +497,32 @@ class NotionBoard:
         client.append_blocks(home["id"], [_heading("Questions for you")])
         questions = client.create_database(home["id"], "Questions", np.QUESTIONS_SCHEMA(), inline=True)
         ids["questions_db"], ids["questions_ds"] = questions["id"], questions["data_sources"][0]["id"]
-        tasks = client.create_database(home["id"], "Tasks", np.TASKS_SCHEMA(agent_names), inline=False)
+        # the board is a full page next to the dashboard (the API cannot place a database inside a column)
+        tasks = client.create_database(parent_page_id, f"Tasks · {label}", np.TASKS_SCHEMA(agent_names), inline=False)
         ids["tasks_db"], ids["tasks_ds"] = tasks["id"], tasks["data_sources"][0]["id"]
         try:   # link Questions → Tasks now that Tasks exists (cosmetic; the harness links by Task ID)
             client.request("PATCH", f"/data_sources/{ids['questions_ds']}",
                            json={"properties": np.TASK_RELATION(ids["tasks_ds"])})
         except NotionError:
             pass
-        status = client.create_child_page(home["id"], "Status", [
-            {"object": "block", "type": "paragraph",
-             "paragraph": {"rich_text": _links([("Dashboard", home["id"]), ("Tasks", ids["tasks_db"])])}},
-            {"object": "block", "type": "code",
-             "code": {"language": "plain text", "rich_text": _rt("(no status yet: start swarm serve)")}}])
-        ids["status_page"] = status["id"]
-        code_blocks = [b for b in client.list_children(status["id"]) if b.get("type") == "code"]
-        ids["status_block"] = code_blocks[0]["id"] if code_blocks else ""
+        cols = client.append_blocks(home["id"], [{"object": "block", "type": "column_list", "column_list": {"children": [
+            {"object": "block", "type": "column", "column": {"children": [
+                _heading("Tasks"),
+                {"object": "block", "type": "link_to_page",
+                 "link_to_page": {"type": "database_id", "database_id": ids["tasks_db"]}}]}},
+            {"object": "block", "type": "column", "column": {"children": [
+                _heading("Status"),
+                {"object": "block", "type": "code",
+                 "code": {"language": "plain text", "rich_text": _rt("(no status yet: start swarm serve)")}}]}}]}}])
+        ids["status_block"] = ""
+        try:
+            col_list = (cols.get("results") or [{}])[0].get("id", "")
+            for col in client.list_children(col_list):
+                for b in client.list_children(col["id"]):
+                    if b.get("type") == "code":
+                        ids["status_block"] = b["id"]
+        except NotionError:
+            pass
 
         ids["views_ok"] = "true"
         try:
@@ -522,7 +545,7 @@ class NotionBoard:
             ids["views_ok"] = f"false: {e}"
 
         descriptions = {
-            "tasks_db": _links([("Dashboard", home["id"]), ("Status", status["id"])])
+            "tasks_db": _links([("Dashboard", home["id"])])
             + _rt("  ·  Board: where every task is. Needs you: Blocked and Failed. "
                   "Drag a card to Cut to drop it, or to Ready to retry it."),
             "questions_db": _rt("Type your answer in Answer. Tick Needs follow-up when an fyi decision must change."),
@@ -533,20 +556,6 @@ class NotionBoard:
                 client.request("PATCH", f"/databases/{ids[key]}", json={"description": rich})
             except NotionError:
                 pass
-        try:
-            icon_url = asset_url("icon-board.png")
-            client.request("PATCH", f"/blocks/{home['id']}/children", json={"children": [{
-                "object": "block", "type": "callout", "callout": {
-                    "icon": ({"type": "external", "external": {"url": icon_url}} if icon_url
-                             else {"type": "emoji", "emoji": "🐝"}),
-                    "color": "gray_background",
-                    "rich_text": _rt("Agents first, then answer anything under Questions for you. ")
-                    + _links([("Tasks", ids["tasks_db"]), ("Status", status["id"])])
-                    + _rt(" open on their own pages. Cards move on their own; drag one to Cut to drop it, "
-                          "or to Ready to retry it. Status refreshes every few minutes: read the RISK lines first.")}}],
-                "position": {"type": "start"}})
-        except NotionError:
-            pass
         failed = decorate_board(client, ids)
         ids["decor_ok"] = "true" if not failed else "false: " + "; ".join(failed)
         try:

@@ -201,8 +201,9 @@ def test_board_questions_agents_status():
     assert store["blocks"]["sb"]["code"]["rich_text"][0]["text"]["content"] == "status text"
 
 
-def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
-    """Dashboard: how-to with links, Agents table, Questions for you. Tasks and Status are their own pages ("tabs")."""
+def test_init_builds_the_dashboard_layout():
+    """Dashboard: how-to, Agents, Questions for you, then two columns: a Tasks tile (the board is its own
+    full page next to the dashboard) | Status heading + the live block."""
     decorated, views, dbs, appended, pages, descriptions, relations = {}, [], [], {}, [], {}, []
     view_store, ordered = {}, {}
     counter = {"n": 0}
@@ -216,15 +217,22 @@ def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
             return httpx.Response(200, json={"id": f"db{counter['n']}", "data_sources": [{"id": f"ds{counter['n']}"}]})
         if req.method == "POST" and path == "/v1/pages":
             pages.append(body)
-            return httpx.Response(200, json={"id": "home" if len(pages) == 1 else "status"})
-        if req.method == "GET" and path == "/v1/blocks/status/children":
-            return httpx.Response(200, json={"results": [{"id": "nav", "type": "paragraph"}, {"id": "code1", "type": "code"}]})
+            return httpx.Response(200, json={"id": "home"})
+        if req.method == "PATCH" and path == "/v1/blocks/home/children":
+            appended.setdefault("home", []).append(body)
+            kids = body["children"]
+            if kids[0]["type"] == "column_list":
+                return httpx.Response(200, json={"results": [{"id": "cols", "type": "column_list"}]})
+            return httpx.Response(200, json={"results": kids})
+        if req.method == "GET" and path == "/v1/blocks/cols/children":
+            return httpx.Response(200, json={"results": [{"id": "left", "type": "column"}, {"id": "right", "type": "column"}]})
+        if req.method == "GET" and path == "/v1/blocks/left/children":
+            return httpx.Response(200, json={"results": [{"id": "h0", "type": "heading_2"}, {"id": "l", "type": "link_to_page"}]})
+        if req.method == "GET" and path == "/v1/blocks/right/children":
+            return httpx.Response(200, json={"results": [{"id": "h", "type": "heading_2"}, {"id": "code1", "type": "code"}]})
         if req.method == "PATCH" and path.startswith("/v1/data_sources/"):
             relations.append(body["properties"])
             return httpx.Response(200, json=body)
-        if req.method == "PATCH" and path.endswith("/children"):
-            appended.setdefault(path.split("/")[3], []).append(body)
-            return httpx.Response(200, json={"results": body["children"]})
         if req.method == "PATCH" and path.startswith("/v1/databases/") and "description" in body:
             descriptions[path.split("/")[3]] = body["description"]
             return httpx.Response(200, json=body)
@@ -257,50 +265,44 @@ def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
 
     client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
     ids = NotionBoard.init(client, "parent", ["claude-a"], project="demo")
-    # column order is a per-view setting: every table view gets it, boards get their card fields
-    assert ids["columns_ok"] == "true"
-    agents_default = ordered["default-db1"]["properties"]
-    assert [p["property_id"] for p in agents_default[:6]] == ["title", "Status", "Last Heartbeat", "Cooldown Until",
-                                                               "Current Task", "Cost 5h USD"]
-    tasks_default = ordered["default-db3"]["properties"]
-    assert [p["property_id"] for p in tasks_default[:3]] == ["title", "Status", "Agent"]
-    assert {p["property_id"]: p["visible"] for p in tasks_default}["Claim Nonce"] is False
-    assert [p["property_id"] for p in ordered["default-db2"]["properties"][:2]] == ["title", "Status"]
-    assert ordered["v1"]["type"] == "board" and "group_by" in ordered["v1"]   # board keeps its grouping
-    assert [p["property_id"] for p in ordered["v1"]["properties"]] == ["Agent", "Importance", "Type", "Size"]
-    # the dashboard page, then the Status page under it
-    assert [pg["parent"]["page_id"] for pg in pages] == ["parent", "home"]
+    # one dashboard page; the Tasks board is a full page next to it, named after the project
+    assert len(pages) == 1 and pages[0]["parent"]["page_id"] == "parent"
     assert pages[0]["properties"]["title"][0]["text"]["content"] == "Swarm · demo"
-    assert pages[1]["properties"]["title"][0]["text"]["content"] == "Status"
-    assert [b["type"] for b in pages[1]["children"]] == ["paragraph", "code"]   # nav line, then the live block
-    assert ids["home_page"] == "home" and ids["status_page"] == "status" and ids["status_block"] == "code1"
-    # dashboard order: Agents, Questions for you, then Tasks as a full page (opening a task fills the screen)
+    assert [b["type"] for b in pages[0]["children"]] == ["callout"]
     assert [(d["title"][0]["text"]["content"], d["is_inline"], d["parent"]["page_id"]) for d in dbs] == \
-        [("Agents", True, "home"), ("Questions", True, "home"), ("Tasks", False, "home")]
+        [("Agents", True, "home"), ("Questions", True, "home"), ("Tasks · demo", False, "parent")]
     heads = [b["heading_2"]["rich_text"][0]["text"]["content"]
              for call in appended["home"] for b in call["children"] if b["type"] == "heading_2"]
     assert heads == ["Agents", "Questions for you"]
-    assert relations and "Task" in relations[0] and relations[0]["Task"]["relation"]["data_source_id"] == "ds3"
-    assert "Task" not in dbs[1]["initial_data_source"]["properties"]   # relation added once Tasks exists
-    callout_calls = [call for call in appended["home"] if call["children"][0]["type"] == "callout"]
-    assert callout_calls and callout_calls[0]["position"] == {"type": "start"}
-    links = [seg["text"]["link"]["url"] for seg in callout_calls[0]["children"][0]["callout"]["rich_text"]
-             if seg["text"].get("link")]
-    assert any("db3" in u for u in links) and any("status" in u for u in links)
-    # views: Board, By agent and Needs you on Tasks; Open on Questions
-    assert ids["views_ok"] == "true"
+    cols = [call["children"][0] for call in appended["home"] if call["children"][0]["type"] == "column_list"]
+    assert len(cols) == 1
+    left, right = cols[0]["column_list"]["children"]
+    assert [b["type"] for b in left["column"]["children"]] == ["heading_2", "link_to_page"]
+    assert left["column"]["children"][1]["link_to_page"] == {"type": "database_id", "database_id": "db3"}
+    assert [b["type"] for b in right["column"]["children"]] == ["heading_2", "code"]
+    assert ids["home_page"] == "home" and ids["status_page"] == "home" and ids["status_block"] == "code1"
+    assert ids["tasks_db"] == "db3"
+    # Questions gets its Task relation once Tasks exists
+    assert relations and relations[0]["Task"]["relation"]["data_source_id"] == "ds3"
+    assert "Task" not in dbs[1]["initial_data_source"]["properties"]
+    # views and column order
+    assert ids["views_ok"] == "true" and ids["columns_ok"] == "true"
     assert views == [("db3", "Board", "board"), ("db3", "By agent", "board"), ("db3", "Needs you", "table"),
                      ("db2", "Open", "table")]
-    # help text and links where people look
-    task_desc = "".join(seg["text"]["content"] for seg in descriptions["db3"])
-    assert "Dashboard" in task_desc and "Cut" in task_desc
-    assert any(seg["text"].get("link") for seg in descriptions["db3"])
+    assert [p["property_id"] for p in ordered["default-db1"]["properties"][:6]] == \
+        ["title", "Status", "Last Heartbeat", "Cooldown Until", "Current Task", "Cost 5h USD"]
+    assert [p["property_id"] for p in ordered["default-db3"]["properties"][:3]] == ["title", "Status", "Agent"]
+    assert {p["property_id"]: p["visible"] for p in ordered["default-db3"]["properties"]}["Claim Nonce"] is False
+    assert [p["property_id"] for p in ordered["v1"]["properties"]] == ["Agent", "Importance", "Type", "Size"]
+    # help text where people look
+    assert "Cut" in "".join(seg["text"]["content"] for seg in descriptions["db3"])
     assert "Answer" in "".join(seg["text"]["content"] for seg in descriptions["db2"])
+    # art: dashboard + tasks board get icon and cover; inline tables get icons
     assert ids["decor_ok"] == "true"
-    for key in ("home", "status", "db1", "db2", "db3"):
+    for key in ("home", "db1", "db2", "db3"):
         assert decorated[key]["icon"]["type"] == "external", key
     assert "icon-board.png?v=" in decorated["home"]["icon"]["external"]["url"]
-    assert "icon-status.png?v=" in decorated["status"]["icon"]["external"]["url"]
+    assert "banner-tasks.png?v=" in decorated["db3"]["cover"]["external"]["url"]
 
 
 def test_tasks_schema_puts_status_right_after_the_title():
