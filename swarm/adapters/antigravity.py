@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import json
+
 from ..models import RunResult, Usage
 from .base import Adapter, RunSpec, last_json_object
 
 
 class AntigravityAdapter(Adapter):
-    """Google Antigravity CLI (`agy`). Flags are third-party sourced; verify with `swarm doctor --smoke`."""
+    """Google Antigravity CLI (`agy`, brew install --cask antigravity-cli). This is where Google AI Pro / personal
+    accounts went in 2026 (the Gemini CLI refuses them). Flags checked against agy 1.2.12 on Sep 28 2026."""
     name = "antigravity"
 
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
-        argv = ["agy", "-p", spec.prompt_file.read_text(), f"--model={spec.model}", "--output-format", "json"]
+        argv = ["agy", "-p", spec.prompt_file.read_text(), "--output-format", "json", "--model", spec.model,
+                "--print-timeout", f"{int(spec.timeout_s)}s"]
+        if spec.effort:
+            argv += ["--effort", spec.effort]
         if not spec.read_only:
-            argv += ["--approval-mode", "yolo"]
+            argv += ["--dangerously-skip-permissions"]
+            if spec.schema:
+                argv += ["--json-schema", json.dumps(spec.schema)]
         argv += list(spec.extra_args)
         return argv, None
 

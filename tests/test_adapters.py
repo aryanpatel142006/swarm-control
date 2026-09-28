@@ -72,7 +72,7 @@ def test_codex_command_and_parse(tmp_path):
 
 def test_antigravity_gemini_grok_generic_commands(tmp_path):
     ag, _ = AntigravityAdapter().build_command(spec(tmp_path))
-    assert ag[0] == "agy" and "--model=m" in ag and "--approval-mode" in ag
+    assert ag[0] == "agy" and ag[ag.index("--model") + 1] == "m" and "--dangerously-skip-permissions" in ag
     r = AntigravityAdapter().parse_output(0, json.dumps({"response": "hi", "stats": {}}), "")
     assert r.ok and r.structured_output is None
     ge, _ = GeminiAdapter().build_command(spec(tmp_path))
@@ -276,3 +276,19 @@ def test_gemini_parses_token_stats_into_usage():
     r = GeminiAdapter().parse_output(0, out, "")
     assert r.usage.input_tokens == 212048 and r.usage.output_tokens == 2422 + 1492
     assert r.usage.cache_read_tokens == 154318 and r.usage.cost_usd is None   # subscription: no dollar figure
+
+
+def test_antigravity_command_matches_the_real_cli(tmp_path):
+    """agy 1.2.12 (Sep 2026): -p/--print, --output-format json, --json-schema, --model, --effort,
+    --dangerously-skip-permissions, --print-timeout, --add-dir. Prompt is passed as the -p argument."""
+    from swarm.adapters.antigravity import AntigravityAdapter
+    s = spec(tmp_path, model="gemini-3-pro", effort="high", timeout_s=600)
+    argv, stdin = AntigravityAdapter().build_command(s)
+    assert argv[0] == "agy" and argv[argv.index("-p") + 1] == "do the thing"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert argv[argv.index("--model") + 1] == "gemini-3-pro" and argv[argv.index("--effort") + 1] == "high"
+    assert "--dangerously-skip-permissions" in argv and argv[argv.index("--print-timeout") + 1] == "600s"
+    assert "--json-schema" in argv and stdin is None
+    ro, _ = AntigravityAdapter().build_command(spec(tmp_path, model="m", read_only=True, schema=None))
+    assert "--dangerously-skip-permissions" not in ro and "--json-schema" not in ro
+    assert "--effort" not in AntigravityAdapter().build_command(spec(tmp_path, model="m", effort=None))[0]
