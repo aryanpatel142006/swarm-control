@@ -142,22 +142,37 @@ def _merge_setup(cfg, git_repo, tmp_path, gh, pr_url="https://gh/pr/21"):
     return board, ws, board.get_task(t.id)
 
 
-def test_merge_refuses_a_pr_that_is_not_open_and_keeps_the_branch(cfg, git_repo, tmp_path):
-    """A stale merged PR under the same branch name must not count as a merge; the branch must survive."""
+def test_merge_reopens_a_pr_when_the_linked_one_is_stale(cfg, git_repo, tmp_path):
+    """A runner on old code links a merged PR from an earlier project under the same branch name. The merger
+    opens a fresh PR for the branch and merges that, instead of failing or deleting anyone's work."""
+    state = {"created": False, "merged": False}
+
     def gh(args, cwd):
         if args[:2] == ["pr", "view"]:
-            return CmdResult(0, '{"state":"MERGED","headRefOid":"0000000","url":"https://gh/pr/1","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}', "")
+            if args[2] == "https://gh/pr/1":
+                return CmdResult(0, '{"state":"MERGED","headRefOid":"0000000","url":"https://gh/pr/1"}', "")
+            st = "MERGED" if state["merged"] else "OPEN"
+            sha = _git(git_repo, "ls-remote", "--heads", "origin", "task/T-001").split()[0] if not state["merged"] else "x"
+            return CmdResult(0, f'{{"state":"{st}","headRefOid":"{sha}","url":"https://gh/pr/40","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}}', "")
+        if args[:2] == ["pr", "list"]:
+            return CmdResult(0, "[]", "")
+        if args[:2] == ["pr", "create"]:
+            state["created"] = True
+            return CmdResult(0, "https://gh/pr/40\n", "")
         if args[:2] == ["pr", "merge"]:
-            return CmdResult(0, "already merged", "")
+            assert args[2] == "https://gh/pr/40"
+            _git(git_repo, "fetch", "-q", "origin")
+            _git(git_repo, "merge", "-q", "--no-edit", "origin/task/T-001")
+            _git(git_repo, "push", "-q", "origin", "main")
+            state["merged"] = True
+            return CmdResult(0, "merged", "")
         return CmdResult(0, "", "")
 
     board, ws, t = _merge_setup(cfg, git_repo, tmp_path, gh, pr_url="https://gh/pr/1")
     m = Merger(cfg, board, ws, log=lambda *a: None, sleep=lambda s: None)
     m.merge(t)
     stored = board.get_task(t.id)
-    assert stored.status is not Status.DONE
-    assert _git(git_repo, "ls-remote", "--heads", "origin", t.branch).strip()   # branch kept
-    assert any(f.startswith("merge_failed") for f in stored.flags)
+    assert state["created"] and stored.status is Status.DONE and stored.pr_url == "https://gh/pr/40"
 
 
 def test_merge_by_url_then_confirms_and_deletes_branch(cfg, git_repo, tmp_path):

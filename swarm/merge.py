@@ -44,8 +44,18 @@ class Merger:
         ref = self._ref(task)
         before = self.ws.pr_info(ref)
         if before and str(before.get("state", "OPEN")).upper() != "OPEN":
-            return CmdResult(1, "", f"PR {ref} is {before.get('state')}, not open; refusing to treat it as this "
-                                    "task's merge (branch names repeat across projects)")
+            # a stale link (branch names repeat across projects; an old runner may still link the old PR):
+            # open a fresh PR for this branch and merge that one
+            try:
+                fresh = self.ws.pr_create_or_update(task.branch, task.title_with_id(),
+                                                    f"Reopened by the merger: the linked PR {ref} was {before.get('state')}.")
+            except RuntimeError as e:
+                return CmdResult(1, "", f"PR {ref} is {before.get('state')} and a new PR could not be opened: {e}")
+            if not fresh:
+                return CmdResult(1, "", f"PR {ref} is {before.get('state')} and no new PR could be opened")
+            self.log(f"[{task.id}] stale PR {ref} → new PR {fresh}")
+            task.pr_url = ref = fresh
+            self.board.update_task(task, ["pr_url"])
         self._wait_mergeable(task)
         r = self.ws.pr_merge(ref)
         if not r.ok and "not mergeable" in (r.err + r.out):
