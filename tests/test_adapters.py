@@ -252,3 +252,16 @@ def test_gemini_headless_skips_the_trust_prompt(tmp_path):
     assert "--approval-mode" in argv and argv[argv.index("--approval-mode") + 1] == "yolo"
     ro, _ = GeminiAdapter().build_command(spec(tmp_path, model="gemini-3.1-pro", read_only=True))
     assert "--skip-trust" in ro and "--approval-mode" not in ro
+
+
+def test_gemini_reads_a_json_report_out_of_the_response_text():
+    """Gemini has no --json-schema; when the model answers with the report JSON as text, that is the report."""
+    from swarm.adapters.gemini import GeminiAdapter
+    out = json.dumps({"session_id": "s", "response": 'Here it is:\n{"status":"done","summary":"smoke ok"}',
+                      "stats": {"models": {}}})
+    r = GeminiAdapter().parse_output(0, out, "")
+    assert r.ok and r.structured_output == {"status": "done", "summary": "smoke ok"}
+    r2 = GeminiAdapter().parse_output(0, json.dumps({"session_id": "s", "response": "OK"}), "")
+    assert r2.ok and r2.structured_output is None
+    r3 = GeminiAdapter().parse_output(1, json.dumps({"session_id": "s", "error": {"message": "quota"}}), "")
+    assert not r3.ok and "quota" in r3.error

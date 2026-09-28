@@ -52,7 +52,9 @@ def scopes_overlap(a: list[str], b: list[str]) -> bool:
 
 def is_available(agent: AgentConfig, row: AgentRow | None, *, importance: str, now: datetime) -> bool:
     if row is None:
-        return True
+        return True   # pure routing (tests, dry runs): no board state to consult
+    if row.status == "offline" and row.last_heartbeat is None:
+        return False  # never checked in: only in config, no runner behind it yet
     critical = importance == "critical"
     if row.status == "offline" and not critical:
         return False
@@ -100,6 +102,8 @@ def route(task: Task, cfg: Config, ctx: RouteContext) -> tuple[str, str, str | N
 def context_from_board(board, cfg: Config, now: datetime | None = None) -> RouteContext:
     now = now or utcnow()
     rows = {a.name: a for a in board.list_agents()}
+    for name in cfg.agents:   # configured but never synced or seen: treat as offline with no heartbeat
+        rows.setdefault(name, AgentRow(name=name, status="offline", last_heartbeat=None))
     depth: dict[str, int] = {}
     scopes: dict[str, list[str]] = {}
     for t in board.list_tasks(status=[Status.READY, Status.RUNNING, Status.CHANGES_REQUESTED]):

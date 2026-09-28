@@ -134,6 +134,7 @@ def test_review_and_merge_pending(cfg, git_repo, tmp_path):
 
 def test_reroute_unknown_agent_and_cooldown(cfg, git_repo, tmp_path):
     srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))   # checked in
     now = clock["now"]
     board.upsert_agent(AgentRow(name="codex-a", status="cooldown", cooldown_until=now + timedelta(minutes=10)))
     ghost = board.create_task(Task(id="", title="g", status=Status.READY, agent="not-configured", type="docs"))
@@ -170,6 +171,7 @@ def test_step_exception_does_not_abort_tick(cfg, git_repo, tmp_path):
 
 def test_reroute_changes_requested_on_offline_agent(cfg, git_repo, tmp_path):
     srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))   # checked in
     board.upsert_agent(AgentRow(name="codex-a", status="offline"))
     t = board.create_task(Task(id="", title="cr", status=Status.CHANGES_REQUESTED, agent="codex-a", type="backend"))
     assert srv.reroute() == 1 and board.get_task(t.id).agent == "claude-a"
@@ -219,6 +221,8 @@ def test_relay_cut_answer_cuts_the_task(cfg, git_repo, tmp_path):
 
 def test_rebalance_moves_queued_work_to_idle_equal_agent(cfg, git_repo, tmp_path):
     srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))   # checked in
+    board.upsert_agent(AgentRow(name="fake-b", status="idle", last_heartbeat=utcnow()))     # checked in
     # claude-a and codex-a both score 4 on ml_audio? no: both default 3 → equal. codex-a has a queue, claude-a is idle.
     for i in range(3):
         board.create_task(Task(id="", title=f"q{i}", status=Status.READY, agent="codex-a", type="ml_audio"))

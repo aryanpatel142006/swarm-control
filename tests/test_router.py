@@ -88,3 +88,21 @@ def test_unroutable_type_still_assigns(cfg):
     t = Task(id="T-12", title="", type="infra", importance="low")
     agent, model, _ = route(t, cfg, ctx())
     assert agent == "codex-a" and model == "gpt-6-luna"
+
+
+def test_route_never_uses_an_agent_that_has_not_checked_in(cfg):
+    """An agent that is only in config (no Agents row, or a row without a heartbeat) gets no work, even critical."""
+    from swarm.board.memory import InMemoryBoard
+    from swarm.router import context_from_board, is_available, route
+    from swarm.models import AgentRow, Task, utcnow
+    now = utcnow()
+    a = cfg.agents["claude-a"]
+    never = AgentRow(name="claude-a", status="offline", last_heartbeat=None)
+    assert is_available(a, never, importance="critical", now=now) is False
+    assert is_available(a, AgentRow(name="claude-a", status="idle", last_heartbeat=now), importance="normal", now=now) is True
+    board = InMemoryBoard()
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now))   # claude-a has no row at all
+    ctx = context_from_board(board, cfg, now=now)
+    assert ctx.rows["claude-a"].status == "offline" and ctx.rows["claude-a"].last_heartbeat is None
+    agent, model, effort = route(Task(id="T-1", title="x", type="frontend", importance="critical"), cfg, ctx)
+    assert agent == "codex-a"

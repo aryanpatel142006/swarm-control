@@ -20,6 +20,13 @@ class GeminiAdapter(Adapter):
 
     def parse_output(self, code: int, out: str, err: str) -> RunResult:
         data = last_json_object(out) or {}
-        error = str(data.get("error") or ("" if code == 0 else f"exit {code}"))
-        return RunResult(ok=code == 0 and not data.get("error"), exit_code=code, stdout=out, stderr=err,
-                         usage=Usage(), error=error)
+        raw_error = data.get("error")
+        if isinstance(raw_error, dict):
+            raw_error = raw_error.get("message") or str(raw_error)
+        error = str(raw_error or ("" if code == 0 else f"exit {code}"))
+        # no --json-schema on this CLI: a report object in the reply text is the structured output
+        response = data.get("response")
+        inner = last_json_object(response) if isinstance(response, str) else None
+        structured = inner if isinstance(inner, dict) and "status" in inner else None
+        return RunResult(ok=code == 0 and not raw_error, exit_code=code, stdout=out, stderr=err,
+                         structured_output=structured, usage=Usage(), error=error)
