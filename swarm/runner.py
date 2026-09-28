@@ -266,6 +266,14 @@ class Runner:
         started = self.now()
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
+            if reuse:   # a parked branch drifts from main; start the resume from current main, or say why not
+                ok, conflicts = self.ws.rebase_onto_main(wt)
+                if not ok:
+                    note = ("Rebase onto main conflicted in: " + ", ".join(conflicts)
+                            + f". First run `git fetch {self.ws.remote} && git rebase {self.ws.remote}/{self.cfg.main_branch}`, "
+                            "resolve every conflict, `git rebase --continue`, then do the task.")
+                    task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
+                    self.log(f"[{task.id}] resume: rebase conflicted ({', '.join(conflicts)})")
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
             deps = {}
             for d in task.depends_on:

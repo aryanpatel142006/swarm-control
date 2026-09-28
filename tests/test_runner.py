@@ -65,6 +65,10 @@ def ready_task(board, **kw):
     return board.create_task(Task(**base))
 
 
+def _git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+
 def _break_verify(git_repo, body):
     (git_repo / "scripts" / "verify_fast.sh").write_text(body)
     subprocess.run(["git", "-C", str(git_repo), "commit", "-qam", "change verify"], check=True)
@@ -448,3 +452,33 @@ def test_abnormal_end_resumes_one_model_tier_up(cfg, git_repo, tmp_path):
     board.update_task(stored, ["status"])
     r.run_task(board.get_task(t.id))
     assert board.get_task(t.id).model == "opus"   # mid → high; never above the agent's best tier
+
+
+def test_resumed_branch_is_rebased_onto_main_before_the_run(cfg, git_repo, tmp_path):
+    """T-011 resumed on a branch cut before the backend merges and could not even run verify. A resumed run
+    starts from current main; a rebase conflict is reported in the prompt instead of silently working on stale code."""
+    adapter = FakeAdapter(files={"src/a.py": "half"}, ok=False, structured=None)
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)                                  # attempt 1 parks work on the branch (resume)
+    _git(git_repo, "checkout", "-q", "main")
+    (git_repo / "backend_new.py").write_text("merged meanwhile\n")
+    _git(git_repo, "add", "backend_new.py"); _git(git_repo, "commit", "-qm", "main moved on"); _git(git_repo, "push", "-q", "origin", "main")
+    stored = board.get_task(t.id); stored.status = Status.READY; board.update_task(stored, ["status"])
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        seen["has_new_file"] = (spec.cwd / "backend_new.py").exists()
+        seen["prompt"] = spec.prompt_file.read_text()
+        return orig(spec)
+    adapter.run = run
+    r.run_task(board.get_task(t.id))
+    assert seen["has_new_file"] is True and "rebase" not in seen["prompt"].lower()
+    # conflict: main now changes the same file the branch touched
+    _git(git_repo, "checkout", "-q", "main")
+    (git_repo / "src").mkdir(exist_ok=True); (git_repo / "src" / "a.py").write_text("main version\n")
+    _git(git_repo, "add", "src/a.py"); _git(git_repo, "commit", "-qm", "conflicting"); _git(git_repo, "push", "-q", "origin", "main")
+    stored = board.get_task(t.id); stored.status = Status.READY; board.update_task(stored, ["status"])
+    r.run_task(board.get_task(t.id))
+    assert "rebase onto main conflicted" in seen["prompt"].lower() and "src/a.py" in seen["prompt"]
