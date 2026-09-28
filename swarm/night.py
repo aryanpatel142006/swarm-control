@@ -129,6 +129,7 @@ class CycleReport:
     improvement: str = ""
     merged: bool = False
     notes: list[str] = field(default_factory=list)
+    started: datetime | None = None
 
 
 class Night:
@@ -249,7 +250,8 @@ class Night:
             report.notes.append(f"cut {t.id} ({t.status})")
 
     def cycle_log(self, cycle: int, report: CycleReport) -> str:
-        usage = self.swarm("usage", "--since", f"{self.minutes + 20}m" if False else "3h").stdout
+        since = (report.started or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M")
+        usage = self.swarm("usage", "--since", since).stdout   # this cycle only, not a fixed window
         cfg, board = self.board()
         rows = []
         for t in board.list_tasks():
@@ -324,7 +326,7 @@ class Night:
         reports = []
         self.start_loops()
         for cycle in range(start_cycle, start_cycle + self.cycles):
-            report = CycleReport(cycle=cycle, milestone=milestone_name(cycle))
+            report = CycleReport(cycle=cycle, milestone=milestone_name(cycle), started=datetime.now(timezone.utc))
             self.log(f"night: cycle {cycle} start ({plan_for(cycle)[0]})")
             try:
                 self.add_milestone(cycle)

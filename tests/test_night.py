@@ -46,3 +46,15 @@ def test_repeat_cycles_build_in_a_fresh_folder():
     first, repeat = plan_for(1), plan_for(len(PLANS) + 1)
     assert first[0] == repeat[0] and first[1] == "apps/notecard" and repeat[1] == "apps/notecard2"
     assert "python -m apps.notecard2 serve" in append_milestone("# P\n", len(PLANS) + 1)
+
+
+def test_cycle_report_records_its_start_for_usage_scoping():
+    from swarm.night import CycleReport
+    from datetime import datetime, timezone
+    r = CycleReport(cycle=1, milestone="N1", started=datetime(2026, 9, 28, 7, 5, tzinfo=timezone.utc))
+    assert r.started.strftime("%Y-%m-%dT%H:%M") == "2026-09-28T07:05"
+
+
+def test_planner_prompt_forbids_uncheckable_reload_criteria():
+    from swarm.prompt import PROMPTS_DIR
+    assert "dead API URL" in (PROMPTS_DIR / "planner.md").read_text()

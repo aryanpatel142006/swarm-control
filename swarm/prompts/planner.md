@@ -14,3 +14,4 @@ Rules for good tasks:
 Your final answer is the JSON object described at the end. If your CLI cannot return structured output, write it to `.swarm-run/plan.json`.
 
 - Shared documents (docs/DESIGN.md, docs/CONTRACTS.md, docs/ARCHITECTURE.md, README.md) belong to exactly one task's scope per milestone; other tasks read them but never edit them. Two tasks editing one doc means rebase conflicts and an extra review round for both (Roomcast, Sep 28 2026: T-003/T-011/T-013 on DESIGN.md).
+- Acceptance criteria must be checkable by the worker. When one server serves both the page and its API, do not ask for "reload with the server stopped shows an error" (the page cannot load then); ask that the page show its error state when the API call fails, checked by pointing it at a dead API URL.
