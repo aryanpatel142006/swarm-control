@@ -582,7 +582,11 @@ COLUMN_ORDER = {
                "Runs", "Tokens In", "Tokens Out", "Cost USD", "Note"],
 }
 HIDDEN_COLUMNS = {"tasks": {"Claim Nonce"}}
-BOARD_CARD_FIELDS = {"tasks": ["Agent", "Importance", "Type", "Size"]}
+# card fields per board view: never repeat the field the board is grouped by
+BOARD_CARD_FIELDS = {"tasks": {"Board": ["Agent", "Importance", "Type", "Size"],
+                               "By agent": ["Status", "Importance", "Type", "Size"],
+                               "By milestone": ["Status", "Agent", "Type"]}}
+DEFAULT_VIEW_NAMES = {"tasks": "All tasks", "agents": "All agents"}
 
 
 def order_columns(client: "NotionClient", ids: dict) -> None:
@@ -594,11 +598,15 @@ def order_columns(client: "NotionClient", ids: dict) -> None:
         wanted = [n for n in COLUMN_ORDER[key] if n in props] + [n for n in props if n not in COLUMN_ORDER[key]]
         hidden = HIDDEN_COLUMNS.get(key, set())
         table = [{"property_id": props[n]["id"], "visible": n not in hidden} for n in wanted]
-        cards = [{"property_id": props[n]["id"], "visible": True} for n in BOARD_CARD_FIELDS.get(key, []) if n in props]
+        card_sets = {name: [{"property_id": props[n]["id"], "visible": True} for n in fields if n in props]
+                     for name, fields in BOARD_CARD_FIELDS.get(key, {}).items()}
         for row in client.request("GET", f"/views?database_id={db}").get("results", []):
             view = client.request("GET", f"/views/{row['id']}")
+            cards = card_sets.get(view.get("name", ""))
             if view.get("type") == "table":
                 cfg = {"type": "table", "properties": table}
+                if view.get("name") == "Default view" and key in DEFAULT_VIEW_NAMES:
+                    client.request("PATCH", f"/views/{row['id']}", json={"name": DEFAULT_VIEW_NAMES[key]})
                 if key == "questions" and view.get("name") == "Default view" and ids.get("questions_open_filter"):
                     client.request("PATCH", f"/views/{row['id']}", json={
                         "name": "Open", "filter": {"property": ids["questions_open_filter"], "select": {"equals": "Open"}}})

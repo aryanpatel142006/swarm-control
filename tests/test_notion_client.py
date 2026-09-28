@@ -205,7 +205,7 @@ def test_init_builds_the_dashboard_layout():
     """Dashboard: how-to, Agents, Questions for you, then two columns: a Tasks tile (the board is its own
     full page next to the dashboard) | Status heading + the live block."""
     decorated, views, dbs, appended, pages, descriptions, relations = {}, [], [], {}, [], {}, []
-    view_store, ordered, filters, patched_filters = {}, {}, [], {}
+    view_store, ordered, filters, patched_filters, renamed = {}, {}, [], {}, {}
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -264,6 +264,8 @@ def test_init_builds_the_dashboard_layout():
                 ordered[vid] = body["configuration"]
             if "filter" in body:
                 patched_filters[vid] = (body.get("name"), body["filter"])
+            elif "name" in body:
+                renamed[vid] = body["name"]
             return httpx.Response(200, json=body)
         if req.method == "PATCH" and (path.startswith("/v1/databases/") or path.startswith("/v1/pages/")):
             decorated[path.split("/")[3]] = body
@@ -306,6 +308,9 @@ def test_init_builds_the_dashboard_layout():
     assert [p["property_id"] for p in ordered["default-db3"]["properties"][:3]] == ["title", "Status", "Agent"]
     assert {p["property_id"]: p["visible"] for p in ordered["default-db3"]["properties"]}["Claim Nonce"] is False
     assert [p["property_id"] for p in ordered["v1"]["properties"]] == ["Agent", "Importance", "Type", "Size"]
+    assert [p["property_id"] for p in ordered["v2"]["properties"]] == ["Status", "Importance", "Type", "Size"]  # By agent
+    assert [p["property_id"] for p in ordered["v3"]["properties"]] == ["Status", "Agent", "Type"]              # By milestone
+    assert renamed.get("default-db3") == "All tasks" and renamed.get("default-db1") == "All agents"
     # help text where people look
     assert "Cut" in "".join(seg["text"]["content"] for seg in descriptions["db3"])
     assert "Answer" in "".join(seg["text"]["content"] for seg in descriptions["db2"])
