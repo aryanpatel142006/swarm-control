@@ -241,3 +241,14 @@ def test_run_retries_once_when_the_cli_binary_is_briefly_missing(tmp_path):
 
     r2 = a.run(spec(tmp_path, schema=None), runner=gone, sleep=lambda s: None)
     assert not r2.ok and r2.exit_code == -2 and "cli not found" in r2.error
+
+
+def test_gemini_headless_skips_the_trust_prompt(tmp_path):
+    """Gemini CLI exits 55 ('not running in a trusted directory') in headless mode; every worktree is a new
+    directory, so the run must skip the trust check."""
+    from swarm.adapters.gemini import GeminiAdapter
+    argv, _ = GeminiAdapter().build_command(spec(tmp_path, model="gemini-3.1-pro"))
+    assert "--skip-trust" in argv and argv[argv.index("-m") + 1] == "gemini-3.1-pro"
+    assert "--approval-mode" in argv and argv[argv.index("--approval-mode") + 1] == "yolo"
+    ro, _ = GeminiAdapter().build_command(spec(tmp_path, model="gemini-3.1-pro", read_only=True))
+    assert "--skip-trust" in ro and "--approval-mode" not in ro

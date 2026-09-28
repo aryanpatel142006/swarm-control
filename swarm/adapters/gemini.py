@@ -5,11 +5,14 @@ from .base import Adapter, RunSpec, last_json_object
 
 
 class GeminiAdapter(Adapter):
-    """Legacy Gemini CLI with an API key (personal accounts moved to Antigravity in June 2026)."""
+    """Gemini CLI headless (`gemini -p`), logged in with a Google account or an API key. Deprecated upstream
+    (Homebrew disables it on 2026-12-18 in favour of antigravity-cli), fine for the Oct 2026 event."""
     name = "gemini"
 
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
-        argv = ["gemini", "-p", spec.prompt_file.read_text(), "--output-format", "json", "-m", spec.model]
+        # --skip-trust: headless runs exit 55 in a directory the CLI has not "trusted"; worktrees are always new
+        argv = ["gemini", "-p", spec.prompt_file.read_text(), "--output-format", "json", "-m", spec.model,
+                "--skip-trust"]
         if not spec.read_only:
             argv += ["--approval-mode", "yolo"]
         argv += list(spec.extra_args)
