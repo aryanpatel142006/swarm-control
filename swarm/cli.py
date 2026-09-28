@@ -203,6 +203,17 @@ def retro(dry_run: bool = typer.Option(False, "--dry-run", help="print the findi
 
 
 @app.command()
+def night(cycles: int = typer.Option(6, "--cycles"), minutes: int = typer.Option(75, "--minutes", help="time cap per cycle"),
+          start: int = typer.Option(1, "--start", help="first cycle number (milestone N<start>)")):
+    """Unattended loop: build one small app per cycle, answer questions, retro, then a fresh Claude improves the harness."""
+    from .night import Night
+    n = Night(_cfg().repo_root, log=console.print, cycles=cycles, minutes=minutes)
+    reports = n.run(start_cycle=start)
+    console.print(f"night over: {sum(r.done for r in reports)} tasks done in {len(reports)} cycles, "
+                  f"{sum(1 for r in reports if r.merged)} harness improvements merged")
+
+
+@app.command()
 def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page id that holds the databases")):
     """Create the Notion databases, board views, and status page; save ids to .swarm/notion.yaml."""
     from .board.notion import NotionBoard, NotionClient
