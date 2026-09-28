@@ -44,3 +44,23 @@ def test_render_status_labels_tasks_without_a_milestone(cfg):
     now = cfg.event_end - timedelta(hours=8)
     text = render_status(cfg, [Task(id="T-1", title="a", status=Status.READY)], [], [], now)
     assert "(no milestone)" in text and "\n  -  " not in text
+
+
+def test_headline_is_green_yellow_or_red_with_the_one_thing_to_know(cfg):
+    from swarm.status import render_headline
+    now = cfg.event_end - timedelta(hours=8)
+    live = [AgentRow(name="claude-a", status="running", current_task="T-2", last_heartbeat=now),
+            AgentRow(name="codex-a", status="offline", last_heartbeat=now - timedelta(hours=1))]
+    ok_tasks = [Task(id="T-1", title="a", milestone="M1", status=Status.DONE),
+                Task(id="T-2", title="b", milestone="M1", status=Status.RUNNING, agent="claude-a")]
+    text, color = render_headline(cfg, ok_tasks, live, [], now)
+    assert color == "green_background" and text.startswith("All good")
+    assert "1 running" in text and "1/2 done" in text and "claude-a" in text and "codex-a" not in text.split("offline")[0]
+    assert "04:00 UTC" in text   # when it was written, so a stale banner is obvious
+    q = [Question(id="Q-4", text="Tap or rail?", task_id="T-2", status="Open", impact="high")]
+    text, color = render_headline(cfg, ok_tasks, live, q, now)
+    assert color == "yellow_background" and text.startswith("Needs you") and "Q-4" in text and "Tap or rail?" in text
+    bad = ok_tasks + [Task(id="T-3", title="c", milestone="M1", status=Status.BLOCKED),
+                      Task(id="T-4", title="d", milestone="M1", status=Status.FAILED, attempts=3, last_error="boom")]
+    text, color = render_headline(cfg, bad, live, q, now)
+    assert color == "red_background" and text.startswith("Risk")

@@ -348,3 +348,11 @@ def test_reroute_moves_critical_work_off_an_offline_agent(cfg, git_repo, tmp_pat
     board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
     t = board.create_task(Task(id="", title="api", status=Status.READY, agent="codex-a", type="backend", importance="critical"))
     assert srv.reroute() == 1 and board.get_task(t.id).agent == "claude-a"
+
+
+def test_status_write_also_updates_the_headline(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.create_task(Task(id="", title="x", status=Status.READY, agent="claude-a", milestone="M1"))
+    srv.write_status(force=True)
+    text, color = board.headline
+    assert color == "green_background" and "0/1 done" in text

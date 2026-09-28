@@ -476,6 +476,10 @@ class NotionBoard:
     def write_status_page(self, text: str) -> None:
         self.c.update_block(self.ids.status_block, {"code": {"language": "plain text", "rich_text": _rt(text)}})
 
+    def write_headline(self, text: str, color: str) -> None:
+        if self.ids.headline_block:
+            self.c.update_block(self.ids.headline_block, {"callout": {"rich_text": _rt(text), "color": color}})
+
     # ----- init -----
     @staticmethod
     def init(client: NotionClient, parent_page_id: str, agent_names: list[str], project: str = "") -> dict:
@@ -485,15 +489,23 @@ class NotionBoard:
         ids: dict = {"parent_page_id": parent_page_id}
         label = project or "project"
         icon_url = asset_url("icon-board.png")
-        home = client.create_child_page(parent_page_id, f"Swarm · {label}", [{
-            "object": "block", "type": "callout", "callout": {
+        home = client.create_child_page(parent_page_id, f"Swarm · {label}", [
+            {"object": "block", "type": "callout", "callout": {   # the Now banner: serve rewrites text and colour
                 "icon": ({"type": "external", "external": {"url": icon_url}} if icon_url
                          else {"type": "emoji", "emoji": "🐝"}),
                 "color": "gray_background",
-                "rich_text": _rt("1. Agents: who is working and who is offline. 2. Questions for you: type in "
-                                 "Answer; it is the only thing agents wait on. 3. Status (bottom right) refreshes every "
-                                 "few minutes; read the RISK lines. The Tasks tile opens the full board: drag a card to "
-                                 "Cut to drop it, or to Ready to retry it.")}}])
+                "rich_text": _rt("Waiting for swarm serve: this line turns green, yellow or red with what matters now.")}},
+            {"object": "block", "type": "toggle", "toggle": {
+                "rich_text": _rt("How to use this page"),
+                "children": [{"object": "block", "type": "numbered_list_item",
+                              "numbered_list_item": {"rich_text": _rt(line)}} for line in (
+                    "The line above says what matters now: green all good, yellow something waits on you, red a risk.",
+                    "Agents: who is working and who is offline.",
+                    "Questions for you: type in Answer; it is the only thing agents wait on.",
+                    "Tasks opens the full board. Drag a card to Cut to drop it, or to Ready to retry it.",
+                    "Status (bottom right) is the full report, refreshed every few minutes.")]}}])
+        blocks = client.list_children(home["id"])
+        ids["headline_block"] = next((b["id"] for b in blocks if b.get("type") == "callout"), "")
         ids["home_page"] = ids["status_page"] = home["id"]
 
         client.append_blocks(home["id"], [_heading("Agents")])
@@ -581,7 +593,13 @@ COLUMN_ORDER = {
     "agents": ["Name", "Status", "Last Heartbeat", "Cooldown Until", "Current Task", "Cost 5h USD", "Provider", "Host",
                "Runs", "Tokens In", "Tokens Out", "Cost USD", "Note"],
 }
-HIDDEN_COLUMNS = {"tasks": {"Claim Nonce"}}
+# what a person reads; the rest stays in the data (and on each card's page) but off the table
+HIDDEN_COLUMNS = {
+    "tasks": {"Claim Nonce", "Description", "Acceptance", "Scope", "Priority", "Effort", "Started", "ID", "Flags",
+              "Depends On", "Feedback", "Last Error", "Review Rounds"},
+    "questions": {"ID", "Context", "Options", "Proceeding With", "Asked By", "Task"},
+    "agents": {"Provider", "Host", "Runs", "Tokens In", "Tokens Out", "Note"},
+}
 # card fields per board view: never repeat the field the board is grouped by
 BOARD_CARD_FIELDS = {"tasks": {"Board": ["Agent", "Importance", "Type", "Size"],
                                "By agent": ["Status", "Importance", "Type", "Size"],

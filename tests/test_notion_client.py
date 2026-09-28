@@ -218,6 +218,8 @@ def test_init_builds_the_dashboard_layout():
         if req.method == "POST" and path == "/v1/pages":
             pages.append(body)
             return httpx.Response(200, json={"id": "home"})
+        if req.method == "GET" and path == "/v1/blocks/home/children":
+            return httpx.Response(200, json={"results": [{"id": "banner", "type": "callout"}, {"id": "howto", "type": "toggle"}]})
         if req.method == "PATCH" and path == "/v1/blocks/home/children":
             appended.setdefault("home", []).append(body)
             kids = body["children"]
@@ -277,7 +279,10 @@ def test_init_builds_the_dashboard_layout():
     # one dashboard page; the Tasks board is a full page next to it, named after the project
     assert len(pages) == 1 and pages[0]["parent"]["page_id"] == "parent"
     assert pages[0]["properties"]["title"][0]["text"]["content"] == "Swarm · demo"
-    assert [b["type"] for b in pages[0]["children"]] == ["callout"]
+    assert [b["type"] for b in pages[0]["children"]] == ["callout", "toggle"]   # Now banner, folded how-to
+    assert ids["headline_block"] == "banner"
+    hidden = {p["property_id"] for p in ordered["default-db3"]["properties"] if not p["visible"]}
+    assert {"Claim Nonce", "Scope", "Description"} <= hidden and "Status" not in hidden
     assert [(d["title"][0]["text"]["content"], d["is_inline"], d["parent"]["page_id"]) for d in dbs] == \
         [("Agents", True, "home"), ("Questions", True, "home"), ("Tasks · demo", False, "parent")]
     heads = [b["heading_2"]["rich_text"][0]["text"]["content"]

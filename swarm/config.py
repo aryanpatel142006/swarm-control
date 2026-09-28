@@ -76,6 +76,7 @@ class NotionIds:
     status_page: str = ""
     status_block: str = ""
     home_page: str = ""
+    headline_block: str = ""
 
 
 @dataclass

@@ -15,6 +15,7 @@ class InMemoryBoard:
         self.agents: dict[str, AgentRow] = {}
         self.reports: dict[str, list[tuple[str, str]]] = {}
         self.status_page = ""
+        self.headline: tuple[str, str] | None = None
 
     # ----- tasks -----
     def next_task_id(self) -> str:
@@ -98,3 +99,6 @@ class InMemoryBoard:
     # ----- status page -----
     def write_status_page(self, text: str) -> None:
         self.status_page = text
+
+    def write_headline(self, text: str, color: str) -> None:
+        self.headline = (text, color)

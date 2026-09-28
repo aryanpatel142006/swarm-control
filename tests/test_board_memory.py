@@ -74,3 +74,10 @@ def test_claim_backs_off_when_task_was_reassigned():
     b.update_task(moved, ["agent"])
     assert claim_task(b, stale, "a", sleep=lambda s: None, nonce="n") is False
     assert b.get_task(t.id).status is Status.READY and b.get_task(t.id).agent == "b"
+
+
+def test_memory_board_keeps_the_headline():
+    from swarm.board.memory import InMemoryBoard
+    b = InMemoryBoard()
+    b.write_headline("All good", "green_background")
+    assert b.headline == ("All good", "green_background")

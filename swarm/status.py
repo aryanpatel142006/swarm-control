@@ -64,3 +64,27 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     if not risks:
         lines.append("RISK: none flagged")
     return "\n".join(lines)
+
+
+def render_headline(cfg: Config, tasks: list[Task], agents: list[AgentRow], questions: list[Question],
+                    now: datetime) -> tuple[str, str]:
+    """One line for the top of the dashboard and its callout colour: red for a risk, yellow when something waits
+    on a person, green otherwise. Ends with the time it was written, so a stale banner is obvious."""
+    full = render_status(cfg, tasks, agents, questions, now)
+    risks = [ln[len("RISK: "):] for ln in full.splitlines() if ln.startswith("RISK: ") and ln != "RISK: none flagged"]
+    needs_line = next((ln for ln in full.splitlines() if ln.startswith("Needs you: ")), "Needs you: nothing")
+    needs = [] if needs_line.endswith("nothing") else needs_line[len("Needs you: "):].split("; ")
+    live = sorted(a.name for a in agents if a.name != "serve" and a.status != "offline" and a.last_heartbeat)
+    running = sum(1 for t in tasks if t.status is Status.RUNNING)
+    active = [t for t in tasks if t.status is not Status.CUT]
+    done = sum(1 for t in active if t.status is Status.DONE)
+    stamp = f"updated {now.strftime('%H:%M')} UTC"
+    progress = f"{running} running · {done}/{len(active)} done · online: {', '.join(live) or 'nobody'}"
+    if risks:
+        extra = f" (+{len(risks) - 1} more)" if len(risks) > 1 else ""
+        return (f"Risk: {risks[0]}{extra}. " + (f"Needs you: {len(needs)}. " if needs else "") + f"{progress} · {stamp}",
+                "red_background")
+    if needs:
+        extra = f" (+{len(needs) - 1} more)" if len(needs) > 1 else ""
+        return f"Needs you: {needs[0][:160]}{extra}. Answer under Questions for you. {progress} · {stamp}", "yellow_background"
+    return f"All good. {progress} · {stamp}", "green_background"

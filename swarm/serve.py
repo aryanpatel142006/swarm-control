@@ -13,7 +13,7 @@ from .board.base import Board
 from .config import Config
 from .models import AgentRow, Question, Status, Task, utcnow
 from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
-from .status import render_status
+from .status import render_headline, render_status
 from .workspace import Workspace
 
 IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
@@ -326,8 +326,13 @@ class Server:
         if not force and self._last_status and (now - self._last_status).total_seconds() < self.status_every_s:
             return None
         self._last_status = now
-        text = render_status(self.cfg, self.board.list_tasks(), self.board.list_agents(),
-                             self.board.list_questions(), now)
+        tasks, agents, questions = self.board.list_tasks(), self.board.list_agents(), self.board.list_questions()
+        text = render_status(self.cfg, tasks, agents, questions, now)
+        try:
+            self.board.write_headline(*render_headline(self.cfg, tasks, agents, questions, now))
+        except Exception as e:  # noqa: BLE001 - an old board without a headline block keeps working
+            self.log(f"headline not written: {str(e)[:100]}") if not getattr(self, "_headline_warned", False) else None
+            self._headline_warned = True
         try:
             self.board.write_status_page(text)
         except Exception as e:   # a deleted or archived Status page must not take the loop down
