@@ -155,3 +155,8 @@ def test_doctor_warns_when_the_laptop_can_sleep(cfg):
     assert not checks["sleep"].ok and "caffeinate -dims" in checks["sleep"].detail
     assert "sleep" not in {c.name for c in run_checks(cfg, "host-a", offline=True, notion_token="",
                                                        which=lambda n: f"/usr/bin/{n}", run=run2, platform="linux")}
+
+
+def test_template_ignores_the_planner_scratch_file():
+    from swarm.cli import TEMPLATE_DIR
+    assert ".swarm/tasks.proposed.json" in (TEMPLATE_DIR / ".gitignore").read_text()
