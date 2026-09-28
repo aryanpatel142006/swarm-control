@@ -185,11 +185,12 @@ def page_to_task(page: dict) -> Task:
 
 def TASKS_SCHEMA(agent_names: list[str]) -> dict:  # noqa: N802 - schema factory, name mirrors the constant style
     return {
-        "Name": {"title": {}}, "ID": {"rich_text": {}}, "Description": {"rich_text": {}},
+        "Name": {"title": {}}, "Status": _sel(STATUS_ORDER, STATUS_COLORS), "ID": {"rich_text": {}},
+        "Description": {"rich_text": {}},
         "Acceptance": {"rich_text": {}}, "Type": _sel(TASK_TYPES, TYPE_COLORS), "Importance": _sel(IMPORTANCES, IMPORTANCE_COLORS),
         "Size": _sel(SIZES, SIZE_COLORS), "Milestone": _sel(["M0", "M1", "M2", "M3", "M4"]),
         "Priority": {"number": {"format": "number"}}, "Agent": _sel(agent_names),
-        "Model": {"rich_text": {}}, "Effort": {"rich_text": {}}, "Status": _sel(STATUS_ORDER, STATUS_COLORS),
+        "Model": {"rich_text": {}}, "Effort": {"rich_text": {}},
         "Depends On": {"rich_text": {}}, "Scope": {"rich_text": {}}, "Feedback": {"rich_text": {}},
         "PR": {"url": {}}, "Attempts": {"number": {"format": "number"}},
         "Review Rounds": {"number": {"format": "number"}}, "Claim Nonce": {"rich_text": {}},
@@ -237,15 +238,24 @@ def page_to_question(page: dict) -> Question:
     )
 
 
-def QUESTIONS_SCHEMA(tasks_ds_id: str) -> dict:  # noqa: N802
-    return {
-        "Question": {"title": {}}, "ID": {"rich_text": {}}, "Kind": _sel(["blocking", "fyi"], KIND_COLORS),
+def TASK_RELATION(tasks_ds_id: str) -> dict:  # noqa: N802
+    return {"Task": {"relation": {"data_source_id": tasks_ds_id, "type": "single_property", "single_property": {}}}}
+
+
+def QUESTIONS_SCHEMA(tasks_ds_id: str | None = None) -> dict:  # noqa: N802
+    """The Task relation is optional so the Questions table can be created before the Tasks table exists;
+    init adds it afterwards with TASK_RELATION (it is cosmetic: the harness links by Task ID)."""
+    schema = {
+        "Question": {"title": {}}, "Status": _sel(["Open", "Applied"], QSTATUS_COLORS), "ID": {"rich_text": {}},
+        "Kind": _sel(["blocking", "fyi"], KIND_COLORS),
         "Context": {"rich_text": {}}, "Options": {"rich_text": {}}, "Proceeding With": {"rich_text": {}},
         "Impact": _sel(["high", "medium", "low"], IMPACT_COLORS),
-        "Task": {"relation": {"data_source_id": tasks_ds_id, "type": "single_property", "single_property": {}}},
-        "Task ID": {"rich_text": {}}, "Asked By": {"rich_text": {}}, "Status": _sel(["Open", "Applied"], QSTATUS_COLORS),
+        "Task ID": {"rich_text": {}}, "Asked By": {"rich_text": {}},
         "Answer": {"rich_text": {}}, "Needs Follow-up": {"checkbox": {}},
     }
+    if tasks_ds_id:
+        schema.update(TASK_RELATION(tasks_ds_id))
+    return schema
 
 
 # ---------- agents ----------
@@ -277,13 +287,14 @@ def page_to_agent(page: dict) -> AgentRow:
     )
 
 
-AGENTS_SCHEMA = {
+AGENTS_SCHEMA = {   # column order is what people see first: name, status, heartbeat, cooldown, task, spend
     "Name": {"title": {}},
+    "Status": _sel(["idle", "running", "cooldown", "offline"], AGENT_STATUS_COLORS),
+    "Last Heartbeat": {"date": {}}, "Cooldown Until": {"date": {}}, "Current Task": {"rich_text": {}},
+    "Cost 5h USD": {"number": {"format": "number"}},
     "Provider": _sel(["claude", "codex", "antigravity", "gemini", "grok", "generic", "serve"], PROVIDER_COLORS),
     "Host": {"rich_text": {}},
-    "Status": _sel(["idle", "running", "cooldown", "offline"], AGENT_STATUS_COLORS),
-    "Current Task": {"rich_text": {}}, "Last Heartbeat": {"date": {}}, "Cooldown Until": {"date": {}},
     "Runs": {"number": {"format": "number"}}, "Tokens In": {"number": {"format": "number"}},
     "Tokens Out": {"number": {"format": "number"}}, "Cost USD": {"number": {"format": "number"}},
-    "Cost 5h USD": {"number": {"format": "number"}}, "Note": {"rich_text": {}},
+    "Note": {"rich_text": {}},
 }

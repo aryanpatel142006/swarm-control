@@ -75,6 +75,7 @@ class NotionIds:
     agents_ds: str = ""
     status_page: str = ""
     status_block: str = ""
+    home_page: str = ""
 
 
 @dataclass

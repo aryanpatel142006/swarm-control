@@ -281,6 +281,17 @@ def notion_url(obj_id: str) -> str:
     return "https://www.notion.so/" + obj_id.replace("-", "")
 
 
+def _links(pairs: list[tuple[str, str]]) -> list[dict]:
+    """Rich text 'A · B · C' where each name links to a Notion page or database id."""
+    out: list[dict] = []
+    for i, (label, obj_id) in enumerate(pairs):
+        if i:
+            out.append({"type": "text", "text": {"content": " · "}})
+        out.append({"type": "text", "text": {"content": label,
+                                             "link": {"url": f"https://www.notion.so/{obj_id.replace('-', '')}"}}})
+    return out
+
+
 def _heading(text: str) -> dict:
     return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": _rt(text)}}
 
@@ -288,9 +299,9 @@ def _heading(text: str) -> dict:
 def decorate_board(client: "NotionClient", ids: dict, assets_dir: Path = ASSETS_DIR,
                    assets_url: str | None = ASSETS_URL_BASE) -> list[str]:
     """Decorate the parent page, the three databases, and the status page. Returns what failed entirely."""
-    targets = [("pages", ids.get("status_page") or ids.get("parent_page_id"), "parent"),
+    targets = [("pages", ids.get("home_page") or ids.get("parent_page_id"), "parent"),
                ("databases", ids.get("tasks_db"), "tasks"), ("databases", ids.get("questions_db"), "questions"),
-               ("databases", ids.get("agents_db"), "agents")]
+               ("databases", ids.get("agents_db"), "agents"), ("pages", ids.get("status_page"), "status")]
     failed = []
     for kind, obj_id, key in targets:
         if not obj_id:
@@ -434,34 +445,33 @@ class NotionBoard:
     # ----- init -----
     @staticmethod
     def init(client: NotionClient, parent_page_id: str, agent_names: list[str], project: str = "") -> dict:
-        """One page per project under the parent: how-to, live status, then Tasks / Questions / Agents inline."""
+        """One dashboard page per project: how-to, Agents, Questions for you, then Tasks and Status as their own
+        pages (a task opened from a full-page table gets the whole screen)."""
         ids: dict = {"parent_page_id": parent_page_id}
-        icon_url = asset_url("icon-board.png")
-        callout_icon = ({"type": "external", "external": {"url": icon_url}} if icon_url
-                        else {"type": "emoji", "emoji": "🐝"})
-        home = client.create_child_page(parent_page_id, f"Swarm · {project or 'project'}", [
-            {"object": "block", "type": "callout", "callout": {
-                "icon": callout_icon, "color": "gray_background",
-                "rich_text": _rt("Answer anything under Questions first (type in Answer). Cards move on their own; "
-                                 "drag one to Cut to drop it, or to Ready to retry it. Status refreshes every few "
-                                 "minutes: read the RISK lines first.")}},
-            _heading("Status"),
-            {"object": "block", "type": "code",
-             "code": {"language": "plain text", "rich_text": _rt("(no status yet: start swarm serve)")}},
-            _heading("Tasks"),
-        ])
-        ids["status_page"] = home["id"]
-        code_blocks = [b for b in client.list_children(home["id"]) if b.get("type") == "code"]
-        ids["status_block"] = code_blocks[0]["id"] if code_blocks else ""
+        home = client.create_child_page(parent_page_id, f"Swarm · {project or 'project'}")
+        ids["home_page"] = home["id"]
 
-        tasks = client.create_database(home["id"], "Tasks", np.TASKS_SCHEMA(agent_names), inline=True)
-        ids["tasks_db"], ids["tasks_ds"] = tasks["id"], tasks["data_sources"][0]["id"]
-        client.append_blocks(home["id"], [_heading("Questions for you")])
-        questions = client.create_database(home["id"], "Questions", np.QUESTIONS_SCHEMA(ids["tasks_ds"]), inline=True)
-        ids["questions_db"], ids["questions_ds"] = questions["id"], questions["data_sources"][0]["id"]
         client.append_blocks(home["id"], [_heading("Agents")])
         agents = client.create_database(home["id"], "Agents", np.AGENTS_SCHEMA, inline=True)
         ids["agents_db"], ids["agents_ds"] = agents["id"], agents["data_sources"][0]["id"]
+        client.append_blocks(home["id"], [_heading("Questions for you")])
+        questions = client.create_database(home["id"], "Questions", np.QUESTIONS_SCHEMA(), inline=True)
+        ids["questions_db"], ids["questions_ds"] = questions["id"], questions["data_sources"][0]["id"]
+        tasks = client.create_database(home["id"], "Tasks", np.TASKS_SCHEMA(agent_names), inline=False)
+        ids["tasks_db"], ids["tasks_ds"] = tasks["id"], tasks["data_sources"][0]["id"]
+        try:   # link Questions → Tasks now that Tasks exists (cosmetic; the harness links by Task ID)
+            client.request("PATCH", f"/data_sources/{ids['questions_ds']}",
+                           json={"properties": np.TASK_RELATION(ids["tasks_ds"])})
+        except NotionError:
+            pass
+        status = client.create_child_page(home["id"], "Status", [
+            {"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": _links([("Dashboard", home["id"]), ("Tasks", ids["tasks_db"])])}},
+            {"object": "block", "type": "code",
+             "code": {"language": "plain text", "rich_text": _rt("(no status yet: start swarm serve)")}}])
+        ids["status_page"] = status["id"]
+        code_blocks = [b for b in client.list_children(status["id"]) if b.get("type") == "code"]
+        ids["status_block"] = code_blocks[0]["id"] if code_blocks else ""
 
         ids["views_ok"] = "true"
         try:
@@ -483,15 +493,32 @@ class NotionBoard:
         except (NotionError, KeyError) as e:  # views API is new; fall back to manual instructions
             ids["views_ok"] = f"false: {e}"
 
-        for key, text in (("tasks_db", "Board: where every task is. Needs you: Blocked and Failed. "
-                                       "Drag a card to Cut to drop it, or to Ready to retry it."),
-                          ("questions_db", "Type your answer in Answer. Tick Needs follow-up when an fyi "
-                                           "decision must change."),
-                          ("agents_db", "One row per agent: status, current task, spend in the last 5 hours.")):
+        descriptions = {
+            "tasks_db": _links([("Dashboard", home["id"]), ("Status", status["id"])])
+            + _rt("  ·  Board: where every task is. Needs you: Blocked and Failed. "
+                  "Drag a card to Cut to drop it, or to Ready to retry it."),
+            "questions_db": _rt("Type your answer in Answer. Tick Needs follow-up when an fyi decision must change."),
+            "agents_db": _rt("One row per agent: status, current task, spend in the last 5 hours."),
+        }
+        for key, rich in descriptions.items():
             try:
-                client.request("PATCH", f"/databases/{ids[key]}", json={"description": _rt(text)})
+                client.request("PATCH", f"/databases/{ids[key]}", json={"description": rich})
             except NotionError:
                 pass
+        try:
+            icon_url = asset_url("icon-board.png")
+            client.request("PATCH", f"/blocks/{home['id']}/children", json={"children": [{
+                "object": "block", "type": "callout", "callout": {
+                    "icon": ({"type": "external", "external": {"url": icon_url}} if icon_url
+                             else {"type": "emoji", "emoji": "🐝"}),
+                    "color": "gray_background",
+                    "rich_text": _rt("Agents first, then answer anything under Questions for you. ")
+                    + _links([("Tasks", ids["tasks_db"]), ("Status", status["id"])])
+                    + _rt(" open on their own pages. Cards move on their own; drag one to Cut to drop it, "
+                          "or to Ready to retry it. Status refreshes every few minutes: read the RISK lines first.")}}],
+                "position": {"type": "start"}})
+        except NotionError:
+            pass
         failed = decorate_board(client, ids)
         ids["decor_ok"] = "true" if not failed else "false: " + "; ".join(failed)
         return ids

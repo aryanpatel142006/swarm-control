@@ -199,9 +199,9 @@ def test_board_questions_agents_status():
     assert store["blocks"]["sb"]["code"]["rich_text"][0]["text"]["content"] == "status text"
 
 
-def test_init_builds_one_page_with_inline_databases():
-    """One page per project: how-to callout, live status, then Tasks / Questions / Agents inline, in that order."""
-    decorated, views, dbs, appended, pages, descriptions = {}, [], [], [], [], {}
+def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
+    """Dashboard: how-to with links, Agents table, Questions for you. Tasks and Status are their own pages ("tabs")."""
+    decorated, views, dbs, appended, pages, descriptions, relations = {}, [], [], {}, [], {}, []
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -213,19 +213,20 @@ def test_init_builds_one_page_with_inline_databases():
             return httpx.Response(200, json={"id": f"db{counter['n']}", "data_sources": [{"id": f"ds{counter['n']}"}]})
         if req.method == "POST" and path == "/v1/pages":
             pages.append(body)
-            return httpx.Response(200, json={"id": "home"})
-        if req.method == "GET" and path == "/v1/blocks/home/children":
-            return httpx.Response(200, json={"results": [{"id": "c1", "type": "callout"}, {"id": "h1", "type": "heading_2"},
-                                                         {"id": "code1", "type": "code"}, {"id": "h2", "type": "heading_2"}]})
-        if req.method == "PATCH" and path == "/v1/blocks/home/children":
-            appended.extend(body["children"])
+            return httpx.Response(200, json={"id": "home" if len(pages) == 1 else "status"})
+        if req.method == "GET" and path == "/v1/blocks/status/children":
+            return httpx.Response(200, json={"results": [{"id": "nav", "type": "paragraph"}, {"id": "code1", "type": "code"}]})
+        if req.method == "PATCH" and path.startswith("/v1/data_sources/"):
+            relations.append(body["properties"])
+            return httpx.Response(200, json=body)
+        if req.method == "PATCH" and path.endswith("/children"):
+            appended.setdefault(path.split("/")[3], []).append(body)
             return httpx.Response(200, json={"results": body["children"]})
         if req.method == "PATCH" and path.startswith("/v1/databases/") and "description" in body:
-            descriptions[path.split("/")[3]] = "".join(seg["text"]["content"] for seg in body["description"])
+            descriptions[path.split("/")[3]] = body["description"]
             return httpx.Response(200, json=body)
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
-            return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"},
-                                                            "Importance": {"id": "imp"}}})
+            return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
         if req.method == "POST" and path == "/v1/views":
             views.append((body["database_id"], body["name"], body["type"]))
             return httpx.Response(200, json={"id": "view"})
@@ -236,29 +237,46 @@ def test_init_builds_one_page_with_inline_databases():
 
     client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
     ids = NotionBoard.init(client, "parent", ["claude-a"], project="demo")
-    # one page, titled after the project, holding the how-to and the status block from the start
-    assert len(pages) == 1 and pages[0]["parent"]["page_id"] == "parent"
+    # the dashboard page, then the Status page under it
+    assert [pg["parent"]["page_id"] for pg in pages] == ["parent", "home"]
     assert pages[0]["properties"]["title"][0]["text"]["content"] == "Swarm · demo"
-    kinds = [b["type"] for b in pages[0]["children"]]
-    assert kinds == ["callout", "heading_2", "code", "heading_2"]
-    assert ids["status_page"] == "home" and ids["status_block"] == "code1" and ids["parent_page_id"] == "parent"
-    # three inline databases on that page, Tasks before Questions (the relation needs it) before Agents
-    assert [d["title"][0]["text"]["content"] for d in dbs] == ["Tasks", "Questions", "Agents"]
-    assert all(d["is_inline"] is True and d["parent"]["page_id"] == "home" for d in dbs)
-    assert [b["heading_2"]["rich_text"][0]["text"]["content"] for b in appended if b["type"] == "heading_2"] == \
-        ["Questions for you", "Agents"]
-    # views: a board and a Needs-you list on Tasks, an Open list on Questions
+    assert pages[1]["properties"]["title"][0]["text"]["content"] == "Status"
+    assert [b["type"] for b in pages[1]["children"]] == ["paragraph", "code"]   # nav line, then the live block
+    assert ids["home_page"] == "home" and ids["status_page"] == "status" and ids["status_block"] == "code1"
+    # dashboard order: Agents, Questions for you, then Tasks as a full page (opening a task fills the screen)
+    assert [(d["title"][0]["text"]["content"], d["is_inline"], d["parent"]["page_id"]) for d in dbs] == \
+        [("Agents", True, "home"), ("Questions", True, "home"), ("Tasks", False, "home")]
+    heads = [b["heading_2"]["rich_text"][0]["text"]["content"]
+             for call in appended["home"] for b in call["children"] if b["type"] == "heading_2"]
+    assert heads == ["Agents", "Questions for you"]
+    assert relations and "Task" in relations[0] and relations[0]["Task"]["relation"]["data_source_id"] == "ds3"
+    assert "Task" not in dbs[1]["initial_data_source"]["properties"]   # relation added once Tasks exists
+    callout_calls = [call for call in appended["home"] if call["children"][0]["type"] == "callout"]
+    assert callout_calls and callout_calls[0]["position"] == {"type": "start"}
+    links = [seg["text"]["link"]["url"] for seg in callout_calls[0]["children"][0]["callout"]["rich_text"]
+             if seg["text"].get("link")]
+    assert any("db3" in u for u in links) and any("status" in u for u in links)
+    # views: Board, By agent and Needs you on Tasks; Open on Questions
     assert ids["views_ok"] == "true"
-    assert views == [("db1", "Board", "board"), ("db1", "By agent", "board"), ("db1", "Needs you", "table"),
+    assert views == [("db3", "Board", "board"), ("db3", "By agent", "board"), ("db3", "Needs you", "table"),
                      ("db2", "Open", "table")]
-    # help text where people look, no navigation clutter
-    assert "Answer" in descriptions["db2"] and "Cut" in descriptions["db1"] and "db3" in descriptions
+    # help text and links where people look
+    task_desc = "".join(seg["text"]["content"] for seg in descriptions["db3"])
+    assert "Dashboard" in task_desc and "Cut" in task_desc
+    assert any(seg["text"].get("link") for seg in descriptions["db3"])
+    assert "Answer" in "".join(seg["text"]["content"] for seg in descriptions["db2"])
     assert ids["decor_ok"] == "true"
-    for key in ("home", "db1", "db2", "db3"):
+    for key in ("home", "status", "db1", "db2", "db3"):
         assert decorated[key]["icon"]["type"] == "external", key
     assert "icon-board.png?v=" in decorated["home"]["icon"]["external"]["url"]
-    assert decorated["home"]["cover"]["external"]["url"].startswith("https://raw.githubusercontent.com/")
-    assert "nav_ok" not in ids
+    assert "icon-status.png?v=" in decorated["status"]["icon"]["external"]["url"]
+
+
+def test_tasks_schema_puts_status_right_after_the_title():
+    from swarm.board import notion_props as np
+    assert list(np.TASKS_SCHEMA(["a"]))[:2] == ["Name", "Status"]
+    assert list(np.AGENTS_SCHEMA)[:6] == ["Name", "Status", "Last Heartbeat", "Cooldown Until", "Current Task",
+                                           "Cost 5h USD"]
 
 
 def test_decorate_uploads_when_no_public_url(tmp_path):
