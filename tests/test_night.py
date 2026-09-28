@@ -27,3 +27,9 @@ def test_improve_prompt_carries_the_rules_and_the_log():
     p = improve_prompt(3, "## Cycle 3 log", FOCUS[2])
     assert "ONE improvement" in p and "Test first" in p and "night 3:" in p and "## Cycle 3 log" in p
     assert "tests_passed" in p and "Never touch .venv" in p
+
+
+def test_night_can_run_without_the_improvement_agent(tmp_path):
+    from swarm.night import Night
+    n = Night(tmp_path, cycles=1, minutes=1, improve=False)
+    assert n.improve_enabled is False

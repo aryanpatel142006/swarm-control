@@ -125,9 +125,10 @@ class CycleReport:
 
 class Night:
     def __init__(self, project_dir: Path, *, log=print, cycles: int = 6, minutes: int = 75,
-                 env: dict | None = None, claude_bin: str = "claude"):
+                 env: dict | None = None, claude_bin: str = "claude", improve: bool = True):
         self.project_dir = Path(project_dir)
         self.log, self.cycles, self.minutes = log, cycles, minutes
+        self.improve_enabled = improve   # False: build + retro only; a person reviews the cycle logs and improves
         self.env = {**os.environ, **(env or {})}
         self.claude_bin = claude_bin
         self.night_dir = Path.home() / ".swarm" / "night" / datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -316,15 +317,22 @@ class Night:
                 self.wait_for_cycle(cycle, report)
                 time.sleep(90)   # let serve run the milestone retro
                 log_text = self.cycle_log(cycle, report)
-                self.stop_loops()
-                self.improve(cycle, log_text, report)
+                log_path = HARNESS_ROOT / "docs" / "night" / f"cycle-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}-{cycle}.md"
+                log_path.parent.mkdir(exist_ok=True)
+                log_path.write_text(log_text)
+                if self.improve_enabled:
+                    self.stop_loops()
+                    self.improve(cycle, log_text, report)
+                else:
+                    report.improvement = f"log written to {log_path.relative_to(HARNESS_ROOT)} for review"
             except Exception as e:   # one bad cycle must not end the night
                 report.notes.append(f"cycle error: {str(e)[:200]}")
                 self.log(f"night: cycle {cycle} error: {e}")
             self.record(report)
             reports.append(report)
             self.log(f"night: cycle {cycle} done: {report.done}/{report.total} · improvement {'merged' if report.merged else 'not merged'}")
-            self.sh(["pip", "install", "-q", "-e", "."], cwd=HARNESS_ROOT)
-            self.start_loops()
+            if self.improve_enabled:
+                self.sh(["pip", "install", "-q", "-e", "."], cwd=HARNESS_ROOT)
+                self.start_loops()
         self.stop_loops()
         return reports

@@ -204,10 +204,11 @@ def retro(dry_run: bool = typer.Option(False, "--dry-run", help="print the findi
 
 @app.command()
 def night(cycles: int = typer.Option(6, "--cycles"), minutes: int = typer.Option(75, "--minutes", help="time cap per cycle"),
-          start: int = typer.Option(1, "--start", help="first cycle number (milestone N<start>)")):
-    """Unattended loop: build one small app per cycle, answer questions, retro, then a fresh Claude improves the harness."""
+          start: int = typer.Option(1, "--start", help="first cycle number (milestone N<start>)"),
+          no_improve: bool = typer.Option(False, "--no-improve", help="build and retro only; a person reviews docs/night/cycle-*.md")):
+    """Unattended loop: build one small app per cycle, answer questions, retro, then improve the harness from the log."""
     from .night import Night
-    n = Night(_cfg().repo_root, log=console.print, cycles=cycles, minutes=minutes)
+    n = Night(_cfg().repo_root, log=console.print, cycles=cycles, minutes=minutes, improve=not no_improve)
     reports = n.run(start_cycle=start)
     console.print(f"night over: {sum(r.done for r in reports)} tasks done in {len(reports)} cycles, "
                   f"{sum(1 for r in reports if r.merged)} harness improvements merged")
