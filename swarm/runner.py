@@ -13,7 +13,7 @@ from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board, claim_task
 from .config import Config
-from .models import AgentRow, Question, Report, RunResult, Status, Task, utcnow
+from .models import TIERS, AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
@@ -27,7 +27,19 @@ HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itse
 RATE_LIMIT_COOLDOWN_MIN = 15
 IDLE_AFTER_S = 300
 TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
-PUBLISH_FIELDS = ["status", "attempts", "flags", "pr_url", "claim_nonce", "feedback", "last_error", "review_rounds"]
+PUBLISH_FIELDS = ["status", "attempts", "flags", "pr_url", "claim_nonce", "feedback", "last_error", "review_rounds", "model", "effort"]
+
+
+def next_tier_model(agent_cfg, current: str) -> tuple[str, str | None]:
+    """The agent's model (and effort) one tier above `current`; the best tier stays where it is."""
+    tiers = [t for t in reversed(TIERS) if agent_cfg.models.get(t)]   # low → mid → high → best
+    idx = next((i for i, t in enumerate(tiers) if agent_cfg.models[t] == current), None)
+    if idx is None:
+        return current, agent_cfg.effort.get("mid")
+    for t in tiers[idx + 1:]:
+        if agent_cfg.models[t] != current:
+            return agent_cfg.models[t], agent_cfg.effort.get(t)
+    return current, agent_cfg.effort.get(tiers[idx])
 
 
 def _append_log(path: Path, section: str) -> None:
@@ -425,6 +437,10 @@ class Runner:
             task.feedback = (f"The previous attempt ended with: {result.error or 'unknown error'}. "
                              "Continue from the current branch state, finish the task, and produce the report.")
             task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+            # the same model at the same budget usually ends the same way: resume one tier up
+            agent_cfg = self.cfg.agents.get(task.agent)
+            if agent_cfg:
+                task.model, task.effort = next_tier_model(agent_cfg, task.model)
             return Status.CHANGES_REQUESTED
         if verify_ok is False:
             task.review_rounds += 1

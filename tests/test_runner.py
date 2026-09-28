@@ -424,3 +424,27 @@ def test_decision_log_accumulates_across_attempts(cfg, git_repo, tmp_path):
     r.ws.dispose(wt)
     assert "use tap" in text and "keep favicon" in text
     assert text.index("use tap") < text.index("keep favicon")
+
+
+def test_abnormal_end_resumes_one_model_tier_up(cfg, git_repo, tmp_path):
+    """Max turns / timeout with work left behind: the resume runs on the next tier (haiku → sonnet), not the same
+    model again. Three Haiku attempts at 30 turns each is how T-013 burned $0.60 for nothing on Sep 28."""
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured=None, ok=False, report_file=None)
+    adapter_error = "error_max_turns"
+    orig = adapter.run
+
+    def run(spec):
+        r = orig(spec)
+        r.error = adapter_error
+        return r
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="haiku", effort="low", importance="low", scope=["src/**"])
+    r.run_task(t)
+    stored = board.get_task(t.id)
+    assert stored.status is Status.CHANGES_REQUESTED and "resume" in stored.flags
+    assert stored.model == "sonnet"          # one tier up (low → mid) for the same agent
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    r.run_task(board.get_task(t.id))
+    assert board.get_task(t.id).model == "opus"   # mid → high; never above the agent's best tier
