@@ -287,8 +287,8 @@ def test_init_builds_the_dashboard_layout():
     assert "Task" not in dbs[1]["initial_data_source"]["properties"]
     # views and column order
     assert ids["views_ok"] == "true" and ids["columns_ok"] == "true"
-    assert views == [("db3", "Board", "board"), ("db3", "By agent", "board"), ("db3", "Needs you", "table"),
-                     ("db2", "Open", "table")]
+    assert views == [("db3", "Board", "board"), ("db3", "By agent", "board"), ("db3", "By milestone", "board"),
+                     ("db3", "Needs you", "table"), ("db2", "Open", "table")]
     assert [p["property_id"] for p in ordered["default-db1"]["properties"][:6]] == \
         ["title", "Status", "Last Heartbeat", "Cooldown Until", "Current Task", "Cost 5h USD"]
     assert [p["property_id"] for p in ordered["default-db3"]["properties"][:3]] == ["title", "Status", "Agent"]

@@ -23,7 +23,7 @@ FAST_STEPS = ("assigned", "reaped", "retried", "relayed", "promoted", "rerouted"
 class Server:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, reviewer, merger, now=utcnow,
                  sleep: Callable[[float], None] = time.sleep, log=print, host: str = "serve",
-                 status_every_s: int = 900, review_batch: int = 1, background: bool = False):
+                 status_every_s: int = 900, review_batch: int = 2, background: bool = False):
         self.cfg, self.board, self.ws, self.reviewer, self.merger = cfg, board, ws, reviewer, merger
         self.now, self.sleep, self.log, self.host = now, sleep, log, host
         self.status_every_s, self.review_batch, self.background = status_every_s, review_batch, background

@@ -527,7 +527,7 @@ class NotionBoard:
         ids["views_ok"] = "true"
         try:
             props = client.get_data_source(ids["tasks_ds"])["properties"]
-            for name, prop in (("Board", "Status"), ("By agent", "Agent")):
+            for name, prop in (("Board", "Status"), ("By agent", "Agent"), ("By milestone", "Milestone")):
                 client.create_view(ids["tasks_db"], ids["tasks_ds"], name, "board", {
                     "type": "board",
                     "group_by": {"type": "select", "property_id": props[prop]["id"],
