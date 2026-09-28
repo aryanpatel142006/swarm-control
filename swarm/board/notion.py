@@ -550,7 +550,7 @@ class NotionBoard:
 
         descriptions = {
             "tasks_db": _links([("Dashboard", home["id"])])
-            + _rt("  ·  Board: where every task is. Needs you: Blocked and Failed. "
+            + _rt("  ·  Board: where every task is. By milestone: progress per milestone. Needs you: Blocked and Failed. "
                   "Drag a card to Cut to drop it, or to Ready to retry it."),
             "questions_db": _rt("Type your answer in Answer. Tick Needs follow-up when an fyi decision must change."),
             "agents_db": _rt("One row per agent: status, current task, spend in the last 5 hours."),
