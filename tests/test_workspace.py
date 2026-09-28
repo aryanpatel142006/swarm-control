@@ -90,10 +90,11 @@ def test_pr_create_then_update_and_merge(git_repo, tmp_path):
 
     def fake_gh(args, cwd):
         calls.append(args)
-        if args[:3] == ["pr", "view", "task/T-006"]:
+        if args[:2] == ["pr", "list"]:
             if len(calls) == 1:
-                return CmdResult(1, "", "no pull requests found")
-            return CmdResult(0, '{"url":"https://gh/pr/9"}', "")
+                return CmdResult(0, "[]", "")
+            assert "open" in args and "task/T-006" in args
+            return CmdResult(0, '[{"url":"https://gh/pr/9"}]', "")
         if args[:2] == ["pr", "create"]:
             return CmdResult(0, "https://gh/pr/9\n", "")
         if args[:2] == ["pr", "edit"]:
@@ -107,6 +108,20 @@ def test_pr_create_then_update_and_merge(git_repo, tmp_path):
     assert ws.pr_create_or_update("task/T-006", "T-006 · title", "body2") == "https://gh/pr/9"
     assert any(a[:2] == ["pr", "edit"] for a in calls)
     assert ws.pr_merge("task/T-006").ok
+
+
+def test_pr_lookup_excludes_merged_rehearsal_prs(git_repo, tmp_path):
+    calls = []
+    def gh(args, cwd):
+        calls.append(args)
+        if args[:2] == ["pr", "list"]:
+            assert args[args.index("--state") + 1] == "open"
+            return CmdResult(0, "[]", "")
+        if args[:2] == ["pr", "create"]:
+            return CmdResult(0, "https://gh/pr/20\n", "")
+        raise AssertionError(args)
+    ws = Workspace(git_repo, tmp_path / "wt", gh=gh)
+    assert ws.pr_create_or_update("task/T-002", "JSON API", "new rehearsal") == "https://gh/pr/20"
 
 
 def test_main_worktree(git_repo, tmp_path):

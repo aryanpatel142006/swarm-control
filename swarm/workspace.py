@@ -145,13 +145,17 @@ class Workspace:
 
     # ----- GitHub -----
     def pr_create_or_update(self, branch: str, title: str, body: str) -> str:
-        view = self.gh(["pr", "view", branch, "--json", "url"], self.repo_root)
+        view = self.gh(["pr", "list", "--head", branch, "--base", self.main_branch,
+                        "--state", "open", "--json", "url", "--limit", "1"], self.repo_root)
+        url = ""
         if view.ok:
             try:
-                url = json.loads(view.out)["url"]
-            except (ValueError, KeyError):
-                url = ""
-            self.gh(["pr", "edit", branch, "--body", body], self.repo_root)
+                rows = json.loads(view.out)
+                url = rows[0]["url"] if rows else ""
+            except (ValueError, KeyError, TypeError):
+                pass
+        if url:
+            self.gh(["pr", "edit", url, "--body", body], self.repo_root)
             return url
         created = self.gh(["pr", "create", "--head", branch, "--base", self.main_branch,
                            "--title", title, "--body", body], self.repo_root)
