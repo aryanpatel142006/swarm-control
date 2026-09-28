@@ -216,3 +216,28 @@ def test_claude_parse_keeps_cache_tokens(tmp_path):
                                 "cache_read_input_tokens": 36675}})
     r = ClaudeAdapter(mcp_lookup=dict).parse_output(0, out, "")
     assert r.usage.cache_write_tokens == 10755 and r.usage.cache_read_tokens == 36675
+
+
+def test_run_retries_once_when_the_cli_binary_is_briefly_missing(tmp_path):
+    """Claude Code replaces its own binary during auto-update; a spawn that hits that window is retried once."""
+    import subprocess
+    from swarm.adapters.generic import GenericAdapter
+    from swarm.config import AgentConfig
+    calls = []
+
+    def flaky(argv, **kw):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    a = GenericAdapter(AgentConfig(name="g", provider="generic", host="h", command_template="mycli {prompt_file}"))
+    slept = []
+    r = a.run(spec(tmp_path, schema=None), runner=flaky, sleep=slept.append)
+    assert r.ok and len(calls) == 2 and slept == [5]
+
+    def gone(argv, **kw):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    r2 = a.run(spec(tmp_path, schema=None), runner=gone, sleep=lambda s: None)
+    assert not r2.ok and r2.exit_code == -2 and "cli not found" in r2.error

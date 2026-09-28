@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,17 +79,23 @@ class Adapter:
         return RunResult(ok=code == 0, exit_code=code, stdout=out, stderr=err,
                          error="" if code == 0 else f"exit {code}")
 
-    def run(self, spec: RunSpec, runner=subprocess.run) -> RunResult:
+    def run(self, spec: RunSpec, runner=subprocess.run, sleep=time.sleep) -> RunResult:
         argv, stdin = self.build_command(spec)
         (spec.cwd / ".swarm-run").mkdir(exist_ok=True)
-        try:
-            proc = runner(argv, cwd=str(spec.cwd), input=stdin, capture_output=True, timeout=spec.timeout_s)
-        except subprocess.TimeoutExpired as e:
-            return RunResult(ok=False, exit_code=-1, stdout=(e.stdout or b"").decode(errors="replace"),
-                             stderr=(e.stderr or b"").decode(errors="replace"), timed_out=True,
-                             error=f"timeout after {spec.timeout_s}s")
-        except FileNotFoundError as e:
-            return RunResult(ok=False, exit_code=-2, stdout="", stderr=str(e), error=f"cli not found: {argv[0]}")
+        for attempt in (1, 2):
+            try:
+                proc = runner(argv, cwd=str(spec.cwd), input=stdin, capture_output=True, timeout=spec.timeout_s)
+                break
+            except subprocess.TimeoutExpired as e:
+                return RunResult(ok=False, exit_code=-1, stdout=(e.stdout or b"").decode(errors="replace"),
+                                 stderr=(e.stderr or b"").decode(errors="replace"), timed_out=True,
+                                 error=f"timeout after {spec.timeout_s}s")
+            except FileNotFoundError as e:
+                # Claude Code swaps its own binary during auto-update; one retry covers that window
+                if attempt == 1:
+                    sleep(5)
+                    continue
+                return RunResult(ok=False, exit_code=-2, stdout="", stderr=str(e), error=f"cli not found: {argv[0]}")
         out = proc.stdout.decode(errors="replace")
         err = proc.stderr.decode(errors="replace")
         result = self.parse_output(proc.returncode, out, err)
