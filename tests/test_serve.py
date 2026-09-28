@@ -313,3 +313,14 @@ def test_promote_blocks_a_dependency_cycle_once(cfg, git_repo, tmp_path):
     assert board.get_task(a.id).status is Status.BLOCKED and board.get_task(b.id).status is Status.BLOCKED
     qs = board.list_questions(status="Open")
     assert len(qs) == 1 and a.id in qs[0].text and b.id in qs[0].text and "cycle" in qs[0].text
+
+
+def test_dependency_cycle_finder_is_linear_on_wide_graphs():
+    import time as _t
+    from swarm.serve import _dependency_cycles
+    tasks = [Task(id=f"T-{i:03d}", title="x", depends_on=[f"T-{j:03d}" for j in range(max(0, i - 6), i)]) for i in range(300)]
+    t0 = _t.monotonic()
+    assert _dependency_cycles(tasks) == []
+    assert _t.monotonic() - t0 < 1.0
+    tasks[0].depends_on = ["T-299"]
+    assert len(_dependency_cycles(tasks)) == 1

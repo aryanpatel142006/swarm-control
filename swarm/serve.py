@@ -21,23 +21,41 @@ FAST_STEPS = ("assigned", "reaped", "retried", "relayed", "promoted", "rerouted"
 
 
 def _dependency_cycles(tasks: list[Task]) -> list[list[str]]:
-    """Each dependency cycle once, as the list of task ids in order."""
+    """Each dependency cycle once (Tarjan's strongly connected components; linear in tasks + edges)."""
     graph = {t.id: [d for d in t.depends_on] for t in tasks}
-    seen: set[frozenset] = set()
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on: set[str] = set()
     out: list[list[str]] = []
+    counter = [0]
 
-    def walk(node: str, path: list[str]):
-        for nxt in graph.get(node, []):
-            if nxt in path:
-                cyc = path[path.index(nxt):]
-                key = frozenset(cyc)
-                if key not in seen:
-                    seen.add(key)
-                    out.append(cyc)
-            elif len(path) < 50:
-                walk(nxt, path + [nxt])
-    for start in graph:
-        walk(start, [start])
+    def strong(v: str) -> None:
+        index[v] = low[v] = counter[0]
+        counter[0] += 1
+        stack.append(v)
+        on.add(v)
+        for w in graph.get(v, []):
+            if w not in graph:
+                continue
+            if w not in index:
+                strong(w)
+                low[v] = min(low[v], low[w])
+            elif w in on:
+                low[v] = min(low[v], index[w])
+        if low[v] == index[v]:
+            comp = []
+            while True:
+                w = stack.pop()
+                on.discard(w)
+                comp.append(w)
+                if w == v:
+                    break
+            if len(comp) > 1 or v in graph.get(v, []):
+                out.append(sorted(comp))
+    for v in graph:
+        if v not in index:
+            strong(v)
     return out
 
 
