@@ -302,3 +302,14 @@ def test_promote_treats_a_cut_dependency_as_resolved_and_blocks_on_an_unknown_on
     assert len(qs) == 1 and "T-999" in qs[0].text
     srv.promote()
     assert len([q for q in board.list_questions(status="Open") if q.task_id == ghost.id]) == 1   # asked once
+
+
+def test_promote_blocks_a_dependency_cycle_once(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    a = board.create_task(Task(id="", title="a", status=Status.BACKLOG, type="backend"))
+    b = board.create_task(Task(id="", title="b", status=Status.BACKLOG, type="backend", depends_on=[a.id]))
+    a = board.get_task(a.id); a.depends_on = [b.id]; board.update_task(a, ["depends_on"])
+    srv.promote(); srv.promote()
+    assert board.get_task(a.id).status is Status.BLOCKED and board.get_task(b.id).status is Status.BLOCKED
+    qs = board.list_questions(status="Open")
+    assert len(qs) == 1 and a.id in qs[0].text and b.id in qs[0].text and "cycle" in qs[0].text

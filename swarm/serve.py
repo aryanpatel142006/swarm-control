@@ -20,6 +20,27 @@ IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
 FAST_STEPS = ("assigned", "reaped", "retried", "relayed", "promoted", "rerouted")
 
 
+def _dependency_cycles(tasks: list[Task]) -> list[list[str]]:
+    """Each dependency cycle once, as the list of task ids in order."""
+    graph = {t.id: [d for d in t.depends_on] for t in tasks}
+    seen: set[frozenset] = set()
+    out: list[list[str]] = []
+
+    def walk(node: str, path: list[str]):
+        for nxt in graph.get(node, []):
+            if nxt in path:
+                cyc = path[path.index(nxt):]
+                key = frozenset(cyc)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(cyc)
+            elif len(path) < 50:
+                walk(nxt, path + [nxt])
+    for start in graph:
+        walk(start, [start])
+    return out
+
+
 class Server:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, reviewer, merger, now=utcnow,
                  sleep: Callable[[float], None] = time.sleep, log=print, host: str = "serve",
@@ -179,7 +200,18 @@ class Server:
         by_id = {t.id: t for t in tasks}
         ctx = None
         n = 0
-        for t in [x for x in tasks if x.status is Status.BACKLOG]:
+        for cycle in _dependency_cycles(tasks):
+            members = [by_id[c] for c in cycle]
+            if all(m.status is Status.BACKLOG for m in members):
+                for m in members:
+                    m.status = Status.BLOCKED
+                    self.board.update_task(m, ["status"])
+                self.board.create_question(Question(
+                    id="", text=f"Dependency cycle: {' → '.join(cycle + [cycle[0]])}. Which dependency should be dropped?",
+                    kind="blocking", options=[f"drop {c}'s dependency" for c in cycle], impact="high", task_id=cycle[0],
+                    asked_by="serve"))
+                self.log(f"dependency cycle {cycle} → blocked")
+        for t in [x for x in self.board.list_tasks(status=[Status.BACKLOG])]:
             missing = [d for d in t.depends_on if d not in by_id]
             if missing:
                 t.status = Status.BLOCKED
