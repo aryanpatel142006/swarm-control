@@ -253,7 +253,14 @@ class Server:
         self._last_status = now
         text = render_status(self.cfg, self.board.list_tasks(), self.board.list_agents(),
                              self.board.list_questions(), now)
-        self.board.write_status_page(text)
+        try:
+            self.board.write_status_page(text)
+        except Exception as e:   # a deleted or archived Status page must not take the loop down
+            if not getattr(self, "_status_page_broken", False):
+                self._status_page_broken = True
+                self.log(f"status page cannot be written ({str(e)[:120]}); run `swarm init` again or restore the "
+                         "Status page from the Notion trash. The loop keeps going.")
+            return None
         return text
 
     # ----- tick -----

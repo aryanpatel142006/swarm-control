@@ -64,10 +64,12 @@ class Ledger:
         return sorted({r.get("agent") for r in self._rows() if r.get("agent")})
 
 
-def usage_report(ledger: Ledger, done: list[str] | None = None) -> dict:
+def usage_report(ledger: Ledger, done: list[str] | None = None, since: datetime | None = None) -> dict:
     """Where the money went: by role, per task, cache write vs read, and what counts as waste
     (failed runs, worker attempts after the first successful one, review rounds after the first)."""
     rows = ledger._rows()
+    if since is not None:
+        rows = [r for r in rows if datetime.fromisoformat(r["ts"]) >= since]
     by_role: dict[str, float] = {}
     tasks: dict[str, dict] = {}
     cache_w = cache_r = 0

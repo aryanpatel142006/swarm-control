@@ -245,3 +245,20 @@ def test_reap_orphan_rule_is_immune_to_clock_skew(cfg, git_repo, tmp_path):
     assert srv.reap() == 1
     assert board.get_task(live.id).status is Status.RUNNING
     assert board.get_task(stale.id).status is Status.READY
+
+
+def test_status_page_failure_does_not_stop_the_loop(cfg, git_repo, tmp_path):
+    """A deleted or archived Status page must not take serve down; it logs once and keeps working."""
+    board = InMemoryBoard()
+
+    def boom(text):
+        raise RuntimeError("Notion 400 validation_error: Can't edit block that is archived")
+
+    board.write_status_page = boom
+    srv, board, clock = make(cfg, git_repo, tmp_path, board=board)
+    logs = []
+    srv.log = logs.append
+    assert srv.write_status(force=True) is None
+    assert srv.write_status(force=True) is None
+    assert sum("status page" in line for line in logs) == 1   # logged once, not every tick
+    srv.tick()   # still alive

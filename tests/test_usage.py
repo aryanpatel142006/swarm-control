@@ -68,3 +68,13 @@ def test_usage_report_splits_spend_and_waste(tmp_path):
     assert r["waste"]["failed_runs"] == 0.3 and r["waste"]["extra_review_rounds"] == 0.1 and r["waste"]["total"] == 0.4
     assert r["cache"]["write"] == 1500 and r["cache"]["read"] == 9500
     assert t2["models"] == ["opus", "sonnet"]
+
+
+def test_usage_report_since_ignores_older_rows(tmp_path):
+    from swarm.usage import usage_report
+    led = Ledger(tmp_path / "usage.jsonl")
+    now = utcnow()
+    led.append(agent="a", model="m", task_id="T-1", usage=Usage(1, 1, 5.0), duration_s=1, ok=True, now=now - timedelta(days=1))
+    led.append(agent="a", model="m", task_id="T-1", usage=Usage(1, 1, 0.5), duration_s=1, ok=True, now=now)
+    r = usage_report(led, done=["T-1"], since=now - timedelta(hours=1))
+    assert r["total_cost"] == 0.5 and r["runs"] == 1

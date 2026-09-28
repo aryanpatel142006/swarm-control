@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from datetime import datetime
 import shutil
 import stat
 from pathlib import Path
@@ -153,12 +155,22 @@ def tools(install: bool = typer.Option(False, "--install", help="install missing
 
 
 @app.command()
-def usage():
+def usage(since: str = typer.Option(None, "--since", help="only runs after this UTC time (e.g. 2026-10-10T12:00) "
+                                                            "or a window like 5h / 2d; the ledger outlives board resets")):
     """Where the tokens went: spend by role, per task, cache write vs read, and waste (retries, re-reviews)."""
+    from datetime import timedelta, timezone
     from .usage import Ledger, default_ledger_path, usage_report
+    cutoff = None
+    if since:
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)([hd])", since.strip())
+        if m:
+            cutoff = utcnow() - timedelta(hours=float(m.group(1)) * (24 if m.group(2) == "d" else 1))
+        else:
+            cutoff = datetime.fromisoformat(since)
+            cutoff = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
     board = make_board(_cfg(), state.memory)
     done = [t.id for t in board.list_tasks(status=[Status.DONE])]
-    r = usage_report(Ledger(default_ledger_path(_cfg().project)), done=done)
+    r = usage_report(Ledger(default_ledger_path(_cfg().project)), done=done, since=cutoff)
     console.print(f"[bold]${r['total_cost']:.2f}[/bold] over {r['runs']} runs · "
                   + " · ".join(f"{k} ${v:.2f}" for k, v in r["by_role"].items())
                   + (f" · ${r['cost_per_done_task']:.2f} per merged task" if r["cost_per_done_task"] is not None else ""))
