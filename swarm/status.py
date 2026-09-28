@@ -17,7 +17,8 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     for a in sorted(agents, key=lambda x: x.name):
         if a.name == "serve":
             continue
-        bit = f"{a.name} {a.status}" if a.last_heartbeat else f"{a.name} no heartbeat yet"
+        never_seen = a.last_heartbeat is None and a.status == "offline"
+        bit = f"{a.name} no heartbeat yet" if never_seen else f"{a.name} {a.status}"
         if a.current_task:
             bit += f"({a.current_task})"
         if a.status == "cooldown" and a.cooldown_until:
