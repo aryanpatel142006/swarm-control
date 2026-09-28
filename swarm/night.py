@@ -38,7 +38,10 @@ def milestone_name(cycle: int) -> str:
 
 
 def plan_for(cycle: int) -> tuple[str, str, str]:
-    return PLANS[(cycle - 1) % len(PLANS)]
+    """Plans rotate; a repeat gets its own folder so it never builds on top of an earlier cycle's code."""
+    name, folder, brief = PLANS[(cycle - 1) % len(PLANS)]
+    round_ = (cycle - 1) // len(PLANS) + 1
+    return (name, folder if round_ == 1 else f"{folder}{round_}", brief)
 
 
 def milestone_section(cycle: int) -> str:

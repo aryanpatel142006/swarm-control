@@ -39,3 +39,10 @@ def test_restart_does_not_plan_a_milestone_twice():
     from swarm.night import needs_planning
     tasks = [Task(id="T-31", title="a", milestone="N3", status=Status.READY)]
     assert needs_planning(tasks, "N3") is False and needs_planning(tasks, "N4") is True
+
+
+def test_repeat_cycles_build_in_a_fresh_folder():
+    """Cycle 5 would rebuild Notecard in apps/notecard, which cycle 1 already filled."""
+    first, repeat = plan_for(1), plan_for(len(PLANS) + 1)
+    assert first[0] == repeat[0] and first[1] == "apps/notecard" and repeat[1] == "apps/notecard2"
+    assert "python -m apps.notecard2 serve" in append_milestone("# P\n", len(PLANS) + 1)
