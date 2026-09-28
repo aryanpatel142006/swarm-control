@@ -70,8 +70,9 @@ def route(task: Task, cfg: Config, ctx: RouteContext) -> tuple[str, str, str | N
     agents = list(cfg.agents.values())
     candidates = [a for a in agents
                   if is_available(a, ctx.rows.get(a.name), importance=task.importance, now=ctx.now)]
-    if not candidates:
-        candidates = agents
+    if not candidates:   # nobody fully available: prefer agents that are alive (capped or cooling) over dead ones
+        candidates = [a for a in agents if (r := ctx.rows.get(a.name)) is None
+                      or (r.status != "offline" and r.last_heartbeat is not None)] or agents
 
     def score(a: AgentConfig) -> int:
         return a.strengths.get(task.type, 3)

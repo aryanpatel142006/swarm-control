@@ -106,3 +106,15 @@ def test_route_never_uses_an_agent_that_has_not_checked_in(cfg):
     assert ctx.rows["claude-a"].status == "offline" and ctx.rows["claude-a"].last_heartbeat is None
     agent, model, effort = route(Task(id="T-1", title="x", type="frontend", importance="critical"), cfg, ctx)
     assert agent == "codex-a"
+
+
+def test_route_falls_back_to_a_live_agent_over_its_soft_cap_before_a_dead_one(cfg):
+    """Overnight: claude-a over 80% of its soft cap, codex-a offline. The task must go to the live agent."""
+    from swarm.router import RouteContext, route
+    now = utcnow()
+    rows = {"claude-a": AgentRow(name="claude-a", status="idle", last_heartbeat=now, cost_5h_usd=39.0),
+            "codex-a": AgentRow(name="codex-a", status="offline", last_heartbeat=now - timedelta(hours=2)),
+            "fake-b": AgentRow(name="fake-b", status="offline", last_heartbeat=None)}
+    ctx = RouteContext(rows=rows, queue_depth={}, scopes_by_agent={}, now=now)
+    agent, _, _ = route(Task(id="T-1", title="x", type="backend", importance="low"), cfg, ctx)
+    assert agent == "claude-a"
