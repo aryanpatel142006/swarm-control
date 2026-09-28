@@ -7,7 +7,7 @@ from typing import Callable
 from .board.base import Board
 from .config import Config
 from .models import Question, Status, Task, utcnow
-from .workspace import Workspace
+from .workspace import CmdResult, Workspace
 
 MAX_MERGE_FAILURES = 3
 MERGEABILITY_POLLS = 12      # × MERGEABILITY_WAIT_S ≈ 36 s for GitHub to recompute after a push
@@ -23,23 +23,39 @@ class Merger:
                  sleep: Callable[[float], None] = time.sleep):
         self.cfg, self.board, self.ws, self.log, self.sleep = cfg, board, ws, log, sleep
 
-    def _wait_mergeable(self, branch: str) -> str:
-        """After a push GitHub reports UNKNOWN for a few seconds; merging then fails with 'not mergeable'."""
-        state = "UNKNOWN"
+    @staticmethod
+    def _ref(task: Task) -> str:
+        return task.pr_url or task.branch
+
+    def _wait_mergeable(self, task: Task) -> str:
+        """After a push GitHub reports UNKNOWN for a few seconds (and briefly an old head); merging then fails."""
+        state, tip = "UNKNOWN", self.ws.remote_tip(task.branch)
         for _ in range(MERGEABILITY_POLLS):
-            mergeable, state = self.ws.pr_state(branch)
-            if mergeable != "UNKNOWN" and state != "UNKNOWN":   # settled, or N/A (nothing to wait for)
+            info = self.ws.pr_info(self._ref(task))
+            mergeable = str(info.get("mergeable") or ("N/A" if not info else "UNKNOWN"))
+            state = str(info.get("mergeStateStatus") or ("N/A" if not info else "UNKNOWN"))
+            head_ok = not tip or not info.get("headRefOid") or info["headRefOid"] == tip
+            if mergeable != "UNKNOWN" and state != "UNKNOWN" and head_ok:   # settled, or N/A (nothing to wait for)
                 return state
             self.sleep(MERGEABILITY_WAIT_S)
         return state
 
     def _gh_merge(self, task: Task):
-        self._wait_mergeable(task.branch)
-        r = self.ws.pr_merge(task.branch)
+        ref = self._ref(task)
+        before = self.ws.pr_info(ref)
+        if before and str(before.get("state", "OPEN")).upper() != "OPEN":
+            return CmdResult(1, "", f"PR {ref} is {before.get('state')}, not open; refusing to treat it as this "
+                                    "task's merge (branch names repeat across projects)")
+        self._wait_mergeable(task)
+        r = self.ws.pr_merge(ref)
         if not r.ok and "not mergeable" in (r.err + r.out):
             self.sleep(MERGEABILITY_WAIT_S * 2)   # one more chance for GitHub to settle
-            self._wait_mergeable(task.branch)
-            r = self.ws.pr_merge(task.branch)
+            self._wait_mergeable(task)
+            r = self.ws.pr_merge(ref)
+        if r.ok:
+            after = self.ws.pr_info(ref)
+            if after and str(after.get("state", "MERGED")).upper() != "MERGED":
+                return CmdResult(1, "", f"gh reported success but PR {ref} is {after.get('state')}, not merged")
         return r
 
     def _back(self, task: Task, feedback: str) -> bool:

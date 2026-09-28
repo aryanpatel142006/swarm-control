@@ -145,13 +145,19 @@ class Workspace:
 
     # ----- GitHub -----
     def pr_create_or_update(self, branch: str, title: str, body: str) -> str:
-        view = self.gh(["pr", "view", branch, "--json", "url"], self.repo_root)
-        if view.ok:
+        """The PR for this branch is the OPEN one; branch names repeat across projects (task/T-001), so an old
+        merged PR under the same name is never reused."""
+        listed = self.gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url,number", "--limit", "5"],
+                         self.repo_root)
+        url = ""
+        if listed.ok:
             try:
-                url = json.loads(view.out)["url"]
-            except (ValueError, KeyError):
+                rows = json.loads(listed.out or "[]")
+                url = str(rows[0]["url"]) if rows else ""
+            except (ValueError, KeyError, IndexError, TypeError):
                 url = ""
-            self.gh(["pr", "edit", branch, "--body", body], self.repo_root)
+        if url:
+            self.gh(["pr", "edit", url, "--body", body], self.repo_root)
             return url
         created = self.gh(["pr", "create", "--head", branch, "--base", self.main_branch,
                            "--title", title, "--body", body], self.repo_root)
@@ -159,20 +165,31 @@ class Workspace:
             raise RuntimeError(f"gh pr create failed: {created.err.strip() or created.out.strip()}")
         return created.out.strip().splitlines()[-1] if created.out.strip() else ""
 
-    def pr_state(self, branch: str) -> tuple[str, str]:
-        """GitHub's (mergeable, mergeStateStatus) for the PR on this branch; UNKNOWN while GitHub recomputes."""
-        r = self.gh(["pr", "view", branch, "--json", "mergeable,mergeStateStatus"], self.repo_root)
+    def pr_info(self, ref: str) -> dict:
+        """state / headRefOid / url / mergeable / mergeStateStatus of a PR (by url, number or branch); {} if none."""
+        r = self.gh(["pr", "view", ref, "--json", "state,headRefOid,url,mergeable,mergeStateStatus"], self.repo_root)
         if not r.ok:
-            return "N/A", "N/A"          # no PR or gh unavailable: nothing to wait for
+            return {}
         try:
             data = json.loads(r.out)
         except ValueError:
-            return "N/A", "N/A"
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def pr_state(self, ref: str) -> tuple[str, str]:
+        """GitHub's (mergeable, mergeStateStatus) for a PR; UNKNOWN while GitHub recomputes, N/A without a PR."""
+        data = self.pr_info(ref)
+        if not data:
+            return "N/A", "N/A"          # no PR or gh unavailable: nothing to wait for
         return str(data.get("mergeable") or "UNKNOWN"), str(data.get("mergeStateStatus") or "UNKNOWN")
 
-    def pr_merge(self, branch: str) -> CmdResult:
+    def pr_merge(self, ref: str) -> CmdResult:
         # no --delete-branch: gh would try to delete the local branch too, which fails while a worktree holds it
-        return self.gh(["pr", "merge", branch, "--squash"], self.repo_root)
+        return self.gh(["pr", "merge", ref, "--squash"], self.repo_root)
+
+    def remote_tip(self, branch: str) -> str:
+        r = self.git(self.repo_root, "ls-remote", "--heads", self.remote, branch, check=False, timeout=60)
+        return r.out.split()[0] if r.ok and r.out.strip() else ""
 
     def delete_remote_branch(self, branch: str) -> CmdResult:
         return self.git(self.repo_root, "push", "-q", self.remote, "--delete", branch, check=False, timeout=120)

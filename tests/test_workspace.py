@@ -90,10 +90,9 @@ def test_pr_create_then_update_and_merge(git_repo, tmp_path):
 
     def fake_gh(args, cwd):
         calls.append(args)
-        if args[:3] == ["pr", "view", "task/T-006"]:
-            if len(calls) == 1:
-                return CmdResult(1, "", "no pull requests found")
-            return CmdResult(0, '{"url":"https://gh/pr/9"}', "")
+        if args[:2] == ["pr", "list"]:
+            created = any(c[:2] == ["pr", "create"] for c in calls)
+            return CmdResult(0, '[{"url":"https://gh/pr/9","number":9}]' if created else "[]", "")
         if args[:2] == ["pr", "create"]:
             return CmdResult(0, "https://gh/pr/9\n", "")
         if args[:2] == ["pr", "edit"]:
@@ -135,3 +134,46 @@ def test_changed_files_lists_untracked_files_individually(git_repo, tmp_path):
     (path / "docs" / "decisions" / "T-010.md").write_text("d")
     assert ws.changed_files(path) == ["docs/decisions/T-010.md"]
     ws.dispose(path)
+
+
+def test_pr_lookup_ignores_closed_and_merged_prs(git_repo, tmp_path):
+    """Branch names repeat across projects (task/T-001); an old merged PR on that branch is not 'the PR'."""
+    calls = []
+
+    def fake_gh(args, cwd):
+        calls.append(args)
+        if args[:2] == ["pr", "list"]:
+            assert "--head" in args and "--state" in args and args[args.index("--state") + 1] == "open"
+            return CmdResult(0, "[]" if len([c for c in calls if c[:2] == ["pr", "create"]]) == 0 else
+                             '[{"url":"https://gh/pr/21","number":21}]', "")
+        if args[:2] == ["pr", "view"]:
+            return CmdResult(0, '{"url":"https://gh/pr/1"}', "")   # the stale, merged PR gh would resolve by branch
+        if args[:2] == ["pr", "create"]:
+            return CmdResult(0, "https://gh/pr/21\n", "")
+        if args[:2] == ["pr", "edit"]:
+            return CmdResult(0, "", "")
+        return CmdResult(1, "", "unexpected")
+
+    ws = Workspace(git_repo, tmp_path / "wt", gh=fake_gh)
+    assert ws.pr_create_or_update("task/T-001", "T-001 · title", "body") == "https://gh/pr/21"
+    assert any(a[:2] == ["pr", "create"] for a in calls)
+    assert ws.pr_create_or_update("task/T-001", "T-001 · title", "body2") == "https://gh/pr/21"
+    assert [a for a in calls if a[:2] == ["pr", "edit"]][0][2] == "https://gh/pr/21"   # edit by url, not branch
+
+
+def test_pr_info_and_merge_by_url(git_repo, tmp_path):
+    calls = []
+
+    def fake_gh(args, cwd):
+        calls.append(args)
+        if args[:2] == ["pr", "view"]:
+            return CmdResult(0, '{"state":"OPEN","headRefOid":"abc123","url":"https://gh/pr/21","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}', "")
+        if args[:2] == ["pr", "merge"]:
+            return CmdResult(0, "merged", "")
+        return CmdResult(1, "", "unexpected")
+
+    ws = Workspace(git_repo, tmp_path / "wt", gh=fake_gh)
+    info = ws.pr_info("https://gh/pr/21")
+    assert info["state"] == "OPEN" and info["headRefOid"] == "abc123"
+    assert ws.pr_state("https://gh/pr/21") == ("MERGEABLE", "CLEAN")
+    assert ws.pr_merge("https://gh/pr/21").ok and calls[-1][:3] == ["pr", "merge", "https://gh/pr/21"]

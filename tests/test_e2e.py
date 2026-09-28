@@ -49,8 +49,9 @@ def test_six_tasks_end_to_end(project_dir, sample_config_dict, git_repo, tmp_pat
 
     def gh(args, cwd):
         if args[:2] == ["pr", "merge"]:
+            branch = args[2].replace("https://gh/pr/", "")   # merges go by PR url; the fake maps it back
             _git(git_repo, "fetch", "-q", "origin")
-            _git(git_repo, "merge", "-q", "--no-edit", f"origin/{args[2]}")
+            _git(git_repo, "merge", "-q", "--no-edit", f"origin/{branch}")
             _git(git_repo, "push", "-q", "origin", "main")
             return CmdResult(0, "merged", "")
         if args[:2] == ["pr", "view"]:
