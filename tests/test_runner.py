@@ -482,3 +482,41 @@ def test_resumed_branch_is_rebased_onto_main_before_the_run(cfg, git_repo, tmp_p
     stored = board.get_task(t.id); stored.status = Status.READY; board.update_task(stored, ["status"])
     r.run_task(board.get_task(t.id))
     assert "rebase onto main conflicted" in seen["prompt"].lower() and "src/a.py" in seen["prompt"]
+
+
+def test_runner_arms_a_claim_watchdog_on_every_run(cfg, git_repo, tmp_path):
+    """The run spec carries a should_stop that turns True once the board no longer shows this run's claim
+    (the task was reaped and handed elsewhere)."""
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    r.claim_check_s = 0
+    t = ready_task(board)
+    r.run_task(t)
+    watch = adapter.specs[0].should_stop
+    assert callable(watch)
+    nonce = adapter.specs[0].claim_nonce
+    stored = board.get_task(t.id)
+    stored.status, stored.claim_nonce = Status.RUNNING, nonce
+    board.update_task(stored, ["status", "claim_nonce"])
+    assert watch() is False
+    stored.claim_nonce = "someone-else"
+    board.update_task(stored, ["claim_nonce"])
+    assert watch() is True
+
+
+def test_runner_lists_plugins_once_per_process(cfg, git_repo, tmp_path):
+    """`claude plugin list --json` costs a second or more; three calls per task added up."""
+    cfg.plugins_required = ["frontend-design"]
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    calls = {"list": 0}
+
+    def listing():
+        calls["list"] += 1
+        return {"frontend-design": PluginInfo("frontend-design", "frontend-design@m", True, "/cache/fd")}
+    r.installed_plugins = listing
+    r.ensure_plugins = lambda names, enable=True: []
+    for _ in range(2):
+        ready_task(board, agent="claude-a", model="sonnet", scope=["src/**"])
+    r.tick(); r.tick()
+    assert len(adapter.specs) == 2 and calls["list"] == 1

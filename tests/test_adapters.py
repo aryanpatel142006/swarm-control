@@ -292,3 +292,23 @@ def test_antigravity_command_matches_the_real_cli(tmp_path):
     ro, _ = AntigravityAdapter().build_command(spec(tmp_path, model="m", read_only=True, schema=None))
     assert "--dangerously-skip-permissions" not in ro and "--json-schema" not in ro
     assert "--effort" not in AntigravityAdapter().build_command(spec(tmp_path, model="m", effort=None))[0]
+
+
+def test_run_stops_the_cli_when_asked(tmp_path):
+    """Claim watchdog: when the board hands a task to someone else (agent looked offline), the running CLI is
+    killed instead of burning tokens on work that will be thrown away at publish time."""
+    from swarm.adapters.generic import GenericAdapter
+    from swarm.config import AgentConfig
+    script = tmp_path / "slow.sh"
+    script.write_text("#!/bin/sh\nsleep 30\necho done\n")
+    script.chmod(0o755)
+    a = GenericAdapter(AgentConfig(name="g", provider="generic", host="h", command_template=f"{script} {{prompt_file}}"))
+    polls = {"n": 0}
+
+    def should_stop():
+        polls["n"] += 1
+        return polls["n"] >= 2
+    import time
+    t0 = time.time()
+    r = a.run(spec(tmp_path, schema=None, timeout_s=60, should_stop=should_stop, stop_poll_s=0.2))
+    assert not r.ok and r.exit_code == -3 and "stopped" in r.error and time.time() - t0 < 10

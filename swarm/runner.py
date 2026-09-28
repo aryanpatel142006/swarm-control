@@ -87,6 +87,9 @@ class Runner:
         self.rules_text = rules_text if rules_text is not None else load_rules()
         self.ensure_plugins = lambda names, enable=True: ensure_plugins(names, log=self.log, enable=enable)
         self.installed_plugins = installed_plugins
+        self._plugins_cache: dict | None = None      # `claude plugin list --json` once per process
+        self._plugins_ensured: set[str] = set()
+        self.claim_check_s = 30                       # how often a running task re-reads its claim from the board
         self.log_dir = Path(log_dir) if log_dir else Path.home() / ".swarm" / cfg.project / "runs"
         self.lock = threading.Lock()
         self.active: dict[str, set[str]] = {name: set() for name in self.agents}
@@ -236,19 +239,48 @@ class Runner:
             self.recover_orphans()
 
     # ----- one task -----
+    def _claim_watch(self, task: Task):
+        """A callable the adapter polls: True once the board no longer shows this run's claim, so a run that was
+        reaped and handed to another agent stops burning tokens (Roomcast T-008 ran twice for that reason)."""
+        nonce = task.claim_nonce
+        state = {"last": 0.0, "lost": False}
+
+        def lost() -> bool:
+            if state["lost"]:
+                return True
+            if time.monotonic() - state["last"] < self.claim_check_s:
+                return False
+            state["last"] = time.monotonic()
+            try:
+                fresh = self.board.get_task(task.id)
+            except Exception:
+                return False   # a board hiccup must not kill a good run
+            state["lost"] = fresh is None or fresh.status is not Status.RUNNING or fresh.claim_nonce != nonce
+            if state["lost"]:
+                self.log(f"[{task.id}] claim lost while running; stopping the CLI")
+            return state["lost"]
+        return lost
+
     def _setup_plugins(self, task: Task) -> tuple[list[str], dict | None]:
         """Required plugins: installed + enabled. Task-type plugins: installed, loaded for this run only.
         Every other plugin enabled on this laptop is switched off for the run (context stays lean)."""
         required = list(self.cfg.plugins_required)
         by_type = [p for p in self.cfg.plugins_by_type.get(task.type, []) if p not in required]
+        new_required = [p for p in required if p not in self._plugins_ensured]
+        new_by_type = [p for p in by_type if p not in self._plugins_ensured]
         unavailable = []
-        if required:
-            unavailable += self.ensure_plugins(required, True)
-        if by_type:
-            unavailable += self.ensure_plugins(by_type, False)
+        if new_required:
+            unavailable += self.ensure_plugins(new_required, True)
+        if new_by_type:
+            unavailable += self.ensure_plugins(new_by_type, False)
+        if new_required or new_by_type:
+            self._plugins_ensured.update(new_required + new_by_type)
+            self._plugins_cache = None   # an install may have changed the listing
         if unavailable:
             self.log(f"[{task.id}] plugins unavailable on this host: {', '.join(unavailable)}")
-        installed = self.installed_plugins()
+        if self._plugins_cache is None:
+            self._plugins_cache = self.installed_plugins()
+        installed = self._plugins_cache
         dirs = plugin_dirs(by_type, installed) if by_type else []
         if dirs:
             self.log(f"[{task.id}] loading task plugins: {', '.join(Path(d).parent.name for d in dirs)}")
@@ -298,7 +330,8 @@ class Runner:
                            budget_usd=limit.budget_usd, timeout_s=limit.minutes * 60, cwd=wt,
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
                            extra_args=list(agent_cfg.extra_args), mcp=mcp, plugin_dirs=dirs,
-                           mcp_servers=inline, settings=settings)
+                           mcp_servers=inline, settings=settings, should_stop=self._claim_watch(task),
+                           claim_nonce=task.claim_nonce)
             result = self.adapter_factory(agent_cfg).run(spec)
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
