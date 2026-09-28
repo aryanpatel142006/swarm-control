@@ -173,16 +173,36 @@ class Server:
         return n
 
     def promote(self) -> int:
-        done = {t.id for t in self.board.list_tasks(status=[Status.DONE])}
+        """Backlog → Ready once every dependency is Done. A Cut dependency counts as resolved (the worker is told);
+        a dependency id that does not exist blocks the task with one question instead of waiting forever."""
+        tasks = self.board.list_tasks()
+        by_id = {t.id: t for t in tasks}
         ctx = None
         n = 0
-        for t in self.board.list_tasks(status=[Status.BACKLOG]):
-            if t.depends_on and not all(d in done for d in t.depends_on):
+        for t in [x for x in tasks if x.status is Status.BACKLOG]:
+            missing = [d for d in t.depends_on if d not in by_id]
+            if missing:
+                t.status = Status.BLOCKED
+                self.board.update_task(t, ["status"])
+                self.board.create_question(Question(
+                    id="", text=f"{t.id} depends on {', '.join(missing)}, which does not exist. Fix the dependency or drop it?",
+                    kind="blocking", options=["drop the dependency", "cut"], impact="medium", task_id=t.id,
+                    asked_by="serve"))
+                self.log(f"[{t.id}] unknown dependency {', '.join(missing)} → blocked")
                 continue
+            if not all(by_id[d].status in (Status.DONE, Status.CUT) for d in t.depends_on):
+                continue
+            cut = [d for d in t.depends_on if by_id[d].status is Status.CUT]
+            fields = ["status", "agent", "model", "effort"]
+            if cut:
+                t.feedback = (t.feedback.rstrip() + "\n\n" if t.feedback.strip() else "") + (
+                    f"Dependency {', '.join(cut)} was cut. Build this task without it; stub or skip what it would "
+                    "have provided and say so in your report.")
+                fields.append("feedback")
             ctx = ctx or context_from_board(self.board, self.cfg, self.now())
             t.agent, t.model, t.effort = route(t, self.cfg, ctx)
             t.status = Status.READY
-            self.board.update_task(t, ["status", "agent", "model", "effort"])
+            self.board.update_task(t, fields)
             ctx.queue_depth[t.agent] = ctx.queue_depth.get(t.agent, 0) + 1
             self.log(f"[{t.id}] promoted → {t.agent}/{t.model}")
             n += 1

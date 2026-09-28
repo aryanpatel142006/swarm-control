@@ -284,3 +284,21 @@ def test_serve_runs_a_retro_once_when_a_milestone_completes(cfg, git_repo, tmp_p
     srv.tick()
     assert len(calls) == 1                  # once for M1, not every tick
     assert "M1" in srv.retro_state.read_text()
+
+
+def test_promote_treats_a_cut_dependency_as_resolved_and_blocks_on_an_unknown_one(cfg, git_repo, tmp_path):
+    """A dependent of a cut task used to wait in Backlog forever, so its milestone (and the retro) never finished."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    cut = board.create_task(Task(id="", title="dropped", status=Status.CUT, agent="claude-a", type="backend"))
+    dep = board.create_task(Task(id="", title="needs it", status=Status.BACKLOG, type="backend", depends_on=[cut.id]))
+    ghost = board.create_task(Task(id="", title="typo dep", status=Status.BACKLOG, type="backend", depends_on=["T-999"]))
+    srv.promote()
+    d = board.get_task(dep.id)
+    assert d.status is Status.READY and cut.id in d.feedback and "cut" in d.feedback.lower()
+    g = board.get_task(ghost.id)
+    assert g.status is Status.BLOCKED
+    qs = [q for q in board.list_questions(status="Open") if q.task_id == ghost.id]
+    assert len(qs) == 1 and "T-999" in qs[0].text
+    srv.promote()
+    assert len([q for q in board.list_questions(status="Open") if q.task_id == ghost.id]) == 1   # asked once
