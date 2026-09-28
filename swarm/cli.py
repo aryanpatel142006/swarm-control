@@ -19,7 +19,8 @@ from .models import IMPORTANCES, SIZES, TASK_TYPES, AgentRow, Status, Task, utcn
 app = typer.Typer(help="swarm-control: Notion board + git worktrees + headless coding agents.",
                   no_args_is_help=True)
 console = Console()
-TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "template"
+TEMPLATE_DIR = Path(__file__).resolve().parent / "template"   # package data: ships with pip install
+SKILLS_DIR = Path(__file__).resolve().parent / "skills"       # vendored worker skills; copied into <project>/.claude/skills
 
 
 class State:
@@ -464,6 +465,13 @@ def template(dest: Path):
     if dest.exists() and any(dest.iterdir()):
         raise typer.Exit(code=_fail(f"{dest} is not empty"))
     shutil.copytree(TEMPLATE_DIR, dest, dirs_exist_ok=True, symlinks=True)
+    # skills live outside the template in the package (wheels drop dot-directories and symlinks): Claude reads
+    # .claude/skills, Codex reads .agents/skills, so one copy plus a relative symlink
+    shutil.copytree(SKILLS_DIR, dest / ".claude" / "skills", dirs_exist_ok=True)
+    (dest / ".agents").mkdir(exist_ok=True)
+    link = dest / ".agents" / "skills"
+    if not link.exists() and not link.is_symlink():
+        os.symlink(Path("..") / ".claude" / "skills", link)
     for script in (dest / "scripts").glob("*.sh"):
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
     console.print(f"template copied to {dest}. Next: edit .swarm/config.yaml, then `swarm doctor`.")

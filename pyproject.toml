@@ -20,11 +20,14 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 swarm = "swarm.cli:app"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["swarm*"]
 
 [tool.setuptools.package-data]
-swarm = ["assets/*.png"]
+swarm = ["assets/*.png", "prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

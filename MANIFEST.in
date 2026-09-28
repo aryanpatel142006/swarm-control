@@ -1,0 +1,5 @@
+graft swarm/template
+graft swarm/prompts
+graft swarm/assets
+graft swarm/skills
+global-exclude __pycache__ *.pyc

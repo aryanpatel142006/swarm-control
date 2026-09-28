@@ -10,7 +10,7 @@ from .models import Task
 from .report import REPORT_SCHEMA
 
 DOC_CHAR_CAP = 12000
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"   # package data: ships with pip install
 
 
 def load_rules() -> str:
