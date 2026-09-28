@@ -126,7 +126,7 @@ class Planner:
         result = self.adapter_factory(agent_cfg).run(spec)
         if self.ledger is not None:   # the planner's spend is part of the project's bill too
             label = f"plan:{milestone}" if milestone else (f"split:{split_of.id}" if split_of else "plan")
-            self.ledger.append(agent=role.agent, model=spec.model, task_id=label, usage=result.usage,
+            self.ledger.append(agent=role.agent, model=spec.model, task_id=label, usage=result.usage, role="planner",
                                duration_s=time.monotonic() - started, ok=result.ok)
         if not result.ok and result.structured_output is None:
             raise RuntimeError(f"planner run failed: {result.error[:300]}")

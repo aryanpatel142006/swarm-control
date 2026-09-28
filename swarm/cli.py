@@ -153,6 +153,30 @@ def tools(install: bool = typer.Option(False, "--install", help="install missing
 
 
 @app.command()
+def usage():
+    """Where the tokens went: spend by role, per task, cache write vs read, and waste (retries, re-reviews)."""
+    from .usage import Ledger, default_ledger_path, usage_report
+    board = make_board(_cfg(), state.memory)
+    done = [t.id for t in board.list_tasks(status=[Status.DONE])]
+    r = usage_report(Ledger(default_ledger_path(_cfg().project)), done=done)
+    console.print(f"[bold]${r['total_cost']:.2f}[/bold] over {r['runs']} runs · "
+                  + " · ".join(f"{k} ${v:.2f}" for k, v in r["by_role"].items())
+                  + (f" · ${r['cost_per_done_task']:.2f} per merged task" if r["cost_per_done_task"] is not None else ""))
+    w = r["waste"]
+    console.print(f"waste ${w['total']:.2f}: failed runs ${w['failed_runs']:.2f} · extra attempts ${w['extra_attempts']:.2f}"
+                  f" · extra review rounds ${w['extra_review_rounds']:.2f}")
+    c = r["cache"]
+    if c["write"] or c["read"]:
+        console.print(f"cache: {c['write']:,} tokens written · {c['read']:,} read "
+                      f"({100 * c['read'] / max(1, c['write'] + c['read']):.0f}% of prompt tokens served from cache)")
+    table = Table("task", "cost", "worker runs", "failed", "reviews", "models", "minutes")
+    for t in sorted(r["tasks"], key=lambda x: x["task"]):
+        table.add_row(t["task"], f"${t['cost']:.2f}", str(t["worker_runs"]), str(t["failed_runs"]), str(t["review_runs"]),
+                      ", ".join(t["models"]), f"{t['seconds'] / 60:.1f}")
+    console.print(table)
+
+
+@app.command()
 def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page id that holds the databases")):
     """Create the Notion databases, board views, and status page; save ids to .swarm/notion.yaml."""
     from .board.notion import NotionBoard, NotionClient

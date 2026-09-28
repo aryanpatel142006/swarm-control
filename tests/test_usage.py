@@ -38,3 +38,33 @@ def test_ledger_records_cache_tokens(tmp_path):
     assert row["cache_w"] == 7000 and row["cache_r"] == 90000
     t = led.totals("a")
     assert t.cache_write_tokens == 7000 and t.cache_read_tokens == 90000
+
+
+def test_ledger_rows_carry_a_role(tmp_path):
+    led = Ledger(tmp_path / "usage.jsonl")
+    led.append(agent="a", model="m", task_id="T-1", usage=Usage(1, 1, 0.1), duration_s=1, ok=True)
+    led.append(agent="a", model="m", task_id="T-1", usage=Usage(1, 1, 0.2), duration_s=1, ok=True, role="reviewer")
+    rows = led._rows()
+    assert rows[0]["role"] == "worker" and rows[1]["role"] == "reviewer"
+
+
+def test_usage_report_splits_spend_and_waste(tmp_path):
+    from swarm.usage import usage_report
+    led = Ledger(tmp_path / "usage.jsonl")
+    now = utcnow()
+    led.append(agent="p", model="opus", task_id="plan:M1", usage=Usage(10, 5, 1.0), duration_s=60, ok=True, role="planner", now=now)
+    led.append(agent="a", model="sonnet", task_id="T-1", usage=Usage(10, 5, 0.5, cache_write_tokens=1000, cache_read_tokens=9000), duration_s=60, ok=True, now=now)
+    led.append(agent="a", model="sonnet", task_id="T-1", usage=Usage(1, 1, 0.1), duration_s=10, ok=True, role="reviewer", now=now)
+    led.append(agent="a", model="opus", task_id="T-2", usage=Usage(10, 5, 0.3), duration_s=5, ok=False, now=now)     # spawn failure
+    led.append(agent="a", model="opus", task_id="T-2", usage=Usage(10, 5, 0.9, cache_write_tokens=500, cache_read_tokens=500), duration_s=90, ok=True, now=now)
+    led.append(agent="a", model="sonnet", task_id="T-2", usage=Usage(1, 1, 0.1), duration_s=10, ok=True, role="reviewer", now=now)
+    led.append(agent="a", model="sonnet", task_id="T-2", usage=Usage(1, 1, 0.1), duration_s=10, ok=True, role="reviewer", now=now)
+    r = usage_report(led, done=["T-1", "T-2"])
+    assert r["total_cost"] == 3.0 and r["by_role"] == {"planner": 1.0, "worker": 1.7, "reviewer": 0.3}
+    assert r["cost_per_done_task"] == 1.5
+    t2 = {t["task"]: t for t in r["tasks"]}["T-2"]
+    assert t2["worker_runs"] == 2 and t2["review_runs"] == 2 and t2["cost"] == 1.4
+    # waste = failed runs + worker attempts beyond the first + review rounds beyond the first
+    assert r["waste"]["failed_runs"] == 0.3 and r["waste"]["extra_review_rounds"] == 0.1 and r["waste"]["total"] == 0.4
+    assert r["cache"]["write"] == 1500 and r["cache"]["read"] == 9500
+    assert t2["models"] == ["opus", "sonnet"]

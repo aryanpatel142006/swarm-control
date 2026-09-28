@@ -100,7 +100,7 @@ class Reviewer:
             started = time.time()
             result = self.adapter_factory(agent_cfg).run(spec)
             if self.ledger is not None:
-                self.ledger.append(agent=role.agent, model=spec.model, task_id=task.id, usage=result.usage,
+                self.ledger.append(agent=role.agent, model=spec.model, task_id=task.id, usage=result.usage, role="reviewer",
                                    duration_s=time.time() - started, ok=result.ok)
             if not result.ok and result.structured_output is None:
                 return Verdict("escalate", f"reviewer run failed: {result.error[:300]}", [])
