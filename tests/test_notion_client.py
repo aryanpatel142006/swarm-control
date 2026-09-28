@@ -391,3 +391,22 @@ def test_asset_urls_change_path_when_the_art_changes(monkeypatch):
     assert notion.default_assets_base(git=lambda: "").endswith("/swarm-control/main/swarm/assets/")
     monkeypatch.setenv("SWARM_ASSETS_URL", "https://cdn.example/x/")
     assert notion.default_assets_base(git=lambda: "9f0e1d2") == "https://cdn.example/x/"
+
+
+def test_decorate_keeps_the_icon_when_covers_are_refused(tmp_path):
+    """Inline databases refuse covers; the icon must still land instead of the whole decoration failing."""
+    from swarm.board.notion import decorate_object
+    calls = []
+
+    def handler(req: httpx.Request):
+        body = json.loads(req.content)
+        calls.append(body)
+        if "cover" in body:
+            return httpx.Response(400, json={"code": "validation_error",
+                                             "message": "Cover images are not supported for inline databases."})
+        return httpx.Response(200, json={})
+
+    client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    out = decorate_object(client, "databases", "db1", "agents", __import__("swarm.board.notion", fromlist=["ASSETS_DIR"]).ASSETS_DIR, assets_url="https://x/")
+    assert out == "external"
+    assert "cover" in calls[0] and "cover" not in calls[-1] and calls[-1]["icon"]["type"] == "external"

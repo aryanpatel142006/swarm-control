@@ -281,12 +281,17 @@ def decorate_object(client: "NotionClient", kind: str, obj_id: str, key: str, as
     emoji, cover_url = DECOR[key]
     name = ASSET_KEY[key]
     if assets_url:
+        icon_url = asset_url(f"icon-{name}.png", assets_url)
         try:
-            client.decorate(kind, obj_id, icon_url=asset_url(f"icon-{name}.png", assets_url),
-                            cover_url=asset_url(f"banner-{name}.png", assets_url))
+            client.decorate(kind, obj_id, icon_url=icon_url, cover_url=asset_url(f"banner-{name}.png", assets_url))
             return "external"
-        except NotionError:
-            pass
+        except NotionError as e:
+            if "cover" in e.message.lower():   # inline databases take an icon but refuse covers
+                try:
+                    client.decorate(kind, obj_id, icon_url=icon_url)
+                    return "external"
+                except NotionError:
+                    pass
     icon_png = Path(assets_dir) / f"icon-{name}.png"
     banner_png = Path(assets_dir) / f"banner-{name}.png"
     if icon_png.exists() and banner_png.exists():
