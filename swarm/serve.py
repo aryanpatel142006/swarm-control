@@ -416,7 +416,17 @@ class Server:
         return summary
 
     def loop(self, stop: Callable[[], bool] = lambda: False) -> None:
-        if not self.acquire_lock():
+        for attempt in range(1, 9):   # the board may be unreachable at startup (Wi-Fi, Notion outage)
+            try:
+                locked = self.acquire_lock()
+                break
+            except Exception as e:  # noqa: BLE001
+                wait = min(300, 15 * 2 ** (attempt - 1))
+                self.log(f"serve: board unreachable at startup ({type(e).__name__}); retrying in {wait}s")
+                self.sleep(wait)
+        else:
+            raise SystemExit("serve: board unreachable for too long at startup")
+        if not locked:
             raise SystemExit("another swarm serve is running; stop it first or wait for its heartbeat to go stale")
         self.write_status(force=True)
         while not stop():

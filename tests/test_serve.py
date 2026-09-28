@@ -324,3 +324,19 @@ def test_dependency_cycle_finder_is_linear_on_wide_graphs():
     assert _t.monotonic() - t0 < 1.0
     tasks[0].depends_on = ["T-299"]
     assert len(_dependency_cycles(tasks)) == 1
+
+
+def test_serve_startup_retries_when_the_board_is_unreachable(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    calls, sleeps = {"n": 0}, []
+    real = srv.acquire_lock
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("Notion unreachable")
+        return real()
+    srv.acquire_lock = flaky
+    srv.sleep = sleeps.append
+    srv.loop(stop=lambda: True)
+    assert calls["n"] == 3 and sleeps[:2] == [15, 30]
