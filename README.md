@@ -13,7 +13,7 @@ export NOTION_TOKEN=...      # internal connection token
 export SWARM_HOST=laptop-a   # your name in config.hosts
 ```
 
-Requirements: Python 3.11+, `git`, `gh` (logged in), and whichever agent CLIs you use (`claude`, `codex`, `agy`, `gemini`, `grok`, or anything via the generic adapter).
+Requirements: Python 3.11+, `git`, `gh` (logged in), and whichever agent CLIs you use (`claude`, `codex`, `gemini`, `agy`, `grok`, or anything via the generic adapter). Gemini: `brew install gemini-cli`, run `gemini` once in a real terminal and pick "Login with Google" (the AI Pro subscription gives Flash; Pro needs a billed API key), then `swarm doctor --smoke gemini-a`.
 
 ## For a teammate joining (second laptop)
 

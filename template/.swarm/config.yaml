@@ -32,7 +32,7 @@ task_limits:
   L: { turns: 120, minutes: 75, budget_usd: 20 }
 
 hosts:
-  laptop-a: { max_parallel: { claude: 3, codex: 3, antigravity: 2, grok: 1, generic: 2 } }
+  laptop-a: { max_parallel: { claude: 3, codex: 3, gemini: 1, antigravity: 2, grok: 1, generic: 2 } }
   laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, generic: 2 } }
 
 routing:
@@ -119,6 +119,16 @@ agents:
     strengths: { frontend: 3, backend: 5, realtime: 5, ml_audio: 3, ml_vision: 3, ml_fusion: 3,
                  eval: 4, tests: 5, docs: 3, research: 3, bugfix: 4, integration: 4, infra: 5 }
     sandbox: workspace-write      # danger-full-access if tests need network
+  gemini-a:                       # Google AI Pro subscription through the Gemini CLI (brew install gemini-cli; log in
+    provider: gemini              # once in a real terminal with "Login with Google"). Measured Sep 28 2026: Flash answers in
+    host: laptop-a                # 2-5 s, Pro is over quota on the subscription, and the quota runs out after about one
+    parallel: 1                   # task per burst (the harness then cools it down 15 min and reroutes). A spare, not a
+    models: { best: gemini-3-flash-preview, high: gemini-3-flash-preview, mid: gemini-3-flash-preview, low: gemini-3.1-flash-lite }
+    effort: { best: high, high: high, mid: medium, low: low }          # third full worker; a billed GEMINI_API_KEY lifts the quota.
+    strengths: { frontend: 2, backend: 3, realtime: 2, ml_audio: 2, ml_vision: 3, ml_fusion: 2,
+                 eval: 3, tests: 3, docs: 4, research: 4, bugfix: 2, integration: 2, infra: 2 }
+    experimental: true
+
   codex-b:
     provider: codex
     host: laptop-b
