@@ -86,6 +86,10 @@ Workers get the tools their task type needs and nothing else, on both CLIs:
 - **MCP servers.** `mcp_by_type` / `mcp_by_importance` / `agents.<name>.mcp` pick servers per run. Claude gets exactly those via `--mcp-config … --strict-mcp-config` (definitions come from `claude mcp list`, installed plugins, or inline `mcp_servers`); Codex gets `-c mcp_servers.<name>.enabled=true` for servers registered once with `codex mcp add`.
 - **Feedback loop.** Every report carries `tools_used` (skill / MCP server / plugin, helped or not), which the harness writes into `docs/decisions/<id>.md` next to the worker's decisions, so after a few tasks you can see which tools earn their context and promote them in config. Critical tasks are also told they may install a further official plugin mid-run and must log it there. `swarm tools` shows the whole picture for this laptop.
 
+## Self-improvement
+
+The swarm learns from its own runs. When every task of a milestone is Done or Cut, `swarm serve` runs a retro (`swarm retro` runs it by hand, `--dry-run` only prints). It reads the board, the usage ledger, main's history and the decision logs, applies fixed rules and writes two things to main: `docs/LESSONS.md`, a short list that every worker brief and the planner include (undersized tasks, files fought over by several tasks, review-heavy work), and `.swarm/tuning.yaml`, safe config changes merged over `config.yaml` on load (a cheap model that keeps hitting the turn limit on a task type raises that type's floor; a tool that helped on two tasks of a type becomes its default). Each retro also leaves a report in `docs/retro/`. Delete a line from `tuning.yaml` to undo a change.
+
 ## Adding a provider
 
 Use `provider: generic` with a `command_template` such as `mycli --prompt-file {prompt_file} --model {model} --cwd {cwd}`. The model must write its report to `.swarm-run/report.json`. For a first-class adapter, subclass `swarm.adapters.base.Adapter`.

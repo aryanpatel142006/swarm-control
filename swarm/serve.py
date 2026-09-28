@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import re
 import threading
+import json
 import time
+from pathlib import Path
 from datetime import timedelta
 from typing import Callable
 
@@ -26,6 +28,9 @@ class Server:
         self.now, self.sleep, self.log, self.host = now, sleep, log, host
         self.status_every_s, self.review_batch, self.background = status_every_s, review_batch, background
         self._last_status = None
+        # self-improvement: a retro per completed milestone (lessons + tuning committed to main)
+        self.retro_state = Path.home() / ".swarm" / cfg.project / "retro.json"
+        self.retro = self._default_retro
         self._holds_lock = False
         self._slow_thread: threading.Thread | None = None
         self._slow_summary = {"reviewed": 0, "merged": 0}
@@ -278,6 +283,41 @@ class Server:
         self._step(summary, "merged", self.merge_pending)
         self._slow_summary = summary
 
+    # ----- self-improvement -----
+    def _default_retro(self):
+        from .retro import run_retro
+        from .usage import Ledger, default_ledger_path
+        ledger = Ledger(default_ledger_path(self.cfg.project), board=(self.cfg.notion.tasks_ds or "")[:8])
+        return run_retro(self.cfg, self.board, self.ws, ledger=ledger, log=self.log)
+
+    def maybe_retro(self) -> int:
+        """When every task of a milestone is Done or Cut (and at least one is Done), run the retro once for it."""
+        tasks = self.board.list_tasks()
+        by_ms: dict[str, list[Task]] = {}
+        for t in tasks:
+            if t.milestone:
+                by_ms.setdefault(t.milestone, []).append(t)
+        done_before: list[str] = []
+        try:
+            done_before = json.loads(self.retro_state.read_text()) if self.retro_state.exists() else []
+        except (OSError, ValueError):
+            done_before = []
+        ran = 0
+        for ms, group in sorted(by_ms.items()):
+            if ms in done_before:
+                continue
+            if all(t.status in (Status.DONE, Status.CUT) for t in group) and any(t.status is Status.DONE for t in group):
+                self.log(f"milestone {ms} complete → retro")
+                self.retro()
+                done_before.append(ms)
+                ran += 1
+                try:
+                    self.retro_state.parent.mkdir(parents=True, exist_ok=True)
+                    self.retro_state.write_text(json.dumps(done_before))
+                except OSError:
+                    pass
+        return ran
+
     def tick(self) -> dict:
         summary: dict = {"errors": 0}
         self._step(summary, "lock", lambda: (self.heartbeat_lock(), 0)[1])
@@ -300,6 +340,7 @@ class Server:
             self._step(summary, "merged", self.merge_pending)
         self._step(summary, "rerouted", self.reroute)
         self._step(summary, "rebalanced", self.rebalance)
+        self._step(summary, "retro", self.maybe_retro)
         self._step(summary, "status", lambda: 1 if self.write_status() else 0)
         summary.pop("lock", None)
         return summary

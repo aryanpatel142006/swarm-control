@@ -192,6 +192,17 @@ def usage(since: str = typer.Option(None, "--since", help="only runs after this 
 
 
 @app.command()
+def retro(dry_run: bool = typer.Option(False, "--dry-run", help="print the findings; write and commit nothing")):
+    """Learn from this board: lessons into docs/LESSONS.md, safe config changes into .swarm/tuning.yaml, report in docs/retro/."""
+    from .retro import run_retro
+    from .usage import Ledger, default_ledger_path
+    cfg = _cfg()
+    ledger = Ledger(default_ledger_path(cfg.project), board=(cfg.notion.tasks_ds or "")[:8])
+    found = run_retro(cfg, make_board(cfg, state.memory), _workspace(cfg), ledger=ledger, log=console.print, dry_run=dry_run)
+    console.print(f"{len(found)} findings" + (" (dry run)" if dry_run else ""))
+
+
+@app.command()
 def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page id that holds the databases")):
     """Create the Notion databases, board views, and status page; save ids to .swarm/notion.yaml."""
     from .board.notion import NotionBoard, NotionClient

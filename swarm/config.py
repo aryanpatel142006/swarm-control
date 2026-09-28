@@ -153,10 +153,24 @@ def _role(raw, agents: dict[str, AgentConfig], key: str) -> RoleConfig | None:
     return RoleConfig(agent=raw["agent"], model=str(raw.get("model", "")), effort=raw.get("effort"))
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Mappings merge recursively; anything else (lists, scalars) in the overlay replaces the base value."""
+    out = dict(base)
+    for k, v in (overlay or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def load_config(path: Path | str) -> Config:
     path = Path(path).resolve()
     raw = yaml.safe_load(path.read_text()) or {}
     repo_root = path.parent.parent
+    tuning_file = path.parent / "tuning.yaml"   # written by `swarm retro`; overlays config.yaml, comments survive
+    if tuning_file.exists():
+        raw = _deep_merge(raw, yaml.safe_load(tuning_file.read_text()) or {})
     notion_raw = {}
     notion_file = path.parent / "notion.yaml"
     if notion_file.exists():

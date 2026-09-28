@@ -266,3 +266,21 @@ def test_status_page_failure_does_not_stop_the_loop(cfg, git_repo, tmp_path):
     assert srv.write_status(force=True) is None
     assert sum("status page" in line for line in logs) == 1   # logged once, not every tick
     srv.tick()   # still alive
+
+
+def test_serve_runs_a_retro_once_when_a_milestone_completes(cfg, git_repo, tmp_path):
+    """Self-improvement runs on its own: when every task of a milestone is Done or Cut, serve calls the retro once."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    srv.retro_state = tmp_path / "retro.json"
+    calls = []
+    srv.retro = lambda: calls.append(clock["now"]) or []
+    t1 = board.create_task(Task(id="", title="a", status=Status.RUNNING, agent="claude-a", milestone="M1"))
+    t2 = board.create_task(Task(id="", title="b", status=Status.DONE, agent="claude-a", milestone="M1"))
+    board.create_task(Task(id="", title="c", status=Status.READY, agent="claude-a", milestone="M2"))
+    srv.tick()
+    assert calls == []                      # M1 still has a running task
+    t1 = board.get_task(t1.id); t1.status = Status.CUT; board.update_task(t1, ["status"])
+    srv.tick()
+    srv.tick()
+    assert len(calls) == 1                  # once for M1, not every tick
+    assert "M1" in srv.retro_state.read_text()

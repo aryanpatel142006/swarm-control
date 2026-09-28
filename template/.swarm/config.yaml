@@ -84,7 +84,7 @@ mcp_servers:                         # inline definitions win over discovered on
 # in docs/decisions/<id>.md, so you can promote it to plugins_by_type / skills_by_type for the whole task type.
 
 docs_by_type:               # what gets inlined into a worker's prompt; everything else is referenced by path
-  _all:        [PLAN.md#summary]   # AGENTS.md is auto-loaded by every CLI (via CLAUDE.md / GEMINI.md), never inline it
+  _all:        [PLAN.md#summary, docs/LESSONS.md]   # AGENTS.md is auto-loaded by every CLI; LESSONS.md is what `swarm retro` learned
   frontend:    [docs/DESIGN.md, docs/CONTRACTS.md]
   backend:     [docs/CONTRACTS.md, docs/ARCHITECTURE.md]
   realtime:    [docs/CONTRACTS.md, docs/ARCHITECTURE.md]

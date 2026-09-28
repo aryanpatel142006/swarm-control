@@ -29,7 +29,7 @@ TASKS_SCHEMA = {
             "scope": {"type": "array", "items": {"type": "string"}},
         }}}},
 }
-PLAN_DOCS = ["docs/ARCHITECTURE.md", "docs/DESIGN.md", "docs/CONTRACTS.md"]
+PLAN_DOCS = ["docs/ARCHITECTURE.md", "docs/DESIGN.md", "docs/CONTRACTS.md", "docs/LESSONS.md"]
 PLAN_TURNS = 40
 PLAN_TIMEOUT_S = 20 * 60
 
