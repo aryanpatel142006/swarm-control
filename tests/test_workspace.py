@@ -177,3 +177,22 @@ def test_pr_info_and_merge_by_url(git_repo, tmp_path):
     assert info["state"] == "OPEN" and info["headRefOid"] == "abc123"
     assert ws.pr_state("https://gh/pr/21") == ("MERGEABLE", "CLEAN")
     assert ws.pr_merge("https://gh/pr/21").ok and calls[-1][:3] == ["pr", "merge", "https://gh/pr/21"]
+
+
+def test_fetch_retries_on_a_ref_lock_and_serializes(git_repo, tmp_path):
+    """Two workers and serve fetching one repo at once: 'cannot lock ref' crashed a runner in night cycle 1."""
+    from swarm.workspace import Workspace
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    calls = []
+    real = ws.git
+
+    def flaky(path, *args, **kw):
+        if args[:1] == ("fetch",):
+            calls.append(args)
+            if len(calls) == 1:
+                return CmdResult(1, "", "error: cannot lock ref 'refs/remotes/origin/task/T-025': is at abc but expected def")
+        return real(path, *args, **kw)
+    ws.git = flaky
+    ws.sleep = lambda s: None
+    ws.fetch()
+    assert len(calls) == 2

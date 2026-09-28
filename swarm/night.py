@@ -251,6 +251,7 @@ class Night:
             p = self.night_dir / f"{name}.log"
             if p.exists():
                 tails.append(f"### {name} log (tail)\n```\n" + "\n".join(p.read_text(errors='replace').splitlines()[-80:]) + "\n```")
+        self.sh(["git", "pull", "-q", "--rebase", "origin", "main"])   # the retro commits to main, not this checkout
         retro = sorted((self.project_dir / "docs" / "retro").glob("*.md"))
         retro_text = retro[-1].read_text() if retro else "(no retro yet)"
         return (f"## Cycle {cycle} · {milestone_name(cycle)} · {plan_for(cycle)[0]}\n\n{report.done}/{report.total} tasks done; "
@@ -300,8 +301,9 @@ class Night:
         p.parent.mkdir(exist_ok=True)
         head = "" if p.exists() else "# Night log\n\nOne line per unattended cycle: what was built, what it cost, what the harness learned.\n\n"
         line = (f"- cycle {report.cycle} ({report.milestone}, {plan_for(report.cycle)[0]}): {report.done}/{report.total} done · "
-                f"{report.questions_answered} questions answered · improvement {'merged' if report.merged else 'rejected'}: "
-                f"{report.improvement[:160]}" + (f" · notes: {'; '.join(report.notes)}" if report.notes else "") + "\n")
+                f"{report.questions_answered} questions answered · "
+                + (f"improvement {'merged' if report.merged else 'rejected'}: " if self.improve_enabled else "")
+                + f"{report.improvement[:160]}" + (f" · notes: {'; '.join(report.notes)}" if report.notes else "") + "\n")
         p.write_text((p.read_text() if p.exists() else head) + line)
         self.sh(["git", "add", "docs/night"], cwd=HARNESS_ROOT); self.sh(["git", "commit", "-qm", f"night: cycle {report.cycle} summary"], cwd=HARNESS_ROOT)
         self.sh(["git", "push", "-q", "origin", "main"], cwd=HARNESS_ROOT)

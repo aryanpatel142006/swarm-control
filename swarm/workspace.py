@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import subprocess
+import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -58,8 +60,19 @@ class Workspace:
             raise RuntimeError(f"git {' '.join(args)} failed: {r.err.strip() or r.out.strip()}")
         return r
 
+    _fetch_lock = threading.Lock()   # one fetch at a time per process; parallel workers raced on ref locks
+
     def fetch(self) -> None:
-        self.git(self.repo_root, "fetch", "-q", self.remote)
+        """Fetch, serialized in-process and retried when another process holds a ref lock ("cannot lock ref")."""
+        sleep = getattr(self, "sleep", time.sleep)
+        with Workspace._fetch_lock:
+            for attempt in range(4):
+                r = self.git(self.repo_root, "fetch", "-q", self.remote, check=False)
+                if r.ok:
+                    return
+                if "lock" not in (r.err + r.out).lower() or attempt == 3:
+                    raise RuntimeError(f"git fetch -q {self.remote} failed: {r.err.strip() or r.out.strip()}")
+                sleep(2 * (attempt + 1))
 
     def worktree_path(self, task_id: str) -> Path:
         return self.worktree_root / task_id
