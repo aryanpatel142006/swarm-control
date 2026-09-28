@@ -90,6 +90,10 @@ Workers get the tools their task type needs and nothing else, on both CLIs:
 
 The swarm learns from its own runs. When every task of a milestone is Done or Cut, `swarm serve` runs a retro (`swarm retro` runs it by hand, `--dry-run` only prints). It reads the board, the usage ledger, main's history and the decision logs, applies fixed rules and writes two things to main: `docs/LESSONS.md`, a short list that every worker brief and the planner include (undersized tasks, files fought over by several tasks, review-heavy work), and `.swarm/tuning.yaml`, safe config changes merged over `config.yaml` on load (a cheap model that keeps hitting the turn limit on a task type raises that type's floor; a tool that helped on two tasks of a type becomes its default). Each retro also leaves a report in `docs/retro/`. Delete a line from `tuning.yaml` to undo a change.
 
+## Unattended practice runs
+
+`caffeinate -dims swarm night --cycles 6 --no-improve` runs practice cycles while you are away: each adds one small app to PLAN.md as a new milestone (Notecard, Quizlet-mini, Kanban-mini, Pomodoro-log, then repeats), lets every agent that is online build it, answers blocking questions on its own, waits for the milestone retro, and writes the cycle's log to `docs/night/`. Without `--no-improve` it also hands each log to a fresh Claude session that makes one tested change to the harness on a `night/<n>` branch, merged only when the suite is green. Keep the laptop plugged in with the lid open; `swarm doctor` warns if it can sleep.
+
 ## Adding a provider
 
 Use `provider: generic` with a `command_template` such as `mycli --prompt-file {prompt_file} --model {model} --cwd {cwd}`. The model must write its report to `.swarm-run/report.json`. For a first-class adapter, subclass `swarm.adapters.base.Adapter`.
