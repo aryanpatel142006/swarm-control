@@ -340,3 +340,11 @@ def test_serve_startup_retries_when_the_board_is_unreachable(cfg, git_repo, tmp_
     srv.sleep = sleeps.append
     srv.loop(stop=lambda: True)
     assert calls["n"] == 3 and sleeps[:2] == [15, 30]
+
+
+def test_reroute_moves_critical_work_off_an_offline_agent(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="codex-a", status="offline", last_heartbeat=utcnow() - timedelta(minutes=40)))
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    t = board.create_task(Task(id="", title="api", status=Status.READY, agent="codex-a", type="backend", importance="critical"))
+    assert srv.reroute() == 1 and board.get_task(t.id).agent == "claude-a"

@@ -282,7 +282,7 @@ class Server:
             unknown = t.agent not in self.cfg.agents
             cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
             offline = bool(row and row.status == "offline")
-            if not unknown and not ((cooling or offline) and t.importance != "critical"):
+            if not unknown and not offline and not (cooling and t.importance != "critical"):
                 continue
             agent, model, effort = route(t, self.cfg, ctx)
             if agent == t.agent:

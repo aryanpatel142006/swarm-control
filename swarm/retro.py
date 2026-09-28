@@ -36,6 +36,8 @@ class Evidence:
     tools_by_task: dict[str, list[dict]]       # tools_used entries from docs/decisions/<id>.md
     agents: dict[str, str]                     # agent name -> provider
     models_by_agent: dict[str, dict[str, str]] = field(default_factory=dict)   # agent -> tier -> model
+    known_skills: set[str] | None = None       # skills that exist (project + plugins); None: accept any
+    known_mcp: set[str] | None = None          # MCP servers the config can start; None: accept any
 
 
 def _tier_of(models: dict[str, str], model: str) -> str | None:
@@ -110,8 +112,13 @@ def findings_from(ev: Evidence) -> list[Finding]:
         if not t:
             continue
         for tool in tools:
-            if tool.get("helped") and tool.get("name"):
-                helped[(t.type, str(tool.get("kind") or "skill"), tool["name"])].add(tid)
+            kind, name = str(tool.get("kind") or "skill"), str(tool.get("name") or "")
+            if not tool.get("helped") or not name or kind not in ("skill", "mcp"):
+                continue   # plain CLIs (git, pytest) and built-in tools are not config
+            known = ev.known_skills if kind == "skill" else ev.known_mcp
+            if known is not None and name not in known:
+                continue
+            helped[(t.type, kind, name)].add(tid)
     patch: dict[str, list[str]] = {}
     texts = []
     for (ttype, kind, name), ids in sorted(helped.items()):
@@ -232,7 +239,15 @@ def run_retro(cfg, board, ws, *, ledger: Ledger, log=print, dry_run: bool = Fals
     now = now or datetime.now(timezone.utc)
     wt = ws.main_worktree()
     board_id = (cfg.notion.tasks_ds or "")[:8]
-    ev = Evidence(tasks=board.list_tasks(), ledger=ledger, board=board_id,
+    known_skills = {p.parent.name for p in (wt / ".claude" / "skills").glob("*/SKILL.md")}
+    known_skills |= {p.parent.name for p in (Path.home() / ".claude" / "plugins" / "cache").glob("*/*/*/skills/*/SKILL.md")}
+    known_mcp = set(cfg.mcp_servers) | {m for v in cfg.mcp_by_type.values() for m in v} | {m for v in cfg.mcp_by_importance.values() for m in v}
+    try:
+        from .tools import all_mcp_servers
+        known_mcp |= set(all_mcp_servers())
+    except Exception:  # noqa: BLE001 - discovery is best effort
+        pass
+    ev = Evidence(tasks=board.list_tasks(), ledger=ledger, board=board_id, known_skills=known_skills, known_mcp=known_mcp,
                   files_by_task=files_by_task_from_git(ws, wt, ws._main_ref()),
                   tools_by_task=tools_by_task_from_logs(wt),
                   agents={a.name: a.provider for a in cfg.agents.values()},

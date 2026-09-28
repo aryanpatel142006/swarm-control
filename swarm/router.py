@@ -56,8 +56,8 @@ def is_available(agent: AgentConfig, row: AgentRow | None, *, importance: str, n
     if row.status == "offline" and row.last_heartbeat is None:
         return False  # never checked in: only in config, no runner behind it yet
     critical = importance == "critical"
-    if row.status == "offline" and not critical:
-        return False
+    if row.status == "offline":
+        return False  # nobody is there to run it, whatever the importance (night cycle 3 stalled on this)
     if row.cooldown_until and row.cooldown_until > now and not critical:
         return False
     if (agent.soft_cap_5h_usd and importance in ("normal", "low")

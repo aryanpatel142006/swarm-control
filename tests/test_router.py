@@ -118,3 +118,13 @@ def test_route_falls_back_to_a_live_agent_over_its_soft_cap_before_a_dead_one(cf
     ctx = RouteContext(rows=rows, queue_depth={}, scopes_by_agent={}, now=now)
     agent, _, _ = route(Task(id="T-1", title="x", type="backend", importance="low"), cfg, ctx)
     assert agent == "claude-a"
+
+
+def test_critical_work_never_goes_to_an_offline_agent(cfg):
+    """Night cycle 3: the critical API task sat 75 min on an offline codex agent; everything behind it stalled.
+    Critical may ignore a cooldown or a soft cap, never an offline runner."""
+    now = utcnow()
+    rows = {"codex-a": AgentRow(name="codex-a", status="offline", last_heartbeat=now - timedelta(minutes=40)),
+            "claude-a": AgentRow(name="claude-a", status="idle", last_heartbeat=now)}
+    t = Task(id="T-9", title="", type="backend", importance="critical")
+    assert route(t, cfg, ctx(rows=rows, now=now))[0] == "claude-a"

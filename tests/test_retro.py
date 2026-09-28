@@ -159,3 +159,17 @@ def test_run_retro_writes_lessons_and_tuning_to_main(cfg, git_repo, tmp_path):
     run_retro(cfg, board, ws, ledger=led, log=logs.append, dry_run=True)
     after = subprocess.run(["git", "-C", str(git_repo), "rev-parse", "origin/main"], capture_output=True, text=True).stdout
     assert before == after
+
+
+def test_tool_defaults_only_promote_real_skills_and_known_mcp_servers(tmp_path):
+    """Workers labelled Bash, Edit, git and pytest as skills; the retro wrote them into skills_by_type."""
+    tasks = [Task(id=f"T-{i}", title="x", type="backend", status=Status.DONE, attempts=1) for i in (1, 2)]
+    tools = {f"T-{i}": [{"name": "git", "kind": "cli", "helped": True}, {"name": "Bash", "kind": "skill", "helped": True},
+                        {"name": "test-driven-development", "kind": "skill", "helped": True},
+                        {"name": "context7", "kind": "mcp", "helped": True}, {"name": "made-up", "kind": "mcp", "helped": True}]
+             for i in (1, 2)}
+    ev = Evidence(tasks=tasks, ledger=Ledger(tmp_path / "u.jsonl", board="b"), board="b", files_by_task={},
+                  tools_by_task=tools, agents={"claude-a": "claude"},
+                  known_skills={"test-driven-development", "frontend-design"}, known_mcp={"context7", "playwright"})
+    f = {x.rule: x for x in findings_from(ev)}
+    assert f["tool-default"].patch == {"skills_by_type.backend+": ["test-driven-development"], "mcp_by_type.backend+": ["context7"]}
