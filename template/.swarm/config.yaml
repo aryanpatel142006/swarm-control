@@ -41,7 +41,7 @@ routing:
   type_model_overrides:
     # Evidence-based exception: WebDev Arena (Sep 25 2026, ~795k votes) ranks Opus 5.5 #1 for frontend,
     # GPT-6 Astra #2, Fable 5.1 #3. So critical frontend runs Opus, and Fable is kept for long-horizon work.
-    claude: { frontend: { best: opus } }
+    claude: { frontend: { best: opus, low: sonnet } }   # never Haiku on a page: Roomcast T-013 burned 3 runs at the turn limit
 
 # ---- Toolbox: plugins, skills and MCP servers -------------------------------------------------------------
 # `swarm tools --install` sets a laptop up; the runner also installs a task's plugins right before its first

@@ -12,3 +12,5 @@ Rules for good tasks:
 - Do not repeat tasks that already exist (they are listed). Plan the requested milestone in detail and later milestones only as a few coarse L tasks.
 
 Your final answer is the JSON object described at the end. If your CLI cannot return structured output, write it to `.swarm-run/plan.json`.
+
+- Shared documents (docs/DESIGN.md, docs/CONTRACTS.md, docs/ARCHITECTURE.md, README.md) belong to exactly one task's scope per milestone; other tasks read them but never edit them. Two tasks editing one doc means rebase conflicts and an extra review round for both (Roomcast, Sep 28 2026: T-003/T-011/T-013 on DESIGN.md).
