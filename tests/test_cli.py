@@ -119,3 +119,17 @@ def test_doctor_checks_required_plugins(cfg):
     names = {c.name: c for c in checks}
     assert names["plugin:frontend-design"].ok and not names["plugin:humanizer"].ok
     assert "swarm tools install" in names["plugin:humanizer"].detail
+
+
+def test_agents_sync_creates_never_seen_agents_as_offline(project_dir, monkeypatch):
+    from swarm.board.memory import InMemoryBoard
+    from swarm.cli import agents_sync, state
+    from swarm.models import AgentRow
+    board = InMemoryBoard()
+    board.upsert_agent(AgentRow(name="claude-a", status="running", current_task="T-1"))
+    monkeypatch.setattr("swarm.cli.make_board", lambda cfg, memory: board)
+    state.memory, state.cfg = True, None
+    monkeypatch.chdir(project_dir)
+    agents_sync()
+    assert board.get_agent("codex-a").status == "offline"      # never seen: no heartbeat yet
+    assert board.get_agent("claude-a").status == "running"     # existing rows keep their state

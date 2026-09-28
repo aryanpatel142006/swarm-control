@@ -78,4 +78,23 @@ def test_propose_runs_adapter(cfg, git_repo, tmp_path):
     props = pl.propose(git_repo / "PLAN.md", milestone="M1")
     assert len(props) == 2 and adapter.specs[0].read_only is True and adapter.specs[0].model == "opus"
     assert "the plan" in adapter.prompts[0]
+
+
+def test_propose_records_its_run_in_the_ledger(cfg, git_repo, tmp_path):
+    from swarm.usage import Ledger
+
+    class FakePlannerAdapter:
+        def run(self, spec):
+            return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"tasks": PROPOSALS[:1]},
+                             usage=Usage(100, 50, 0.42))
+
+    board = InMemoryBoard()
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    ledger = Ledger(tmp_path / "usage.jsonl")
+    pl = Planner(cfg, board, ws, adapter_factory=lambda a: FakePlannerAdapter(), log=lambda *a: None,
+                 prompt_text="R", ledger=ledger)
+    (git_repo / "PLAN.md").write_text("# P\n\n## Summary\nthe plan\n")
+    pl.propose(git_repo / "PLAN.md", milestone="M1")
+    rows = ledger._rows()
+    assert len(rows) == 1 and rows[0]["task"] == "plan:M1" and rows[0]["cost"] == 0.42 and rows[0]["model"] == "opus"
     assert (cfg.repo_root / ".swarm" / "tasks.proposed.json").exists()

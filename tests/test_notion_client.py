@@ -1,6 +1,8 @@
 import json
 
 import httpx
+
+from swarm.board import notion_props as np
 import pytest
 
 from swarm.board.notion import NotionBoard, NotionClient, NotionError, markdown_to_blocks
@@ -202,6 +204,7 @@ def test_board_questions_agents_status():
 def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
     """Dashboard: how-to with links, Agents table, Questions for you. Tasks and Status are their own pages ("tabs")."""
     decorated, views, dbs, appended, pages, descriptions, relations = {}, [], [], {}, [], {}, []
+    view_store, ordered = {}, {}
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -226,10 +229,27 @@ def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
             descriptions[path.split("/")[3]] = body["description"]
             return httpx.Response(200, json=body)
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
-            return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
+            n = path.split("/")[3][-1]
+            schema = {"1": np.AGENTS_SCHEMA, "2": np.QUESTIONS_SCHEMA("ds3"), "3": np.TASKS_SCHEMA(["claude-a"])}[n]
+            props = {name: {"id": "title" if "title" in spec else name} for name, spec in schema.items()}
+            return httpx.Response(200, json={"properties": props})
         if req.method == "POST" and path == "/v1/views":
             views.append((body["database_id"], body["name"], body["type"]))
-            return httpx.Response(200, json={"id": "view"})
+            view_store[f"v{len(views)}"] = {"id": f"v{len(views)}", "name": body["name"], "type": body["type"],
+                                            "database_id": body["database_id"], "configuration": body["configuration"]}
+            return httpx.Response(200, json={"id": f"v{len(views)}"})
+        if req.method == "GET" and path == "/v1/views":
+            db = req.url.params["database_id"]
+            listed = [{"id": vid} for vid, v in view_store.items() if v["database_id"] == db]
+            listed.append({"id": f"default-{db}"})
+            return httpx.Response(200, json={"results": listed})
+        if req.method == "GET" and path.startswith("/v1/views/"):
+            vid = path.split("/")[3]
+            v = view_store.get(vid) or {"id": vid, "name": "Default view", "type": "table", "configuration": {"type": "table"}}
+            return httpx.Response(200, json=v)
+        if req.method == "PATCH" and path.startswith("/v1/views/"):
+            ordered[path.split("/")[3]] = body["configuration"]
+            return httpx.Response(200, json=body)
         if req.method == "PATCH" and (path.startswith("/v1/databases/") or path.startswith("/v1/pages/")):
             decorated[path.split("/")[3]] = body
             return httpx.Response(200, json=body)
@@ -237,6 +257,17 @@ def test_init_builds_dashboard_with_tasks_and_status_as_own_pages():
 
     client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
     ids = NotionBoard.init(client, "parent", ["claude-a"], project="demo")
+    # column order is a per-view setting: every table view gets it, boards get their card fields
+    assert ids["columns_ok"] == "true"
+    agents_default = ordered["default-db1"]["properties"]
+    assert [p["property_id"] for p in agents_default[:6]] == ["title", "Status", "Last Heartbeat", "Cooldown Until",
+                                                               "Current Task", "Cost 5h USD"]
+    tasks_default = ordered["default-db3"]["properties"]
+    assert [p["property_id"] for p in tasks_default[:3]] == ["title", "Status", "Agent"]
+    assert {p["property_id"]: p["visible"] for p in tasks_default}["Claim Nonce"] is False
+    assert [p["property_id"] for p in ordered["default-db2"]["properties"][:2]] == ["title", "Status"]
+    assert ordered["v1"]["type"] == "board" and "group_by" in ordered["v1"]   # board keeps its grouping
+    assert [p["property_id"] for p in ordered["v1"]["properties"]] == ["Agent", "Importance", "Type", "Size"]
     # the dashboard page, then the Status page under it
     assert [pg["parent"]["page_id"] for pg in pages] == ["parent", "home"]
     assert pages[0]["properties"]["title"][0]["text"]["content"] == "Swarm · demo"

@@ -174,7 +174,7 @@ def agents_sync():
     """Refresh Agent rows (and the Agent select options) from config."""
     board = make_board(_cfg(), state.memory)
     for a in _cfg().agents.values():
-        row = board.get_agent(a.name) or AgentRow(name=a.name)
+        row = board.get_agent(a.name) or AgentRow(name=a.name, status="offline")   # offline until its first heartbeat
         row.provider, row.host = a.provider, a.host
         board.upsert_agent(row)
     if not state.memory:
@@ -198,7 +198,9 @@ def plan(plan_file: Path = typer.Argument(Path("PLAN.md")), milestone: str = typ
     """Decompose PLAN.md into tasks with the planner model, then create them."""
     from .planner import Planner
     board = make_board(_cfg(), state.memory)
-    pl = Planner(_cfg(), board, _workspace(_cfg()), log=console.print)
+    from .usage import Ledger, default_ledger_path
+    pl = Planner(_cfg(), board, _workspace(_cfg()), log=console.print,
+                 ledger=Ledger(default_ledger_path(_cfg().project)))
     proposals = pl.propose(plan_file, milestone=milestone)
     _print_proposals(proposals)
     if not proposals:

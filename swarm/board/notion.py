@@ -521,4 +521,46 @@ class NotionBoard:
             pass
         failed = decorate_board(client, ids)
         ids["decor_ok"] = "true" if not failed else "false: " + "; ".join(failed)
+        try:
+            order_columns(client, ids)
+            ids["columns_ok"] = "true"
+        except (NotionError, KeyError) as e:
+            ids["columns_ok"] = f"false: {e}"
         return ids
+
+
+# Column order is a per-view setting (the API ignores schema order), so every table view gets the list people
+# asked for and each board view gets its card fields. Anything not listed keeps its place after these.
+COLUMN_ORDER = {
+    "tasks": ["Name", "Status", "Agent", "Importance", "Type", "Size", "Milestone", "Model", "PR", "Attempts",
+              "Review Rounds", "Depends On", "Feedback", "Last Error", "Flags", "Description", "Acceptance", "Scope",
+              "Priority", "Effort", "Started", "ID", "Claim Nonce"],
+    "questions": ["Question", "Status", "Kind", "Impact", "Answer", "Needs Follow-up", "Task ID", "Task", "Options",
+                  "Proceeding With", "Context", "Asked By", "ID"],
+    "agents": ["Name", "Status", "Last Heartbeat", "Cooldown Until", "Current Task", "Cost 5h USD", "Provider", "Host",
+               "Runs", "Tokens In", "Tokens Out", "Cost USD", "Note"],
+}
+HIDDEN_COLUMNS = {"tasks": {"Claim Nonce"}}
+BOARD_CARD_FIELDS = {"tasks": ["Agent", "Importance", "Type", "Size"]}
+
+
+def order_columns(client: "NotionClient", ids: dict) -> None:
+    for key in ("tasks", "questions", "agents"):
+        db, ds = ids.get(f"{key}_db"), ids.get(f"{key}_ds")
+        if not db or not ds:
+            continue
+        props = client.get_data_source(ds)["properties"]
+        wanted = [n for n in COLUMN_ORDER[key] if n in props] + [n for n in props if n not in COLUMN_ORDER[key]]
+        hidden = HIDDEN_COLUMNS.get(key, set())
+        table = [{"property_id": props[n]["id"], "visible": n not in hidden} for n in wanted]
+        cards = [{"property_id": props[n]["id"], "visible": True} for n in BOARD_CARD_FIELDS.get(key, []) if n in props]
+        for row in client.request("GET", f"/views?database_id={db}").get("results", []):
+            view = client.request("GET", f"/views/{row['id']}")
+            if view.get("type") == "table":
+                cfg = {"type": "table", "properties": table}
+            elif view.get("type") == "board" and cards:
+                cfg = dict(view.get("configuration") or {"type": "board"})
+                cfg["properties"] = cards
+            else:
+                continue
+            client.request("PATCH", f"/views/{row['id']}", json={"configuration": cfg})

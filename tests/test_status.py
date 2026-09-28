@@ -21,3 +21,11 @@ def test_render_status_lines(cfg):
     assert "Q-4" in text and "Tap or rail?" in text and "T-4" in text
     assert "claude-a" in text and "$31.2" in text and "cooldown" in text
     assert "RISK" in text  # a blocked + failed pair in one milestone flags risk
+
+
+def test_render_status_marks_agents_never_seen(cfg):
+    now = cfg.event_end - timedelta(hours=8)
+    agents = [AgentRow(name="codex-b", status="offline", last_heartbeat=None),
+              AgentRow(name="claude-a", status="idle", last_heartbeat=now)]
+    text = render_status(cfg, [], agents, [], now)
+    assert "codex-b no heartbeat yet" in text and "claude-a idle" in text

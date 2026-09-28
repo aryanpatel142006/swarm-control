@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from .adapters import get_adapter
@@ -98,8 +99,9 @@ def lint_conflicts(proposals: list[dict]) -> list[str]:
 
 class Planner:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, adapter_factory=get_adapter, log=print,
-                 prompt_text: str | None = None):
+                 prompt_text: str | None = None, ledger=None):
         self.cfg, self.board, self.ws, self.adapter_factory, self.log = cfg, board, ws, adapter_factory, log
+        self.ledger = ledger
         self.prompt_text = prompt_text if prompt_text is not None else (PROMPTS_DIR / "planner.md").read_text()
 
     def propose(self, plan_path: Path, milestone: str | None = None, split_of: Task | None = None) -> list[dict]:
@@ -120,7 +122,12 @@ class Planner:
                        max_turns=PLAN_TURNS, budget_usd=None, timeout_s=PLAN_TIMEOUT_S, cwd=wt,
                        schema=TASKS_SCHEMA if structured else None, read_only=True, sandbox="read-only",
                        extra_args=list(agent_cfg.extra_args))
+        started = time.monotonic()
         result = self.adapter_factory(agent_cfg).run(spec)
+        if self.ledger is not None:   # the planner's spend is part of the project's bill too
+            label = f"plan:{milestone}" if milestone else (f"split:{split_of.id}" if split_of else "plan")
+            self.ledger.append(agent=role.agent, model=spec.model, task_id=label, usage=result.usage,
+                               duration_s=time.monotonic() - started, ok=result.ok)
         if not result.ok and result.structured_output is None:
             raise RuntimeError(f"planner run failed: {result.error[:300]}")
         proposals = parse_proposals(result.structured_output, wt)
