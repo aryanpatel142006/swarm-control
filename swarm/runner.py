@@ -360,7 +360,7 @@ class Runner:
             return Outcome(task, None, result, None, fresh.status if fresh else Status.READY)
 
         changed = self.ws.changed_files(wt)
-        report = parse_report(result.structured_output, wt, changed_files=changed)
+        report = parse_report(result.structured_output, wt, changed_files=changed, error=result.error)
         flags = [f for f in task.flags if f not in TRANSIENT_FLAGS]
         if report.synthesized:
             flags.append("report_missing")

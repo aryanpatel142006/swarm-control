@@ -21,6 +21,10 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         bit = f"{a.name} no heartbeat yet" if never_seen else f"{a.name} {a.status}"
         if a.current_task:
             bit += f"({a.current_task})"
+        if a.last_heartbeat and a.status != "offline":
+            silent = (now - a.last_heartbeat).total_seconds()
+            if silent > 2 * cfg.heartbeat_seconds:   # alive on paper, silent in practice (sleeping laptop)
+                bit += f" (no heartbeat for {silent / 60:.0f} min)"
         if a.status == "cooldown" and a.cooldown_until:
             bit += f" until {a.cooldown_until.strftime('%H:%M')}"
         bit += f" ${a.cost_5h_usd:.1f}/5h"

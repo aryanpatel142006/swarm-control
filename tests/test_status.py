@@ -29,3 +29,12 @@ def test_render_status_marks_agents_never_seen(cfg):
               AgentRow(name="claude-a", status="idle", last_heartbeat=now)]
     text = render_status(cfg, [], agents, [], now)
     assert "codex-b no heartbeat yet" in text and "claude-a idle" in text
+
+
+def test_render_status_flags_a_stale_heartbeat_before_the_offline_cutoff(cfg):
+    """Between 'alive' and 'offline' (10 min) an agent whose heartbeat is minutes old must not read as idle."""
+    now = cfg.event_end - timedelta(hours=8)
+    agents = [AgentRow(name="codex-b", status="idle", last_heartbeat=now - timedelta(minutes=4)),
+              AgentRow(name="claude-a", status="running", current_task="T-2", last_heartbeat=now - timedelta(seconds=30))]
+    text = render_status(cfg, [], agents, [], now)
+    assert "codex-b idle (no heartbeat for 4 min)" in text and "claude-a running(T-2)" in text

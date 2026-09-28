@@ -82,3 +82,9 @@ def test_tools_used_flow_into_the_decision_log_and_report(tmp_path):
     assert [t["name"] for t in plain.tools_used] == ["context7", "x"]
     assert decisions_markdown(Task(id="T-9", title="Page"), parse_report(
         {"status": "done", "summary": "s"}, tmp_path, changed_files=["a"])) == ""
+
+
+def test_synthesized_report_keeps_the_real_error(tmp_path):
+    """A spawn failure said 'Report missing and no files changed'; the CLI's own error must survive."""
+    r = parse_report(None, tmp_path, changed_files=[], error="cli not found: claude")
+    assert r.synthesized and "cli not found: claude" in r.summary

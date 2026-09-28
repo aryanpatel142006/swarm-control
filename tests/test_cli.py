@@ -133,3 +133,25 @@ def test_agents_sync_creates_never_seen_agents_as_offline(project_dir, monkeypat
     agents_sync()
     assert board.get_agent("codex-a").status == "offline"      # never seen: no heartbeat yet
     assert board.get_agent("claude-a").status == "running"     # existing rows keep their state
+
+
+def test_doctor_warns_when_the_laptop_can_sleep(cfg):
+    """Four runner drops in the rehearsal were a sleeping laptop. doctor reads pmset on macOS and says so."""
+    class R:
+        def __init__(self, out): self.ok, self.out, self.err = True, out, ""
+
+    def run(args, cwd, timeout=60):
+        if args[:2] == ["pmset", "-g"]:
+            return R(" System-wide power settings:\n sleep                10 (sleep prevented by caffeinate)\n disksleep 10\n")
+        return R("")
+    checks = {c.name: c for c in run_checks(cfg, "host-a", offline=True, notion_token="", which=lambda n: f"/usr/bin/{n}",
+                                            run=run, platform="darwin")}
+    assert checks["sleep"].ok and "caffeinate" in checks["sleep"].detail
+
+    def run2(args, cwd, timeout=60):
+        return R(" System-wide power settings:\n sleep                10\n") if args[:2] == ["pmset", "-g"] else R("")
+    checks = {c.name: c for c in run_checks(cfg, "host-a", offline=True, notion_token="", which=lambda n: f"/usr/bin/{n}",
+                                            run=run2, platform="darwin")}
+    assert not checks["sleep"].ok and "caffeinate -dims" in checks["sleep"].detail
+    assert "sleep" not in {c.name for c in run_checks(cfg, "host-a", offline=True, notion_token="",
+                                                       which=lambda n: f"/usr/bin/{n}", run=run2, platform="linux")}

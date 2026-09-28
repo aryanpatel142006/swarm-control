@@ -50,7 +50,7 @@ REVIEW_SCHEMA = {
 }
 
 
-def parse_report(structured: dict | None, worktree: Path, *, changed_files: list[str]) -> Report:
+def parse_report(structured: dict | None, worktree: Path, *, changed_files: list[str], error: str = "") -> Report:
     data = structured if isinstance(structured, dict) and "status" in structured else None
     if data is None:
         f = Path(worktree) / ".swarm-run" / "report.json"
@@ -61,9 +61,10 @@ def parse_report(structured: dict | None, worktree: Path, *, changed_files: list
             except ValueError:
                 data = None
     if data is None:
-        return Report(status="done" if changed_files else "failed",
-                      summary="Report missing; synthesized from the diff." if changed_files
-                      else "Report missing and no files changed.",
+        summary = "Report missing; synthesized from the diff." if changed_files else "Report missing and no files changed."
+        if error:
+            summary += f" CLI: {error.strip()[:300]}"
+        return Report(status="done" if changed_files else "failed", summary=summary,
                       files_changed=list(changed_files), synthesized=True)
     status = data.get("status")
     if status not in ("done", "blocked", "failed"):

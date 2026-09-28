@@ -21,7 +21,7 @@ class Check:
 
 
 def run_checks(cfg: Config, host: str | None, *, offline: bool = False, notion_token: str | None = None,
-               which=shutil.which, run=run_cmd) -> list[Check]:
+               which=shutil.which, run=run_cmd, platform: str = sys.platform) -> list[Check]:
     checks = [Check("python", sys.version_info >= (3, 11), sys.version.split()[0]),
               Check("config", True, str(cfg.path))]
     checks.append(Check("host", bool(host and host in cfg.hosts),
@@ -76,6 +76,13 @@ def run_checks(cfg: Config, host: str | None, *, offline: bool = False, notion_t
                       f"{full} " + ("installed but disabled" if info else "not installed")
                       + "; run `swarm tools install`")
             checks.append(Check(f"plugin:{short}", ok, detail))
+    if platform == "darwin":   # four runner drops in the Sep 28 rehearsal were one laptop going to sleep
+        r = run(["pmset", "-g"], cwd=cfg.repo_root, timeout=15)
+        line = next((ln for ln in r.out.splitlines() if ln.strip().startswith("sleep ")), "") if r.ok else ""
+        prevented = "prevented" in line or line.split()[1:2] == ["0"]
+        checks.append(Check("sleep", bool(line) and prevented,
+                            "sleep prevented (caffeinate or never sleep)" if prevented else
+                            "laptop can sleep: run every loop as `caffeinate -dims swarm run` / `caffeinate -dims swarm serve` and plug in"))
     for label, rel in (("verify_fast", cfg.verify.fast), ("verify_full", cfg.verify.full)):
         if rel:
             p = cfg.repo_root / rel
