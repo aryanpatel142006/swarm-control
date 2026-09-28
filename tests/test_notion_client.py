@@ -377,3 +377,17 @@ def test_rows_are_created_with_icons():
              for ds in ("ds-tasks", "ds-q", "ds-agents") for pid, page in store[ds].items()}
     assert "icon-type-frontend.png?v=" in icons[t.page_id]
     assert "icon-q-fyi.png?v=" in icons[q.page_id] and "icon-agent.png?v=" in icons[a.page_id]
+
+
+def test_asset_urls_change_path_when_the_art_changes(monkeypatch):
+    """Notion caches external images by path and ignores the query string, so the assets' commit goes in the path."""
+    from swarm.board import notion
+    monkeypatch.setenv("SWARM_ASSETS_REF", "abc1234")
+    url = notion.asset_url("icon-type-backend.png", notion.default_assets_base())
+    assert "/aryanpatel142006/swarm-control/abc1234/swarm/assets/icon-type-backend.png?v=" in url
+    monkeypatch.delenv("SWARM_ASSETS_REF")
+    base = notion.default_assets_base(git=lambda: "9f0e1d2")
+    assert base.endswith("/swarm-control/9f0e1d2/swarm/assets/")
+    assert notion.default_assets_base(git=lambda: "").endswith("/swarm-control/main/swarm/assets/")
+    monkeypatch.setenv("SWARM_ASSETS_URL", "https://cdn.example/x/")
+    assert notion.default_assets_base(git=lambda: "9f0e1d2") == "https://cdn.example/x/"

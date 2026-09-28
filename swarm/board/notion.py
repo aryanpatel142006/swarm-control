@@ -248,8 +248,31 @@ ASSET_KEY = {"parent": "board", "tasks": "tasks", "questions": "questions", "age
 
 # Public URL of the packaged art. Notion renders external images reliably and they never expire, unlike
 # API file uploads, which were observed to 404 from Notion's storage a few hours after attaching.
-ASSETS_URL_BASE = os.environ.get(
-    "SWARM_ASSETS_URL", "https://raw.githubusercontent.com/aryanpatel142006/swarm-control/main/swarm/assets/")
+ASSETS_REPO_URL = "https://raw.githubusercontent.com/aryanpatel142006/swarm-control/"
+
+
+def _assets_commit() -> str:
+    """Short hash of the last commit that touched the packaged art; empty outside a git checkout."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(ASSETS_DIR), "log", "-1", "--format=%h", "--", str(ASSETS_DIR)],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def default_assets_base(git=_assets_commit) -> str:
+    """Where the packaged art is served from. The assets' commit hash sits in the PATH: Notion caches external
+    images by path and ignores the query string, so a `?v=` alone left old art on screen."""
+    explicit = os.environ.get("SWARM_ASSETS_URL")
+    if explicit:
+        return explicit
+    ref = os.environ.get("SWARM_ASSETS_REF") or git() or "main"
+    return f"{ASSETS_REPO_URL}{ref}/swarm/assets/"
+
+
+ASSETS_URL_BASE = default_assets_base()
 
 
 def decorate_object(client: "NotionClient", kind: str, obj_id: str, key: str, assets_dir: Path = ASSETS_DIR,
