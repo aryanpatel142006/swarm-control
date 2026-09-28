@@ -159,7 +159,7 @@ def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page
     token = os.environ.get("NOTION_TOKEN")
     if not token:
         raise typer.Exit(code=_fail("NOTION_TOKEN is not set"))
-    ids = NotionBoard.init(NotionClient(token), parent_page, list(_cfg().agents))
+    ids = NotionBoard.init(NotionClient(token), parent_page, list(_cfg().agents), project=_cfg().project)
     path = save_notion_ids(_cfg(), ids)
     console.print(f"created databases; ids saved to {path}")
     if not str(ids.get("views_ok", "")).startswith("true"):

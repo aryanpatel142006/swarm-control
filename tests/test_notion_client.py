@@ -199,40 +199,35 @@ def test_board_questions_agents_status():
     assert store["blocks"]["sb"]["code"]["rich_text"][0]["text"]["content"] == "status text"
 
 
-def test_init_decorates_everything_it_creates():
-    decorated = {}
-    views = []
-    callouts = []
-    navs = []
+def test_init_builds_one_page_with_inline_databases():
+    """One page per project: how-to callout, live status, then Tasks / Questions / Agents inline, in that order."""
+    decorated, views, dbs, appended, pages, descriptions = {}, [], [], [], [], {}
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
         path = req.url.path
-        if req.method == "POST" and path.startswith("/v1/file_uploads/") and path.endswith("/send"):
-            assert req.headers["content-type"].startswith("multipart/form-data")
-            return httpx.Response(200, json={"status": "uploaded"})
         body = json.loads(req.content) if req.content else {}
         if req.method == "POST" and path == "/v1/databases":
             counter["n"] += 1
+            dbs.append(body)
             return httpx.Response(200, json={"id": f"db{counter['n']}", "data_sources": [{"id": f"ds{counter['n']}"}]})
         if req.method == "POST" and path == "/v1/pages":
-            return httpx.Response(200, json={"id": "status-page"})
-        if req.method == "POST" and path == "/v1/file_uploads":
-            counter["n"] += 1
-            return httpx.Response(200, json={"id": f"up{counter['n']}", "status": "pending"})
-        if req.method == "GET" and path.endswith("/children"):
-            return httpx.Response(200, json={"results": [{"id": "status-block"}]})
-        if req.method == "PATCH" and path.endswith("/children"):
-            callouts.extend(b for b in body["children"] if b.get("type") == "callout")
-            navs.extend(b["paragraph"]["rich_text"] for b in body["children"] if b.get("type") == "paragraph")
+            pages.append(body)
+            return httpx.Response(200, json={"id": "home"})
+        if req.method == "GET" and path == "/v1/blocks/home/children":
+            return httpx.Response(200, json={"results": [{"id": "c1", "type": "callout"}, {"id": "h1", "type": "heading_2"},
+                                                         {"id": "code1", "type": "code"}, {"id": "h2", "type": "heading_2"}]})
+        if req.method == "PATCH" and path == "/v1/blocks/home/children":
+            appended.extend(body["children"])
             return httpx.Response(200, json={"results": body["children"]})
         if req.method == "PATCH" and path.startswith("/v1/databases/") and "description" in body:
-            navs.append(body["description"])
+            descriptions[path.split("/")[3]] = "".join(seg["text"]["content"] for seg in body["description"])
             return httpx.Response(200, json=body)
         if req.method == "GET" and path.startswith("/v1/data_sources/"):
-            return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"}}})
+            return httpx.Response(200, json={"properties": {"Status": {"id": "st"}, "Agent": {"id": "ag"},
+                                                            "Importance": {"id": "imp"}}})
         if req.method == "POST" and path == "/v1/views":
-            views.append(body["name"])
+            views.append((body["database_id"], body["name"], body["type"]))
             return httpx.Response(200, json={"id": "view"})
         if req.method == "PATCH" and (path.startswith("/v1/databases/") or path.startswith("/v1/pages/")):
             decorated[path.split("/")[3]] = body
@@ -240,20 +235,30 @@ def test_init_decorates_everything_it_creates():
         return httpx.Response(500, json={"message": f"unhandled {req.method} {path}"})
 
     client = NotionClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
-    ids = NotionBoard.init(client, "parent", ["claude-a"])
+    ids = NotionBoard.init(client, "parent", ["claude-a"], project="demo")
+    # one page, titled after the project, holding the how-to and the status block from the start
+    assert len(pages) == 1 and pages[0]["parent"]["page_id"] == "parent"
+    assert pages[0]["properties"]["title"][0]["text"]["content"] == "Swarm · demo"
+    kinds = [b["type"] for b in pages[0]["children"]]
+    assert kinds == ["callout", "heading_2", "code", "heading_2"]
+    assert ids["status_page"] == "home" and ids["status_block"] == "code1" and ids["parent_page_id"] == "parent"
+    # three inline databases on that page, Tasks before Questions (the relation needs it) before Agents
+    assert [d["title"][0]["text"]["content"] for d in dbs] == ["Tasks", "Questions", "Agents"]
+    assert all(d["is_inline"] is True and d["parent"]["page_id"] == "home" for d in dbs)
+    assert [b["heading_2"]["rich_text"][0]["text"]["content"] for b in appended if b["type"] == "heading_2"] == \
+        ["Questions for you", "Agents"]
+    # views: a board and a Needs-you list on Tasks, an Open list on Questions
     assert ids["views_ok"] == "true"
+    assert views == [("db1", "Board", "board"), ("db1", "By agent", "board"), ("db1", "Needs you", "table"),
+                     ("db2", "Open", "table")]
+    # help text where people look, no navigation clutter
+    assert "Answer" in descriptions["db2"] and "Cut" in descriptions["db1"] and "db3" in descriptions
     assert ids["decor_ok"] == "true"
-    assert views == ["By Status", "By Agent", "Needs Human", "Open Questions"]
-    for key in ("db1", "db2", "db3", "status-page", "parent"):
+    for key in ("home", "db1", "db2", "db3"):
         assert decorated[key]["icon"]["type"] == "external", key
-        assert decorated[key]["cover"]["external"]["url"].startswith("https://raw.githubusercontent.com/"), key
-    assert "icon-board.png?v=" in decorated["parent"]["icon"]["external"]["url"]
-    assert "banner-tasks.png?v=" in decorated["db1"]["cover"]["external"]["url"]
-    assert callouts and callouts[0]["callout"]["icon"]["type"] == "external"
-    assert ids["nav_ok"] == "true" and len(navs) == 5  # three database descriptions + two page paragraphs
-    labels = [seg["text"]["content"] for seg in navs[0] if seg["text"]["content"].strip("· ")]
-    assert labels == ["Dashboard", "Tasks", "Questions", "Agents", "Status"]
-    assert sum(1 for seg in navs[0] if seg["text"].get("link")) == 4  # the current one is not a link
+    assert "icon-board.png?v=" in decorated["home"]["icon"]["external"]["url"]
+    assert decorated["home"]["cover"]["external"]["url"].startswith("https://raw.githubusercontent.com/")
+    assert "nav_ok" not in ids
 
 
 def test_decorate_uploads_when_no_public_url(tmp_path):
