@@ -76,6 +76,11 @@ def cycle_complete(tasks: list[Task], milestone: str) -> bool:
     return bool(mine) and all(t.status in (Status.DONE, Status.CUT) for t in mine)
 
 
+def needs_planning(tasks: list[Task], milestone: str) -> bool:
+    """A restarted night loop must not plan a milestone that already has tasks on the board."""
+    return not any(t.milestone == milestone for t in tasks)
+
+
 def decide_merge(tests_ok: bool, commits_ahead: int) -> bool:
     return tests_ok and commits_ahead > 0
 
@@ -179,10 +184,14 @@ class Night:
 
     # ----- one cycle -----
     def add_milestone(self, cycle: int) -> None:
+        self.sh(["git", "pull", "-q", "--rebase", "origin", "main"])
         plan = self.project_dir / "PLAN.md"
         plan.write_text(append_milestone(plan.read_text(), cycle))
         self.sh(["git", "add", "PLAN.md"]); self.sh(["git", "commit", "-qm", f"PLAN.md: night cycle {cycle} ({plan_for(cycle)[0]})"])
         self.sh(["git", "pull", "-q", "--rebase", "origin", "main"]); self.sh(["git", "push", "-q", "origin", "main"])
+        if not needs_planning(self.board()[1].list_tasks(), milestone_name(cycle)):
+            self.log(f"night: {milestone_name(cycle)} already planned; resuming it")
+            return
         r = self.swarm("plan", "PLAN.md", "--milestone", milestone_name(cycle), "--apply", timeout=1200)
         self.log(f"night: planned {milestone_name(cycle)}: " + (r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[-200:]))
 

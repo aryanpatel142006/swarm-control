@@ -33,3 +33,9 @@ def test_night_can_run_without_the_improvement_agent(tmp_path):
     from swarm.night import Night
     n = Night(tmp_path, cycles=1, minutes=1, improve=False)
     assert n.improve_enabled is False
+
+
+def test_restart_does_not_plan_a_milestone_twice():
+    from swarm.night import needs_planning
+    tasks = [Task(id="T-31", title="a", milestone="N3", status=Status.READY)]
+    assert needs_planning(tasks, "N3") is False and needs_planning(tasks, "N4") is True
