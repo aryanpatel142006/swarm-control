@@ -13,13 +13,15 @@ def default_ledger_path(project: str) -> Path:
 
 
 class Ledger:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, board: str = ""):
         self.path = Path(path)
+        self.board = board   # task ids restart per board; rows carry the board so reports never mix two boards
 
     def append(self, *, agent: str, model: str, task_id: str, usage: Usage, duration_s: float, ok: bool,
-               now: datetime | None = None, role: str = "worker") -> None:
+               now: datetime | None = None, role: str = "worker", board: str | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         entry = {"ts": (now or utcnow()).isoformat(), "agent": agent, "model": model, "task": task_id, "role": role,
+                 "board": board if board is not None else self.board,
                  "in": usage.input_tokens, "out": usage.output_tokens, "cost": usage.cost_usd,
                  "cache_w": usage.cache_write_tokens, "cache_r": usage.cache_read_tokens,
                  "duration_s": round(duration_s, 1), "ok": ok}
@@ -64,12 +66,15 @@ class Ledger:
         return sorted({r.get("agent") for r in self._rows() if r.get("agent")})
 
 
-def usage_report(ledger: Ledger, done: list[str] | None = None, since: datetime | None = None) -> dict:
+def usage_report(ledger: Ledger, done: list[str] | None = None, since: datetime | None = None,
+                 board: str | None = None) -> dict:
     """Where the money went: by role, per task, cache write vs read, and what counts as waste
     (failed runs, worker attempts after the first successful one, review rounds after the first)."""
     rows = ledger._rows()
     if since is not None:
         rows = [r for r in rows if datetime.fromisoformat(r["ts"]) >= since]
+    if board:
+        rows = [r for r in rows if r.get("board") == board]
     by_role: dict[str, float] = {}
     tasks: dict[str, dict] = {}
     cache_w = cache_r = 0

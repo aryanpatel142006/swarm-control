@@ -78,3 +78,16 @@ def test_usage_report_since_ignores_older_rows(tmp_path):
     led.append(agent="a", model="m", task_id="T-1", usage=Usage(1, 1, 0.5), duration_s=1, ok=True, now=now)
     r = usage_report(led, done=["T-1"], since=now - timedelta(hours=1))
     assert r["total_cost"] == 0.5 and r["runs"] == 1
+
+
+def test_ledger_rows_carry_a_board_id_and_reports_filter_on_it(tmp_path):
+    """Task ids restart at T-001 on every board; the ledger must not mix two boards' T-019s."""
+    from swarm.usage import usage_report
+    led = Ledger(tmp_path / "usage.jsonl")
+    led.append(agent="a", model="m", task_id="T-019", usage=Usage(1, 1, 5.0), duration_s=1, ok=True, board="old12345")
+    led.append(agent="a", model="m", task_id="T-019", usage=Usage(1, 1, 0.5), duration_s=1, ok=True, board="new67890")
+    led.append(agent="a", model="m", task_id="T-001", usage=Usage(1, 1, 0.2), duration_s=1, ok=True)   # legacy row, no board
+    assert led._rows()[0]["board"] == "old12345"
+    r = usage_report(led, done=["T-019"], board="new67890")
+    assert r["total_cost"] == 0.5 and r["runs"] == 1
+    assert usage_report(led)["runs"] == 3   # no filter: everything, as before

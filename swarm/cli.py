@@ -75,7 +75,7 @@ def _workspace(cfg: Config):
 
 def _ledger(cfg: Config):
     from .usage import Ledger, default_ledger_path
-    return Ledger(default_ledger_path(cfg.project))
+    return Ledger(default_ledger_path(cfg.project), board=(cfg.notion.tasks_ds or "")[:8])
 
 
 @app.callback()
@@ -156,7 +156,8 @@ def tools(install: bool = typer.Option(False, "--install", help="install missing
 
 @app.command()
 def usage(since: str = typer.Option(None, "--since", help="only runs after this UTC time (e.g. 2026-10-10T12:00) "
-                                                            "or a window like 5h / 2d; the ledger outlives board resets")):
+                                                            "or a window like 5h / 2d"),
+          all_boards: bool = typer.Option(False, "--all-boards", help="include runs from earlier boards of this project")):
     """Where the tokens went: spend by role, per task, cache write vs read, and waste (retries, re-reviews)."""
     from datetime import timedelta, timezone
     from .usage import Ledger, default_ledger_path, usage_report
@@ -170,7 +171,9 @@ def usage(since: str = typer.Option(None, "--since", help="only runs after this 
             cutoff = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
     board = make_board(_cfg(), state.memory)
     done = [t.id for t in board.list_tasks(status=[Status.DONE])]
-    r = usage_report(Ledger(default_ledger_path(_cfg().project)), done=done, since=cutoff)
+    board = (_cfg().notion.tasks_ds or "")[:8]
+    r = usage_report(Ledger(default_ledger_path(_cfg().project), board=board), done=done, since=cutoff,
+                     board=None if all_boards else board)
     console.print(f"[bold]${r['total_cost']:.2f}[/bold] over {r['runs']} runs · "
                   + " · ".join(f"{k} ${v:.2f}" for k, v in r["by_role"].items())
                   + (f" · ${r['cost_per_done_task']:.2f} per merged task" if r["cost_per_done_task"] is not None else ""))
@@ -236,7 +239,7 @@ def plan(plan_file: Path = typer.Argument(Path("PLAN.md")), milestone: str = typ
     board = make_board(_cfg(), state.memory)
     from .usage import Ledger, default_ledger_path
     pl = Planner(_cfg(), board, _workspace(_cfg()), log=console.print,
-                 ledger=Ledger(default_ledger_path(_cfg().project)))
+                 ledger=Ledger(default_ledger_path(_cfg().project), board=(_cfg().notion.tasks_ds or "")[:8]))
     proposals = pl.propose(plan_file, milestone=milestone)
     _print_proposals(proposals)
     if not proposals:
