@@ -65,6 +65,10 @@ swarm run                                          # every laptop
 swarm status                                       # any time
 ```
 
+## The Notion board
+
+`swarm init` builds one dashboard page per project under your parent page, plus the Tasks board as a full page next to it (so a task opens full-screen). The dashboard reads top to bottom: a how-to callout, the Agents table (name, status, last heartbeat, cooldown, current task, spend), Questions for you (open questions first), then two columns: a tile that opens the Tasks board and the live Status block that `swarm serve` rewrites every few minutes. Column order, board card fields, icons and covers are set by init; delete a finished project's pages yourself when you are done with them (the harness never deletes).
+
 ## Task statuses
 
 `Backlog → Ready → Running → Review → Merge Ready → Done`, with `Changes Requested` (verify failed, reviewer findings, rebase conflict; same worker resumes), `Blocked` (waiting on a Question), `Failed` (retry ladder: same agent, one tier up, then a Question), and `Cut`.
