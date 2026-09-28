@@ -265,3 +265,14 @@ def test_gemini_reads_a_json_report_out_of_the_response_text():
     assert r2.ok and r2.structured_output is None
     r3 = GeminiAdapter().parse_output(1, json.dumps({"session_id": "s", "error": {"message": "quota"}}), "")
     assert not r3.ok and "quota" in r3.error
+
+
+def test_gemini_parses_token_stats_into_usage():
+    from swarm.adapters.gemini import GeminiAdapter
+    out = json.dumps({"session_id": "s", "response": '{"status":"done","summary":"ok"}', "stats": {"models": {
+        "gemini-3-flash-preview": {"api": {"totalRequests": 11}, "tokens": {"input": 57730, "prompt": 212048,
+                                                                            "candidates": 2422, "total": 215962,
+                                                                            "cached": 154318, "thoughts": 1492, "tool": 0}}}}})
+    r = GeminiAdapter().parse_output(0, out, "")
+    assert r.usage.input_tokens == 212048 and r.usage.output_tokens == 2422 + 1492
+    assert r.usage.cache_read_tokens == 154318 and r.usage.cost_usd is None   # subscription: no dollar figure

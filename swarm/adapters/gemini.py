@@ -28,5 +28,11 @@ class GeminiAdapter(Adapter):
         response = data.get("response")
         inner = last_json_object(response) if isinstance(response, str) else None
         structured = inner if isinstance(inner, dict) and "status" in inner else None
+        usage = Usage()
+        for m in ((data.get("stats") or {}).get("models") or {}).values():   # summed across models
+            tok = (m or {}).get("tokens") or {}
+            usage.input_tokens += int(tok.get("prompt") or 0)
+            usage.output_tokens += int(tok.get("candidates") or 0) + int(tok.get("thoughts") or 0)
+            usage.cache_read_tokens += int(tok.get("cached") or 0)
         return RunResult(ok=code == 0 and not raw_error, exit_code=code, stdout=out, stderr=err,
-                         structured_output=structured, usage=Usage(), error=error)
+                         structured_output=structured, usage=usage, error=error)
