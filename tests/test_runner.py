@@ -520,3 +520,24 @@ def test_runner_lists_plugins_once_per_process(cfg, git_repo, tmp_path):
         ready_task(board, agent="claude-a", model="sonnet", scope=["src/**"])
     r.tick(); r.tick()
     assert len(adapter.specs) == 2 and calls["list"] == 1
+
+
+def test_loop_survives_board_outages_with_backoff(cfg, git_repo, tmp_path):
+    """A Notion or network outage used to kill `swarm run`; overnight that means a dead agent."""
+    adapter = FakeAdapter()
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    sleeps, calls = [], {"n": 0}
+    r.sleep = sleeps.append
+    r.recover_orphans = lambda: None
+    r.install_signal_handlers = lambda: None
+
+    def tick():
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise ConnectionError("Notion unreachable")
+        return 0
+    r.tick = tick
+    r.loop(stop=lambda: calls["n"] >= 5)
+    assert calls["n"] == 5
+    assert sleeps[:3] == [15, 30, 60]            # backoff while failing
+    assert sleeps[3] == cfg.poll_seconds         # back to normal once it recovers

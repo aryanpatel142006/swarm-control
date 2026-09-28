@@ -218,9 +218,22 @@ class Runner:
         self.log(f"swarm run · host={self.host} · agents={', '.join(self.agents)}")
         self.install_signal_handlers()
         self.recover_orphans()
+        failures = 0
         try:
             while not stop() and not self._stopping:
-                n = self.tick()
+                try:
+                    n = self.tick()
+                    failures = 0
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:   # board or network outage: keep the agent alive, back off, retry
+                    failures += 1
+                    wait = min(300, 15 * 2 ** (failures - 1))
+                    self.log(f"tick failed ({type(e).__name__}: {str(e)[:160]}); retrying in {wait}s")
+                    if once:
+                        break
+                    self.sleep(wait)
+                    continue
                 if once:
                     break
                 now = self.now()
