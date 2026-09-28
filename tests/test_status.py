@@ -38,3 +38,9 @@ def test_render_status_flags_a_stale_heartbeat_before_the_offline_cutoff(cfg):
               AgentRow(name="claude-a", status="running", current_task="T-2", last_heartbeat=now - timedelta(seconds=30))]
     text = render_status(cfg, [], agents, [], now)
     assert "codex-b idle (no heartbeat for 4 min)" in text and "claude-a running(T-2)" in text
+
+
+def test_render_status_labels_tasks_without_a_milestone(cfg):
+    now = cfg.event_end - timedelta(hours=8)
+    text = render_status(cfg, [Task(id="T-1", title="a", status=Status.READY)], [], [], now)
+    assert "(no milestone)" in text and "\n  -  " not in text

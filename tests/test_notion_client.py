@@ -205,7 +205,7 @@ def test_init_builds_the_dashboard_layout():
     """Dashboard: how-to, Agents, Questions for you, then two columns: a Tasks tile (the board is its own
     full page next to the dashboard) | Status heading + the live block."""
     decorated, views, dbs, appended, pages, descriptions, relations = {}, [], [], {}, [], {}, []
-    view_store, ordered = {}, {}
+    view_store, ordered, filters, patched_filters = {}, {}, [], {}
     counter = {"n": 0}
 
     def handler(req: httpx.Request):
@@ -243,6 +243,9 @@ def test_init_builds_the_dashboard_layout():
             return httpx.Response(200, json={"properties": props})
         if req.method == "POST" and path == "/v1/views":
             views.append((body["database_id"], body["name"], body["type"]))
+            assert "filter" not in body["configuration"], "Notion drops filters nested in configuration"
+            if body["name"] == "Needs you":
+                filters.append(body["filter"])
             view_store[f"v{len(views)}"] = {"id": f"v{len(views)}", "name": body["name"], "type": body["type"],
                                             "database_id": body["database_id"], "configuration": body["configuration"]}
             return httpx.Response(200, json={"id": f"v{len(views)}"})
@@ -256,7 +259,11 @@ def test_init_builds_the_dashboard_layout():
             v = view_store.get(vid) or {"id": vid, "name": "Default view", "type": "table", "configuration": {"type": "table"}}
             return httpx.Response(200, json=v)
         if req.method == "PATCH" and path.startswith("/v1/views/"):
-            ordered[path.split("/")[3]] = body["configuration"]
+            vid = path.split("/")[3]
+            if "configuration" in body:
+                ordered[vid] = body["configuration"]
+            if "filter" in body:
+                patched_filters[vid] = (body.get("name"), body["filter"])
             return httpx.Response(200, json=body)
         if req.method == "PATCH" and (path.startswith("/v1/databases/") or path.startswith("/v1/pages/")):
             decorated[path.split("/")[3]] = body
@@ -288,7 +295,12 @@ def test_init_builds_the_dashboard_layout():
     # views and column order
     assert ids["views_ok"] == "true" and ids["columns_ok"] == "true"
     assert views == [("db3", "Board", "board"), ("db3", "By agent", "board"), ("db3", "By milestone", "board"),
-                     ("db3", "Needs you", "table"), ("db2", "Open", "table")]
+                     ("db3", "Needs you", "table"), ("db2", "All", "table")]
+    # filters are top-level (Notion drops them inside configuration)
+    assert filters and filters[0]["or"][0]["select"]["equals"] == "Blocked"
+    # the Questions table opens on what needs an answer: its default view is renamed Open and filtered
+    name, flt = patched_filters["default-db2"]
+    assert name == "Open" and flt["select"]["equals"] == "Open"
     assert [p["property_id"] for p in ordered["default-db1"]["properties"][:6]] == \
         ["title", "Status", "Last Heartbeat", "Cooldown Until", "Current Task", "Cost 5h USD"]
     assert [p["property_id"] for p in ordered["default-db3"]["properties"][:3]] == ["title", "Status", "Agent"]

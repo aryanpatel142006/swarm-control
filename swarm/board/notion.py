@@ -181,10 +181,14 @@ class NotionClient:
         return self.request("PATCH", f"/{kind}/{obj_id}", json=body)
 
     def create_view(self, database_id: str, ds_id: str, name: str, kind: str, configuration: dict) -> dict:
-        return self.request("POST", "/views", json={
-            "database_id": database_id, "data_source_id": ds_id, "name": name, "type": kind,
-            "configuration": configuration,
-        })
+        """A filter must sit at the top level of the view: nested in `configuration` Notion silently drops it
+        (found Sep 28 2026: "Needs you" showed every task)."""
+        configuration = dict(configuration)
+        body = {"database_id": database_id, "data_source_id": ds_id, "name": name, "type": kind}
+        if "filter" in configuration:
+            body["filter"] = configuration.pop("filter")
+        body["configuration"] = configuration
+        return self.request("POST", "/views", json=body)
 
 
 # ---------- markdown → blocks ----------
@@ -486,9 +490,10 @@ class NotionBoard:
                 "icon": ({"type": "external", "external": {"url": icon_url}} if icon_url
                          else {"type": "emoji", "emoji": "🐝"}),
                 "color": "gray_background",
-                "rich_text": _rt("Agents first, then answer anything under Questions for you. Tasks opens the full "
-                                 "board; Status refreshes every few minutes (read the RISK lines first). Cards move "
-                                 "on their own: drag one to Cut to drop it, or to Ready to retry it.")}}])
+                "rich_text": _rt("1. Agents: who is working and who is offline. 2. Questions for you: type in "
+                                 "Answer; it is the only thing agents wait on. 3. Status (bottom right) refreshes every "
+                                 "few minutes; read the RISK lines. The Tasks tile opens the full board: drag a card to "
+                                 "Cut to drop it, or to Ready to retry it.")}}])
         ids["home_page"] = ids["status_page"] = home["id"]
 
         client.append_blocks(home["id"], [_heading("Agents")])
@@ -538,9 +543,8 @@ class NotionBoard:
                 "filter": {"or": [{"property": props["Status"]["id"], "select": {"equals": "Blocked"}},
                                   {"property": props["Status"]["id"], "select": {"equals": "Failed"}}]}})
             qprops = client.get_data_source(ids["questions_ds"])["properties"]
-            client.create_view(ids["questions_db"], ids["questions_ds"], "Open", "table", {
-                "type": "table",
-                "filter": {"property": qprops["Status"]["id"], "select": {"equals": "Open"}}})
+            client.create_view(ids["questions_db"], ids["questions_ds"], "All", "table", {"type": "table"})
+            ids["questions_open_filter"] = qprops["Status"]["id"]   # applied to the default view by order_columns
         except (NotionError, KeyError) as e:  # views API is new; fall back to manual instructions
             ids["views_ok"] = f"false: {e}"
 
@@ -595,6 +599,9 @@ def order_columns(client: "NotionClient", ids: dict) -> None:
             view = client.request("GET", f"/views/{row['id']}")
             if view.get("type") == "table":
                 cfg = {"type": "table", "properties": table}
+                if key == "questions" and view.get("name") == "Default view" and ids.get("questions_open_filter"):
+                    client.request("PATCH", f"/views/{row['id']}", json={
+                        "name": "Open", "filter": {"property": ids["questions_open_filter"], "select": {"equals": "Open"}}})
             elif view.get("type") == "board" and cards:
                 cfg = dict(view.get("configuration") or {"type": "board"})
                 cfg["properties"] = cards

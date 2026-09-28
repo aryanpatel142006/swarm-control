@@ -36,7 +36,7 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     for t in tasks:
         if t.status is Status.CUT:
             continue
-        by_ms.setdefault(t.milestone or "-", []).append(t)
+        by_ms.setdefault(t.milestone or "(no milestone)", []).append(t)
     active_agents = max(1, len([a for a in agents if a.name != "serve" and a.status != "offline"]))
     risks = []
     for ms in sorted(by_ms):
