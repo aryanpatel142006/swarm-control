@@ -19,7 +19,7 @@ swarm doctor --smoke claude-a              # 1-turn JSON check per local agent
 swarm status                               # Agents table: the teammate's agent must show a recent heartbeat
 ```
 - The teammate's runner (e.g. codex-b on laptop-b) must be heartbeating **before** you plan, or routing sends everything to laptop-a. An agent that never checked in is never routed to.
-- Mac must not sleep: run every loop under `caffeinate -dims`, on AC power, lid open.
+- No machine in the swarm may sleep while its loop runs: `caffeinate -dims swarm run|serve` on macOS, sleep disabled elsewhere, plugged in, lid open. `swarm run` now warns at startup when sleep is possible; tell every teammate this before they start (codex-b went offline twice on Oct 4 from sleep).
 
 ## 1. Start the loops (laptop-a)
 Run both as background processes that survive across turns (Bash `run_in_background: true`), logging to files you can grep:

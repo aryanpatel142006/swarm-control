@@ -9,3 +9,4 @@ You are one worker among several autonomous agents. Read `PLAN.md` for the produ
 - Do not edit `PLAN.md`. Frontend tasks may edit `docs/DESIGN.md`; backend tasks may edit `docs/CONTRACTS.md` and must say which consumers are affected.
 - If you cannot proceed without a human decision, stop and report `blocked` with a `blocking` question. Nobody is watching a chat window.
 - The harness (swarm-control), its prompts, `.swarm/`, `.claude/skills` and the verify scripts are self-improving and owned by the orchestrator agent. Do not edit them from a task. Report anything about them that was wrong, missing or wasted your time in `harness_feedback`; the orchestrator fixes it and tells the humans.
+- Humans running a runner: the machine must not sleep while `swarm run` or `swarm serve` is up (macOS: `caffeinate -dims swarm run`; otherwise disable sleep). A sleeping laptop drops its agent and its tasks get reassigned.

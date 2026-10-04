@@ -411,6 +411,9 @@ def run(agent: str = typer.Option(None, "--agent", help="only this agent"),
         raise typer.Exit(code=_fail("set SWARM_HOST or pass --host"))
     if state.host not in _cfg().hosts:
         raise typer.Exit(code=_fail(f"host '{state.host}' is not in config.hosts ({', '.join(_cfg().hosts)})"))
+    from .doctor import sleep_warning
+    if (w := sleep_warning(cwd=_cfg().repo_root)):
+        console.print(f"[yellow]WARNING: {w}[/yellow]")
     board = make_board(_cfg(), state.memory)
     r = Runner(_cfg(), board, state.host, _workspace(_cfg()), ledger=_ledger(_cfg()),
                log=console.print, executor=SyncExecutor() if once else None)

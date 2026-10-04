@@ -183,3 +183,13 @@ def test_doctor_flags_broken_doc_refs_and_type_keys(project_dir, sample_config_d
     assert "PLAN.md#ground-rules" in checks["docs refs"].detail and "docs/NOPE.md" in checks["docs refs"].detail
     assert "PLAN.md#summary" not in checks["docs refs"].detail
     assert not checks["type keys"].ok and "ml_audoi" in checks["type keys"].detail and "ml" not in checks["type keys"].detail.split()
+
+
+def test_sleep_warning_only_when_the_mac_can_sleep(tmp_path):
+    from swarm.doctor import sleep_warning
+
+    class R:
+        def __init__(self, out): self.ok, self.out, self.err = True, out, ""
+    assert sleep_warning(run=lambda a, cwd, timeout=15: R(" sleep 0 (sleep prevented by caffeinate)\n"), platform="darwin") is None
+    assert "caffeinate" in sleep_warning(run=lambda a, cwd, timeout=15: R(" sleep 10\n"), platform="darwin")
+    assert "cannot sleep" in sleep_warning(platform="win32")

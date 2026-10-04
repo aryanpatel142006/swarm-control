@@ -115,6 +115,20 @@ def context_checks(cfg: Config) -> list[Check]:
     return checks
 
 
+def sleep_warning(*, run=run_cmd, platform: str = sys.platform, cwd: Path | None = None) -> str | None:
+    """A laptop that sleeps stops its agents and lets the swarm reclaim their tasks. Returns the warning to print,
+    or None when sleep is prevented or we cannot tell (non-macOS)."""
+    if platform != "darwin":
+        return ("Make sure this machine cannot sleep while `swarm run` / `swarm serve` are up (disable sleep in the OS "
+                "power settings, keep it plugged in).")
+    r = run(["pmset", "-g"], cwd=cwd or Path.cwd(), timeout=15)
+    line = next((ln for ln in r.out.splitlines() if ln.strip().startswith("sleep ")), "") if r.ok else ""
+    if line and ("prevented" in line or line.split()[1:2] == ["0"]):
+        return None
+    return ("This Mac can go to sleep, which stops this agent and hands its tasks back. Run the loop as "
+            "`caffeinate -dims swarm run` (or `caffeinate -dims swarm serve`), plug in, keep the lid open.")
+
+
 def models_note(agent, cli_version: str) -> str:
     """One line for the agent's board row: which CLI version runs here and which model each tier maps to."""
     tiers = " ".join(f"{t}={agent.models[t]}" for t in ("best", "high", "mid", "low") if t in agent.models)
