@@ -197,7 +197,7 @@ def test_codex_smoke_initializes_git_and_uses_worker_arguments(cfg, tmp_path, mo
                                   cwd=spec.cwd, capture_output=True, text=True).stdout.strip() == "true"
             assert spec.extra_args == cfg.agents["codex-a"].extra_args
             assert not (spec.cwd / ".swarm-run/report.json").exists()
-            return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"status": "done"}, usage=Usage())
+            return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"status": "done", "summary": "smoke ok"}, usage=Usage())
     monkeypatch.setattr("swarm.adapters.get_adapter", lambda a: InspectAdapter())
     assert smoke_agent(cfg, "codex-a", smoke_dir).ok
     (smoke_dir / ".swarm-run/report.json").write_text('{"status":"done"}')
