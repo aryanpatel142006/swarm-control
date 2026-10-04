@@ -17,5 +17,11 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 - `swarm init` idempotency (still deferred from the ledger).
 - A `swarm plan --dry-run` that only prints the planner prompt size, for budgeting.
 
+## Setup summary (Oct 4, 22:50 UTC)
+- Harness: 1 fix shipped (family keys in `*_by_type`), skill `skills/swarm-control/SKILL.md` created and symlinked into `~/.claude/skills`, 9 field rules recorded.
+- Project: repo + board + JOIN.md + plans + hearing-stack skill live; `swarm doctor` all yes on laptop-a; `swarm status` works (both agents awaiting heartbeat).
+- Planner set to Fable on the user's request; reviewer claude-a/sonnet to protect the teammate's Codex credits.
+- Not run yet: `swarm plan PLAN.md --milestone M0` (the user starts the run). Context resolution checked with `select_docs` for ml_audio/backend/eval/frontend/infra.
+
 ## Run summary
 (filled in at the end of the run)
