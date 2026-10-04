@@ -28,6 +28,7 @@ HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itse
 RATE_LIMIT_COOLDOWN_MIN = 15
 IDLE_AFTER_S = 300
 TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
+SELF_UPDATE_EVERY_S = 600          # idle runners look for a newer harness every 10 minutes
 PUBLISH_FIELDS = ["status", "attempts", "flags", "pr_url", "claim_nonce", "feedback", "last_error", "review_rounds", "model", "effort"]
 
 
@@ -97,6 +98,8 @@ class Runner:
         workers = max(1, sum(a.parallel for a in self.agents.values()))
         self.executor = executor or ThreadPoolExecutor(max_workers=workers)
         self._last_heartbeat = None
+        self._last_update_check = None
+        self.auto_update = True
         self._idle_since = None
         self._stopping = False
 
@@ -245,6 +248,7 @@ class Runner:
                 if n == 0:
                     self._idle_since = self._idle_since or now
                     idle_for = (now - self._idle_since).total_seconds()
+                    self.maybe_self_update(now)
                     self.sleep(self.cfg.idle_poll_seconds if idle_for > IDLE_AFTER_S else self.cfg.poll_seconds)
                 else:
                     self._idle_since = None
@@ -255,6 +259,20 @@ class Runner:
         self.executor.shutdown(wait=True)
         if self._stopping:
             self.recover_orphans()
+
+    def maybe_self_update(self, now) -> None:
+        """Idle and nothing in flight: pull swarm-control if main moved and restart on the new code."""
+        if not self.auto_update or any(self.active.values()):
+            return
+        if self._last_update_check and (now - self._last_update_check).total_seconds() < SELF_UPDATE_EVERY_S:
+            return
+        self._last_update_check = now
+        from .selfupdate import check_and_update, restart_self
+        new = check_and_update()
+        if new:
+            self.log(f"swarm-control updated to {new}; restarting this runner")
+            self.heartbeat(force=True)
+            restart_self()
 
     # ----- one task -----
     def _claim_watch(self, task: Task):
@@ -484,10 +502,25 @@ class Runner:
             self.log(f"[{task.id}] {note.text[:120]}")
 
         status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error)
-        task.status = status
-        self.board.update_task(task, PUBLISH_FIELDS)
+        if not self.publish_outcome(task, status):
+            return Outcome(task, report, result, verify_ok, self.board.get_task(task.id).status)
         self.log(f"[{task.id}] → {status.value}")
         return Outcome(task, report, result, verify_ok, status)
+
+    def publish_outcome(self, task: Task, status: Status) -> bool:
+        """Write the run's result unless the board closed the task meanwhile (human merge, `swarm cut`) or another
+        runner holds the claim now; a late publish must never reopen finished work (T-001 was redone, Oct 4 2026)."""
+        fresh = self.board.get_task(task.id)
+        if fresh is not None:
+            if fresh.status in (Status.DONE, Status.CUT):
+                self.log(f"[{task.id}] result discarded: task is {fresh.status.value} on the board")
+                return False
+            if fresh.claim_nonce and task.claim_nonce and fresh.claim_nonce != task.claim_nonce:
+                self.log(f"[{task.id}] result discarded: claim now belongs to another run")
+                return False
+        task.status = status
+        self.board.update_task(task, PUBLISH_FIELDS)
+        return True
 
     def _decide(self, task: Task, report: Report, result: RunResult, changed: list[str],
                 verify_ok: bool | None, verify_tail: str, push_error: str) -> Status:

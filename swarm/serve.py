@@ -17,7 +17,7 @@ from .status import render_headline, render_status
 from .workspace import Workspace
 
 IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
-FAST_STEPS = ("assigned", "reaped", "retried", "relayed", "promoted", "rerouted")
+FAST_STEPS = ("assigned", "reaped", "reconciled", "redistributed", "retried", "relayed", "promoted", "rerouted")
 
 
 def _dependency_cycles(tasks: list[Task]) -> list[list[str]]:
@@ -67,6 +67,8 @@ class Server:
         self.now, self.sleep, self.log, self.host = now, sleep, log, host
         self.status_every_s, self.review_batch, self.background = status_every_s, review_batch, background
         self._last_status = None
+        self._pr_checked: dict = {}
+        self._agent_seen: dict = {}      # agent name -> last status we saw, to notice offline -> online
         # self-improvement: a retro per completed milestone (lessons + tuning committed to main)
         self.retro_state = Path.home() / ".swarm" / cfg.project / "retro.json"
         self.retro = self._default_retro
@@ -136,6 +138,53 @@ class Server:
             if row.last_heartbeat and (now - row.last_heartbeat) >= stale and (row.status != "offline" or row.current_task):
                 row.status, row.current_task = "offline", ""
                 self.board.upsert_agent(row)
+        return n
+
+    def redistribute_on_return(self) -> int:
+        """When an agent comes back from offline, every Ready task is routed again with it available, so work that
+        piled up on the survivors spreads out immediately instead of waiting for the slower stealing rule."""
+        rows = {a.name: a for a in self.board.list_agents()}
+        returned = []
+        for name in self.cfg.agents:
+            status = rows[name].status if name in rows else "offline"
+            prev = self._agent_seen.get(name)
+            self._agent_seen[name] = status
+            if prev == "offline" and status != "offline":
+                returned.append(name)
+        if not returned:
+            return 0
+        ctx = context_from_board(self.board, self.cfg, self.now())
+        n = 0
+        for t in self.board.list_tasks(status=[Status.READY]):
+            agent, model, effort = route(t, self.cfg, ctx)
+            if agent != t.agent:
+                ctx.queue_depth[t.agent] = max(0, ctx.queue_depth.get(t.agent, 0) - 1)
+                ctx.queue_depth[agent] = ctx.queue_depth.get(agent, 0) + 1
+                t.agent, t.model, t.effort = agent, model, effort
+                self.board.update_task(t, ["agent", "model", "effort"])
+                self.log(f"[{t.id}] redistributed → {agent}/{model} ({', '.join(returned)} back online)")
+                n += 1
+        return n
+
+    def reconcile_merged(self) -> int:
+        """A PR merged outside the swarm (a human clicked merge) closes its task; otherwise the task is retried
+        and the work redone (T-001, Oct 4 2026). Checked at most once a minute per task."""
+        n = 0
+        now = self.now()
+        for t in self.board.list_tasks(status=[Status.RUNNING, Status.REVIEW, Status.MERGE_READY,
+                                               Status.CHANGES_REQUESTED, Status.FAILED, Status.BLOCKED]):
+            if not t.pr_url:
+                continue
+            last = self._pr_checked.get(t.id)
+            if last and (now - last).total_seconds() < 60:
+                continue
+            self._pr_checked[t.id] = now
+            info = self.ws.pr_info(t.pr_url)
+            if str(info.get("state", "")).upper() == "MERGED":
+                t.status, t.claim_nonce, t.feedback = Status.DONE, "", ""
+                self.board.update_task(t, ["status", "claim_nonce", "feedback"])
+                self.log(f"[{t.id}] PR already merged → Done")
+                n += 1
         return n
 
     def retry_failed(self) -> int:
@@ -409,6 +458,8 @@ class Server:
         self._step(summary, "lock", lambda: (self.heartbeat_lock(), 0)[1])
         self._step(summary, "assigned", self.assign_ids)
         self._step(summary, "reaped", self.reap)
+        self._step(summary, "reconciled", self.reconcile_merged)
+        self._step(summary, "redistributed", self.redistribute_on_return)
         self._step(summary, "retried", self.retry_failed)
         self._step(summary, "relayed", self.relay)
         self._step(summary, "promoted", self.promote)

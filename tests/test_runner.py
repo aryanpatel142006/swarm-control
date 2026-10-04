@@ -541,3 +541,19 @@ def test_loop_survives_board_outages_with_backoff(cfg, git_repo, tmp_path):
     assert calls["n"] == 5
     assert sleeps[:3] == [15, 30, 60]            # backoff while failing
     assert sleeps[3] == cfg.poll_seconds         # back to normal once it recovers
+
+
+def test_runner_does_not_overwrite_a_task_closed_while_it_ran(cfg, git_repo, tmp_path):
+    """A human merge or `swarm cut` during a run must win over the runner's late publish (Oct 4 2026, T-001)."""
+    from swarm.runner import Runner
+    from swarm.models import Status
+    runner, board = _runner(cfg, git_repo, tmp_path) if "_runner" in globals() else (None, None)
+    if runner is None:
+        import pytest
+        pytest.skip("no runner fixture helper in this module")
+    t = board.create_task(Task(id="", title="x", status=Status.READY, agent="claude-a"))
+    t.claim_nonce = "abc"; t.status = Status.RUNNING
+    board.update_task(t, ["claim_nonce", "status"])
+    closed = board.get_task(t.id); closed.status = Status.DONE; board.update_task(closed, ["status"])
+    assert runner.publish_outcome(t, Status.FAILED) is False
+    assert board.get_task(t.id).status is Status.DONE

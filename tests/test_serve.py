@@ -386,3 +386,31 @@ def test_rebalance_leaves_work_with_a_stronger_agent_that_has_a_free_slot(cfg, g
     waiting = board.create_task(Task(id="", title="setup script", status=Status.READY, agent="codex-a", type="infra"))
     assert srv.rebalance() == 0          # codex-a will pick it up on its next poll; no need to downgrade
     assert board.get_task(waiting.id).agent == "codex-a"
+
+
+def test_reconcile_marks_tasks_done_when_their_pr_was_merged_by_a_human(cfg, git_repo, tmp_path):
+    """Oct 4 2026: the user merged PR #3 on GitHub while its task was Running on a silent agent; the task was
+    later retried on another agent and redid merged work."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    t = board.create_task(Task(id="", title="core", status=Status.RUNNING, agent="codex-a",
+                               pr_url="https://github.com/x/y/pull/3"))
+    u = board.create_task(Task(id="", title="open", status=Status.REVIEW, agent="codex-a",
+                               pr_url="https://github.com/x/y/pull/4"))
+    srv.ws.pr_info = lambda ref: {"state": "MERGED"} if ref.endswith("/3") else {"state": "OPEN"}
+    assert srv.reconcile_merged() == 1
+    assert board.get_task(t.id).status is Status.DONE and board.get_task(u.id).status is Status.REVIEW
+
+
+def test_redistribute_when_an_agent_comes_back_online(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    board.upsert_agent(AgentRow(name="codex-a", status="offline", last_heartbeat=utcnow()))
+    assert srv.redistribute_on_return() == 0           # first sighting: nothing changed yet
+    for i in range(3):   # backend work piled on claude-a while codex-a was away
+        board.create_task(Task(id="", title=f"b{i}", status=Status.READY, agent="claude-a", type="backend"))
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=utcnow()))
+    moved = srv.redistribute_on_return()
+    assert moved >= 1
+    agents = {board.get_task(f"T-00{i}").agent for i in (1, 2, 3)}
+    assert "codex-a" in agents                       # codex-a is the stronger backend agent and is back
+    assert srv.redistribute_on_return() == 0          # steady state: no churn
