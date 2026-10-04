@@ -76,6 +76,14 @@ The harness gets better each time it is used. Whenever something surprises you (
 
 Do not let improvement work starve the product: harness fixes happen between milestones or while workers are busy, and anything larger than ~30 minutes becomes a note for later.
 
+## Model roster (verify ids before the event; update this list when a provider ships a new model)
+| Provider | best | high | mid | low | Notes (Oct 4 2026) |
+|---|---|---|---|---|---|
+| Claude Code | `fable` (long-horizon; planner, orchestrator) | `opus` (frontend #1 on WebDev Arena) | `sonnet` | `haiku` (never on frontend pages) | ids are aliases accepted by `claude --model` |
+| Codex | `gpt-6-astra` | `gpt-6-astra` | `gpt-6-sol` — **a newer Sol release exists; confirm its exact id on the Codex laptop and put it in `models.mid`** | `gpt-6-luna` | ids come from the Codex model picker on the laptop that runs it |
+| Gemini / Antigravity | parked (login issues, quota) | | | | see rehearsal notes |
+Change a tier in `.swarm/config.yaml` → `agents.<name>.models`; running tasks keep their model, new claims use the new one; the teammate's runner needs a `git pull` + restart to see config changes.
+
 ## 6. Command reference
 | Command | Use |
 |---|---|
