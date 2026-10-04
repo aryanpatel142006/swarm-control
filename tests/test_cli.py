@@ -160,3 +160,26 @@ def test_doctor_warns_when_the_laptop_can_sleep(cfg):
 def test_template_ignores_the_planner_scratch_file():
     from swarm.cli import TEMPLATE_DIR
     assert ".swarm/tasks.proposed.json" in (TEMPLATE_DIR / ".gitignore").read_text()
+
+
+def test_doctor_flags_broken_doc_refs_and_type_keys(project_dir, sample_config_dict):
+    import yaml
+    from swarm.config import load_config
+    sample_config_dict["docs_by_type"] = {"_all": ["PLAN.md#summary", "PLAN.md#ground-rules"],
+                                          "ml": ["docs/ARCHITECTURE.md"], "frontend": ["docs/NOPE.md"]}
+    sample_config_dict["skills_by_type"] = {"ml": ["x"], "ml_audoi": ["y"]}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    (project_dir / "PLAN.md").write_text("# P\n\n## Summary\nhello\n\n## Ground rules\n- a\n")
+    (project_dir / "docs").mkdir(exist_ok=True)
+    (project_dir / "docs" / "ARCHITECTURE.md").write_text("# A\n")
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+
+    class R:
+        ok, out, err = True, "v1", ""
+
+    checks = {c.name: c for c in run_checks(cfg, "host-a", offline=True, notion_token="x",
+                                             which=lambda n: f"/usr/bin/{n}", run=lambda a, cwd, timeout=60: R())}
+    assert not checks["docs refs"].ok
+    assert "PLAN.md#ground-rules" in checks["docs refs"].detail and "docs/NOPE.md" in checks["docs refs"].detail
+    assert "PLAN.md#summary" not in checks["docs refs"].detail
+    assert not checks["type keys"].ok and "ml_audoi" in checks["type keys"].detail and "ml" not in checks["type keys"].detail.split()

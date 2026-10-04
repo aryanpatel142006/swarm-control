@@ -84,6 +84,8 @@ def main(ctx: typer.Context,
          config: Path = typer.Option(None, "--config", help="path to .swarm/config.yaml"),
          memory: bool = typer.Option(False, "--memory", help="use an in-memory board (dry runs)"),
          host: str = typer.Option(None, "--host", help="this laptop's name in config.hosts (or SWARM_HOST)")):
+    from .env import load_env_file
+    load_env_file()                      # ~/.swarm/env fills in NOTION_TOKEN / SWARM_HOST when the shell did not
     state.cfg = None
     state.config_path = config
     state.memory = memory

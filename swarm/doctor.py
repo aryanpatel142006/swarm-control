@@ -87,6 +87,30 @@ def run_checks(cfg: Config, host: str | None, *, offline: bool = False, notion_t
         if rel:
             p = cfg.repo_root / rel
             checks.append(Check(label, p.exists(), str(p) if p.exists() else f"missing {rel}"))
+    checks.extend(context_checks(cfg))
+    return checks
+
+
+def context_checks(cfg: Config) -> list[Check]:
+    """Worker context is only as good as its config: every docs_by_type ref must resolve to text, and every
+    *_by_type key must be a task type or a family (`ml`), or workers silently get nothing (Oct 4 2026)."""
+    from .models import TASK_TYPES
+    from .prompt import read_doc
+    broken = []
+    for refs in cfg.docs_by_type.values():
+        for ref in refs:
+            if not read_doc(cfg.repo_root, ref):
+                broken.append(ref)
+    checks = [Check("docs refs", not broken,
+                    "all docs_by_type refs resolve" if not broken else "no text for: " + ", ".join(dict.fromkeys(broken))
+                    + " (section refs match the heading text, e.g. PLAN.md#Ground rules)")]
+    families = {t.split("_", 1)[0] for t in TASK_TYPES}
+    valid = set(TASK_TYPES) | families | {"_all"}
+    bad = [f"{m}.{k}" for m, mapping in (("docs_by_type", cfg.docs_by_type), ("skills_by_type", cfg.skills_by_type),
+                                         ("mcp_by_type", cfg.mcp_by_type), ("plugins_by_type", cfg.plugins_by_type))
+           for k in mapping if k not in valid]
+    checks.append(Check("type keys", not bad,
+                        "all *_by_type keys are task types" if not bad else "unknown keys: " + ", ".join(bad)))
     return checks
 
 

@@ -11,7 +11,7 @@ Harness repo: `~/CODE/CLAUDE/HACKRU2026/swarm-control` (public: github.com/aryan
 
 ## 0. Before anything
 ```bash
-source ~/.swarm/env                       # NOTION_TOKEN + SWARM_HOST=laptop-a; nothing loads it automatically
+# ~/.swarm/env (NOTION_TOKEN, SWARM_HOST=laptop-a, provider keys) is loaded by `swarm` itself when the shell did not
 export PATH="$HOME/CODE/CLAUDE/HACKRU2026/swarm-control/.venv/bin:$PATH"
 cd <project repo>                          # config is found by walking up to .swarm/config.yaml
 swarm doctor                               # every row yes; fix NO rows first
@@ -102,5 +102,5 @@ Learned from real runs; newest last. Each is one line: rule (evidence).
 - One owner per shared doc per milestone (Roomcast T-003/T-011/T-013 rebase conflicts, $5.58 task).
 - Haiku never on frontend pages; a page that calls an API is M (Roomcast T-013, 3 turn-limit failures).
 - `*_by_type` keys must match task types; `ml` used to match nothing until family keys were added (Oct 4, selective-hearing setup).
-- `docs_by_type` section refs match the heading text exactly, case-insensitive: `PLAN.md#Ground rules`, not `#ground-rules` (Oct 4).
-- `NOTION_TOKEN` is never loaded automatically: `source ~/.swarm/env` in every shell that runs `swarm` (Oct 4).
+- `docs_by_type` section refs match the heading text (`PLAN.md#Ground rules`, not `#ground-rules`); `swarm doctor` now flags refs that resolve to nothing and unknown `*_by_type` keys (Oct 4).
+- `swarm` loads `~/.swarm/env` itself when `NOTION_TOKEN`/`SWARM_HOST` are missing (Oct 4); the shell's values win, so `source` it only when you want to override.
