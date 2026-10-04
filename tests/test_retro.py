@@ -127,6 +127,8 @@ def test_run_retro_writes_lessons_and_tuning_to_main(cfg, git_repo, tmp_path):
     from swarm.board.memory import InMemoryBoard
     from swarm.retro import run_retro
     from swarm.workspace import CmdResult, Workspace
+    # This project has a usable server to promote, regardless of developer laptop setup.
+    cfg.mcp_servers["playwright"] = {"command": "npx", "args": ["@playwright/mcp@latest"]}
     board = InMemoryBoard()
     board.create_task(Task(id="", title="Panel", type="frontend", size="M", status=Status.DONE, agent="claude-a", milestone="M1"))
     board.create_task(Task(id="", title="Landing", type="frontend", size="M", status=Status.DONE, agent="claude-a", milestone="M1", review_rounds=3))
@@ -173,3 +175,29 @@ def test_tool_defaults_only_promote_real_skills_and_known_mcp_servers(tmp_path):
                   known_skills={"test-driven-development", "frontend-design"}, known_mcp={"context7", "playwright"})
     f = {x.rule: x for x in findings_from(ev)}
     assert f["tool-default"].patch == {"skills_by_type.backend+": ["test-driven-development"], "mcp_by_type.backend+": ["context7"]}
+
+
+def test_retro_discovers_codex_only_registered_mcp(cfg, git_repo, tmp_path, monkeypatch):
+    """Exercise CLI discovery through a local executable without changing the laptop's MCP config."""
+    import os
+    from swarm.board.memory import InMemoryBoard
+    from swarm.retro import run_retro
+    from swarm.workspace import CmdResult, Workspace
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text('#!/bin/sh\n[ "$1 $2 $3" = "mcp list --json" ] || exit 1\n'
+                     "echo '[{\"name\":\"fixture-codex-only\",\"enabled\":false}]'\n")
+    codex.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    board = InMemoryBoard()
+    for title in ["First", "Second"]:
+        task = board.create_task(Task(id="", title=title, type="backend", size="M", status=Status.DONE,
+                                      agent="codex-a", milestone="M1"))
+        _commit_on_main(git_repo, f"docs/decisions/{task.id}.md",
+                        f"## {task.id}\n- **Tools used:** fixture-codex-only (mcp, helped): looked up docs\n",
+                        f"{task.id} · {title}")
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    findings = run_retro(cfg, board, ws, ledger=Ledger(tmp_path / "usage.jsonl"), dry_run=True)
+    promoted = next(f for f in findings if f.rule == "tool-default")
+    assert promoted.patch["mcp_by_type.backend+"] == ["fixture-codex-only"]

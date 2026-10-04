@@ -9,6 +9,30 @@ from ..workspace import run_cmd
 from .base import RATE_LIMIT_RE, Adapter, RunSpec, parse_reset_at
 
 
+def _strict_schema(schema: dict) -> dict:
+    """Codex requires closed objects with every property required; optional values accept null."""
+    result = dict(schema)
+    for key in ("$defs", "definitions"):
+        if key in result:
+            result[key] = {name: _strict_schema(value) for name, value in result[key].items()}
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in result:
+            result[key] = [_strict_schema(value) for value in result[key]]
+    if isinstance(result.get("items"), dict):
+        result["items"] = _strict_schema(result["items"])
+    if result.get("type") == "object" or "properties" in result:
+        properties = result.get("properties", {})
+        required = set(result.get("required", []))
+        result["properties"] = {
+            name: _strict_schema(value) if name in required else {
+                "anyOf": [_strict_schema(value), {"type": "null"}]}
+            for name, value in properties.items()
+        }
+        result["required"] = list(properties)
+        result["additionalProperties"] = False
+    return result
+
+
 def registered_mcp_servers(run=run_cmd) -> set[str]:
     """Names of MCP servers this laptop's Codex knows (`codex mcp list --json`); empty when unavailable."""
     r = run(["codex", "mcp", "list", "--json"], cwd=Path.cwd(), timeout=30)
@@ -62,7 +86,7 @@ class CodexAdapter(Adapter):
         if spec.schema:
             schema_path = spec.cwd / ".swarm-run" / "schema.json"
             schema_path.parent.mkdir(exist_ok=True)
-            schema_path.write_text(json.dumps(spec.schema))
+            schema_path.write_text(json.dumps(_strict_schema(spec.schema)))
             argv += ["--output-schema", str(schema_path)]
         argv += list(spec.extra_args) + ["-"]
         return argv, spec.prompt_file.read_bytes()

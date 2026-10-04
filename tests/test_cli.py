@@ -183,3 +183,33 @@ def test_doctor_flags_broken_doc_refs_and_type_keys(project_dir, sample_config_d
     assert "PLAN.md#ground-rules" in checks["docs refs"].detail and "docs/NOPE.md" in checks["docs refs"].detail
     assert "PLAN.md#summary" not in checks["docs refs"].detail
     assert not checks["type keys"].ok and "ml_audoi" in checks["type keys"].detail and "ml" not in checks["type keys"].detail.split()
+
+
+def test_codex_smoke_initializes_git_and_uses_worker_arguments(cfg, tmp_path, monkeypatch):
+    import subprocess
+    from swarm.doctor import smoke_agent
+    from swarm.models import RunResult, Usage
+    cfg.agents["codex-a"].extra_args = ["-c", "sandbox_workspace_write.network_access=true"]
+    smoke_dir = tmp_path / "fresh-smoke"
+    class InspectAdapter:
+        def run(self, spec):
+            assert subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
+                                  cwd=spec.cwd, capture_output=True, text=True).stdout.strip() == "true"
+            assert spec.extra_args == cfg.agents["codex-a"].extra_args
+            assert not (spec.cwd / ".swarm-run/report.json").exists()
+            return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"status": "done"}, usage=Usage())
+    monkeypatch.setattr("swarm.adapters.get_adapter", lambda a: InspectAdapter())
+    assert smoke_agent(cfg, "codex-a", smoke_dir).ok
+    (smoke_dir / ".swarm-run/report.json").write_text('{"status":"done"}')
+    assert smoke_agent(cfg, "codex-a", smoke_dir).ok
+
+
+def test_codex_smoke_git_failure_does_not_call_model(cfg, tmp_path, monkeypatch):
+    from swarm.doctor import smoke_agent
+    from swarm.workspace import CmdResult
+    monkeypatch.setattr("swarm.doctor.run_cmd", lambda *a, **kw: CmdResult(1, "", "git init failed"))
+    def unexpected(a):
+        raise AssertionError("model must not run after git preparation fails")
+    monkeypatch.setattr("swarm.adapters.get_adapter", unexpected)
+    result = smoke_agent(cfg, "codex-a", tmp_path / "smoke")
+    assert not result.ok and "git init failed" in result.detail

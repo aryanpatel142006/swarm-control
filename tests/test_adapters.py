@@ -312,3 +312,40 @@ def test_run_stops_the_cli_when_asked(tmp_path):
     t0 = time.time()
     r = a.run(spec(tmp_path, schema=None, timeout_s=60, should_stop=should_stop, stop_poll_s=0.2))
     assert not r.ok and r.exit_code == -3 and "stopped" in r.error and time.time() - t0 < 10
+
+
+def test_codex_strict_schema_preserves_optional_and_nested_reports(tmp_path):
+    from copy import deepcopy
+    from swarm.report import REPORT_SCHEMA, REVIEW_SCHEMA
+    for schema in [REPORT_SCHEMA, REVIEW_SCHEMA]:
+        original = deepcopy(schema)
+        CodexAdapter().build_command(spec(tmp_path, schema=schema))
+        written = json.loads((tmp_path / ".swarm-run/schema.json").read_text())
+        def check(node):
+            if node.get("type") == "object":
+                assert node["additionalProperties"] is False
+                assert set(node["required"]) == set(node.get("properties", {}))
+            for prop in node.get("properties", {}).values():
+                check(prop)
+            if isinstance(node.get("items"), dict):
+                check(node["items"])
+            for option in node.get("anyOf", []):
+                check(option)
+        check(written)
+        assert written["properties"]["summary"]["type"] == "string"
+        optional = "question" if "question" in schema["properties"] else "findings"
+        assert {"type": "null"} in written["properties"][optional]["anyOf"]
+        assert schema == original
+
+
+def test_codex_optional_enum_and_reference_allow_null(tmp_path):
+    schema = {"type": "object", "$defs": {"detail": {"type": "object", "properties": {
+        "text": {"type": "string"}}}}, "properties": {
+        "mode": {"type": "string", "enum": ["done", "blocked"]},
+        "detail": {"$ref": "#/$defs/detail"}}}
+    CodexAdapter().build_command(spec(tmp_path, schema=schema))
+    written = json.loads((tmp_path / ".swarm-run/schema.json").read_text())
+    assert written["properties"]["mode"]["anyOf"] == [
+        {"type": "string", "enum": ["done", "blocked"]}, {"type": "null"}]
+    assert written["$defs"]["detail"]["additionalProperties"] is False
+    assert written["$defs"]["detail"]["required"] == ["text"]

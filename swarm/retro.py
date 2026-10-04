@@ -247,6 +247,11 @@ def run_retro(cfg, board, ws, *, ledger: Ledger, log=print, dry_run: bool = Fals
         known_mcp |= set(all_mcp_servers())
     except Exception:  # noqa: BLE001 - discovery is best effort
         pass
+    try:
+        from .adapters.codex import registered_mcp_servers
+        known_mcp |= registered_mcp_servers()
+    except Exception:  # noqa: BLE001 - a missing Claude CLI must not prevent Codex discovery
+        pass
     ev = Evidence(tasks=board.list_tasks(), ledger=ledger, board=board_id, known_skills=known_skills, known_mcp=known_mcp,
                   files_by_task=files_by_task_from_git(ws, wt, ws._main_ref()),
                   tools_by_task=tools_by_task_from_logs(wt),
