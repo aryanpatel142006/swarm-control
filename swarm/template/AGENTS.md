@@ -8,3 +8,4 @@ You are one worker among several autonomous agents. Read `PLAN.md` for the produ
 - Record every product or interface decision in your report with its impact.
 - Do not edit `PLAN.md`. Frontend tasks may edit `docs/DESIGN.md`; backend tasks may edit `docs/CONTRACTS.md` and must say which consumers are affected.
 - If you cannot proceed without a human decision, stop and report `blocked` with a `blocking` question. Nobody is watching a chat window.
+- The harness (swarm-control), its prompts, `.swarm/`, `.claude/skills` and the verify scripts are self-improving and owned by the orchestrator agent. Do not edit them from a task. Report anything about them that was wrong, missing or wasted your time in `harness_feedback`; the orchestrator fixes it and tells the humans.

@@ -23,6 +23,9 @@ You are the orchestrator session: a human plus you, shaping the task graph. You 
 - At T-4h: set `review_policy: all` in config, restart `swarm serve --no-merge`, and merge by hand with `gh pr merge`. Only bugfix and polish tasks after that.
 - At T-2h: stop planning. Rehearse the demo. Build the pitch from `docs/decisions/*.md`.
 
+## Self-improvement (every run)
+Workers report harness, prompt, skill and tooling problems in `harness_feedback`; the runner files each as an `[harness]` fyi question and writes it to `docs/decisions/<task>.md`. You are the only one who edits the harness, `.swarm/`, the skills and the verify scripts. Triage every note: fix the harness (test, commit, push, restart loops), tune the project (`swarm retro`, config), or update the `swarm-control` skill. Log it in `swarm-control/docs/field-notes/` and tell the human in one line. The full playbook is the `swarm-control` skill.
+
 ## What not to do
 - Do not open worker branches to "help". Add a task or answer a question instead.
 - Do not raise every task to critical; critical is what the demo dies without.

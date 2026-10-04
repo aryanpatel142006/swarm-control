@@ -88,3 +88,26 @@ def test_synthesized_report_keeps_the_real_error(tmp_path):
     """A spawn failure said 'Report missing and no files changed'; the CLI's own error must survive."""
     r = parse_report(None, tmp_path, changed_files=[], error="cli not found: claude")
     assert r.synthesized and "cli not found: claude" in r.summary
+
+
+def test_harness_feedback_is_parsed_logged_and_becomes_a_board_note(tmp_path):
+    from swarm.report import REPORT_SCHEMA, harness_feedback_question
+    assert "harness_feedback" in REPORT_SCHEMA["properties"]
+    r = parse_report({"status": "done", "summary": "ok",
+                      "harness_feedback": [{"what": "verify_fast.sh needs ruff but the venv lacks it",
+                                            "suggestion": "add ruff to the dev extra"},
+                                           "the hearing-stack skill says 48 kHz for DFN but io.py has no resampler",
+                                           {"what": ""}]},
+                     tmp_path, changed_files=["a.py"])
+    assert len(r.harness_feedback) == 2
+    assert r.harness_feedback[0]["suggestion"] == "add ruff to the dev extra"
+    assert r.harness_feedback[1]["what"].startswith("the hearing-stack skill")
+    task = Task(id="T-007", title="DFN3 stage", type="ml_audio", importance="high", size="M", status="Running",
+                agent="claude-a")
+    q = harness_feedback_question(task, r)
+    assert q["kind"] == "fyi" and q["text"].startswith("[harness] T-007")
+    assert "ruff" in q["context"] and "resampler" in q["context"]
+    md = decisions_markdown(task, r)
+    assert "Harness feedback" in md and "add ruff" in md
+    empty = parse_report({"status": "done", "summary": "ok"}, tmp_path, changed_files=["a.py"])
+    assert empty.harness_feedback == [] and harness_feedback_question(task, empty) is None

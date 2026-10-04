@@ -32,6 +32,11 @@ REPORT_SCHEMA = {
             "options": {"type": "array", "items": {"type": "string"}}, "proceeding_with": {"type": "string"}},
             "required": ["kind", "text"]},
         "notes_for_reviewer": {"type": "string"},
+        "harness_feedback": {"type": "array", "description": "Problems with the harness, prompt, rules, skills, "
+                             "tools or verify scripts that cost you time; the orchestrator fixes them, not you",
+                             "items": {"type": "object", "properties": {
+                                 "what": {"type": "string"}, "suggestion": {"type": "string"}},
+                                 "required": ["what"]}},
     },
 }
 
@@ -84,7 +89,31 @@ def parse_report(structured: dict | None, worktree: Path, *, changed_files: list
         decisions=[d for d in (data.get("decisions") or []) if isinstance(d, dict)],
         tools_used=_tools(data.get("tools_used")), question=q,
         notes_for_reviewer=str(data.get("notes_for_reviewer") or ""),
+        harness_feedback=_feedback(data.get("harness_feedback")),
     )
+
+
+def _feedback(raw) -> list[dict]:
+    out = []
+    for f in raw or []:
+        if isinstance(f, str) and f.strip():
+            out.append({"what": f.strip(), "suggestion": ""})
+        elif isinstance(f, dict) and str(f.get("what", "")).strip():
+            out.append({"what": str(f["what"]).strip(), "suggestion": str(f.get("suggestion") or "").strip()})
+    return out
+
+
+def harness_feedback_question(task: Task, r: Report) -> dict | None:
+    """One fyi board note per task carrying the worker's harness feedback, so the orchestrator sees it on the
+    board from any laptop and ships the fix (workers never edit the harness or the skills)."""
+    if not r.harness_feedback:
+        return None
+    n = len(r.harness_feedback)
+    lines = [f"- {f['what']}" + (f" → {f['suggestion']}" if f.get("suggestion") else "") for f in r.harness_feedback]
+    return {"kind": "fyi", "text": f"[harness] {task.id}: {n} note{'s' if n != 1 else ''} from {task.agent or 'worker'}"
+            f" — {r.harness_feedback[0]['what']}"[:190],
+            "options": [], "proceeding_with": "orchestrator triages: fix harness / tune project / update skill",
+            "context": "\n".join(lines)}
 
 
 def _tools(raw) -> list[dict]:
@@ -138,13 +167,16 @@ def report_to_markdown(r: Report, *, attempt: int, verify_ok: bool | None, verif
 
 
 def decisions_markdown(task: Task, r: Report) -> str:
-    if not r.decisions and not r.tools_used:
+    if not r.decisions and not r.tools_used and not r.harness_feedback:
         return ""
     stamp = utcnow().strftime("%Y-%m-%d %H:%M UTC")
     out = [f"## {task.id} · {task.title} ({stamp})"]
     out += [f"- **[{d.get('impact', '?')}]** {d.get('decision', '')} — {d.get('why', '')}" for d in r.decisions]
     if r.tools_used:
         out.append("- **Tools used:** " + "; ".join(_tool_line(t) for t in r.tools_used))
+    if r.harness_feedback:
+        out.append("- **Harness feedback:** " + "; ".join(
+            f["what"] + (f" → {f['suggestion']}" if f.get("suggestion") else "") for f in r.harness_feedback))
     return "\n".join(out) + "\n\n"
 
 

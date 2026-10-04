@@ -50,7 +50,7 @@ Model choice is yours: `swarm assign T-012 --agent claude-a --model opus --effor
 ## 3. Watch loop (the long-running part)
 Every 10-15 minutes (use Monitor on `serve.log` / ScheduleWakeup / a sleep-free poll, not a tight loop):
 1. `swarm status` → read RISK lines first, then Running/Blocked/Review.
-2. **Open questions**: answer reversible ones yourself with `swarm answer Q-007 "..."` (add `--follow-up` on an fyi that changes the agent's choice). Only escalate to the human what truly needs them (API keys, recordings, money, product taste). Tell the user in one line what you need.
+2. **Open questions**: answer reversible ones yourself with `swarm answer Q-007 "..."` (add `--follow-up` on an fyi that changes the agent's choice). Only escalate to the human what truly needs them (API keys, recordings, money, product taste). Tell the user in one line what you need. **`[harness]` notes** are worker feedback about the harness: triage them per §5 and answer the question with what you did.
 3. **Stuck work**: a task Running far past its size limit → `swarm logs T-xxx`; a failed task with 3 attempts → read the decision log, then cut + re-add a better-specified task (don't just retry). Offline agent → `swarm reroute`.
 4. **Merges**: serve reviews (policy in config) and merges. Pull main locally after merges if you need to read code.
 5. **Costs**: `swarm usage --since 5h`. Waste (retries, failed attempts) above ~30 % means tasks are badly specified, so fix the planning, not the workers.
@@ -62,7 +62,9 @@ Every 10-15 minutes (use Monitor on `serve.log` / ScheduleWakeup / a sleep-free 
 - Teammate actions (pull + restart runner, log in, plug in) go to the user as one ready-to-forward message.
 
 ## 5. Self-improvement loop (mandatory, every run)
-The harness gets better each time it is used. Whenever something surprises you (a bug, a stall, a wasteful pattern, a missing feature, a confusing message), do all of:
+**Contract, known to every agent:** the harness, its prompts, `.swarm/` config, the vendored skills and this skill are self-updating, and the orchestrator (you, the human's agent on laptop-a) is the only writer. Workers never edit them; they report problems in `harness_feedback` in their report, which the runner files as an `[harness]` fyi question on the board and in `docs/decisions/<task>.md`. Both laptops' notes land on the same board. You triage every note, ship the fix, and tell the human what changed (one line per change, plus the field-notes file). This is written into `swarm/prompts/rules.md` (rule 10), the template `AGENTS.md`, and `ORCHESTRATOR.md`, so Claude and Codex workers both see it.
+
+The harness gets better each time it is used. Whenever something surprises you (a bug, a stall, a wasteful pattern, a missing feature, a confusing message) or a `[harness]` note arrives, do all of:
 1. **Record** it in `swarm-control/docs/field-notes/<YYYY-MM-DD>-<project>.md`: what happened, evidence (task id, log line), cost/time impact, fix or idea.
 2. **Fix the harness** when it is a harness problem:
    - Write a failing test in `swarm-control/tests/`, fix it, `.venv/bin/pytest -q` green, commit to swarm-control `main`, push.

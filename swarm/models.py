@@ -153,4 +153,5 @@ class Report:
     tools_used: list[dict] = field(default_factory=list)   # {name, kind, helped, note}
     question: dict | None = None
     notes_for_reviewer: str = ""
+    harness_feedback: list[dict] = field(default_factory=list)   # {what, suggestion}: the orchestrator fixes these
     synthesized: bool = False

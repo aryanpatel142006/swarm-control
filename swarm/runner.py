@@ -17,7 +17,8 @@ from .models import TIERS, AgentRow, Question, Report, RunResult, Status, Task, 
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
-from .report import REPORT_SCHEMA, debts_markdown, decisions_markdown, parse_report, report_to_markdown
+from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, harness_feedback_question, parse_report,
+                     report_to_markdown)
 from .usage import Ledger
 from .workspace import Workspace
 
@@ -463,6 +464,9 @@ class Runner:
                                "text": (report.summary or f"{task.id} reported blocked without saying why")[:190]}
         if report.question:
             self._file_question(task, report, report.question)
+        hf = harness_feedback_question(task, report)
+        if hf:
+            self._file_question(task, report, hf, context=hf.pop("context"))
 
         status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error)
         task.status = status
