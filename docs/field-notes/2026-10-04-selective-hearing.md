@@ -16,7 +16,13 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 8 | No automatic record of which models each laptop can run | user request | runner publishes CLI version + tier map on first heartbeat; `swarm doctor --models` probes ids (ea4ee99) |
 | 9 | `swarm plan` without a TTY aborts at the confirm prompt after spending the planner call; proposals are kept in `.swarm/tasks.proposed.json` | plan-M0.log | use `apply-proposals` (worked); idea: auto-detect non-TTY and skip the prompt with a notice |
 
+| 10 | Both first reviews (T-001, T-002) failed `verify_full.sh` with "No module named ruff/numpy": the main checkout's `.venv` had become a symlink to itself (`.venv -> .git/../.venv`, 19:15 EDT), so the worktree links resolved to nothing and the scripts fell back to the swarm-control venv's python on PATH. Cause of the self-link not pinned down (template `setup_worktree.sh` links `$MAIN/.venv` when `.venv` is missing; something removed the venv first) | task feedback, `ls -la .venv` | venv recreated; `setup_worktree.sh` exits in the main checkout and never self-links; `scripts/_py.sh` resolves the interpreter (project venv → main venv → python3) and prints it; both workers told via `swarm tell` (c40702f). Harness idea: `doctor` should check that `.venv/bin/python` resolves and is not a symlink loop; the reviewer should log which interpreter verify used |
+| 11 | `swarm tell` / worker `messages` only reach a task's **next** attempt (feedback is read when a run starts) | design | acceptable; the skill says so. Idea: for Running tasks, also append the message to the task's Notion page so a human sees it immediately |
+| 12 | codex-b heartbeat gap (3 min) 20 min into its first task: laptop sleep or runner stop on laptop-b | `swarm status` 23:52 UTC | reminded the user; the reaper requeues after `heartbeat_stale_minutes` (10) |
+
 ## Ideas for the harness (not done)
+- `swarm doctor`: fail when `.venv/bin/python` (or the configured interpreter) does not resolve; warn when `.venv` is a symlink in the main checkout.
+- reviewer: include the interpreter path and `pip freeze | head` in the verify_full failure finding so a bad environment is obvious at a glance.
 - `swarm plan`: when stdin is not a TTY, print the table and exit 0 with "run `swarm apply-proposals`" instead of "Aborted".
 - Worker → worker messages (`messages` in the report, `swarm tell`), plus an "Agent messages" view on the Questions database.
 - `swarm init` idempotency (still deferred from the ledger).
