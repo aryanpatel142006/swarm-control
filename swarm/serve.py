@@ -94,6 +94,7 @@ class Server:
 
     def heartbeat_lock(self) -> None:
         row = self.board.get_agent("serve") or AgentRow(name="serve", provider="serve")
+        row.current_task = "orchestrating"     # the board column reads naturally for the control loop too
         row.host, row.status, row.last_heartbeat = self.host, "running", self.now()
         self.board.upsert_agent(row)
         self._holds_lock = True

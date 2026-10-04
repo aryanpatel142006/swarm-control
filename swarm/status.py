@@ -63,6 +63,17 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     if harness_open:
         lines.append(f"Harness notes: {harness_open} open (for the orchestrator: `swarm answer Q-x` after triage)")
     lines.append("")
+    # an idle agent with nothing Ready for it, while work remains, is a planning failure the orchestrator
+    # must fix first (Oct 4 2026: codex-b sat idle for an hour behind a dependency chain)
+    open_tasks = [t for t in tasks if t.status not in (Status.DONE, Status.CUT)]
+    for a in agents:
+        if a.name == "serve" or a.status != "idle" or a.last_heartbeat is None:
+            continue
+        ready_for_it = [t for t in tasks if t.status is Status.READY and t.agent == a.name]
+        if not ready_for_it and open_tasks:
+            backlog = sum(1 for t in open_tasks if t.status is Status.BACKLOG)
+            risks.append(f"{a.name} is idle with nothing Ready for it while {len(open_tasks)} tasks are open "
+                         f"({backlog} in Backlog behind dependencies): un-chain or split tasks so it has work now")
     for r in risks:
         lines.append(f"RISK: {r}")
     if not risks:
