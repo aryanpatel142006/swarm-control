@@ -52,6 +52,7 @@ class CodexAdapter(Adapter):
         common = git_common_dir(spec.cwd)
         if common and sandbox != "danger-full-access":
             argv += ["--add-dir", common]   # a worktree's index and locks live under the main repo's .git
+            argv += ["--add-dir", str(Path(common).parent)]   # and the shared .venv lives in the main checkout (Q-003)
         if spec.mcp:
             # servers are registered once with `codex mcp add` (enabled = false) and switched on per run;
             # an unregistered name is skipped, never passed: a dangling entry would fail the whole run

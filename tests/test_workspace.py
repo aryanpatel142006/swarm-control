@@ -56,7 +56,7 @@ def test_rebase_conflict_detection(git_repo, tmp_path):
     (git_repo / "README.md").write_text("main version\n")
     _git(git_repo, "commit", "-qam", "main change")
     _git(git_repo, "push", "-q", "origin", "main")
-    ok, conflicts = ws.rebase_onto_main(path)
+    ok, conflicts, _causes = ws.rebase_onto_main(path)
     assert ok is False and conflicts == ["README.md"]
     assert _git(path, "status", "--porcelain").strip() == ""  # aborted cleanly
     ws.dispose(path)
@@ -71,7 +71,7 @@ def test_rebase_clean(git_repo, tmp_path):
     _git(git_repo, "add", "other.txt")
     _git(git_repo, "commit", "-qm", "main other")
     _git(git_repo, "push", "-q", "origin", "main")
-    ok, conflicts = ws.rebase_onto_main(path)
+    ok, conflicts, _causes = ws.rebase_onto_main(path)
     assert ok and conflicts == [] and (path / "other.txt").exists()
     ws.dispose(path)
 
@@ -196,3 +196,41 @@ def test_fetch_retries_on_a_ref_lock_and_serializes(git_repo, tmp_path):
     ws.sleep = lambda s: None
     ws.fetch()
     assert len(calls) == 2
+
+
+def test_provision_excludes_harness_links_and_scripts_never_see_swarms_venv(git_repo, tmp_path):
+    """Oct 4 2026: a worktree's .venv symlink was committed by `git add -A` (the project ignored `.venv/`, which
+    does not match a symlink) and later replaced the main checkout's venv with a link to itself. Also, scripts
+    run by the harness resolved `python3` to swarm-control's own venv."""
+    import sys
+    from swarm.workspace import Workspace
+    ws = Workspace(git_repo, tmp_path / "wt", push=lambda *a, **k: None) if "push" in Workspace.__init__.__code__.co_varnames else Workspace(git_repo, tmp_path / "wt")
+    wt = ws.provision("T-009")
+    exclude = (git_repo / ".git" / "info" / "exclude").read_text().splitlines()
+    for pat in (".venv", "node_modules", ".swarm-run/"):
+        assert pat in exclude
+    (wt / ".venv").symlink_to(git_repo)          # a harness-style link must never be staged
+    (wt / "real.txt").write_text("x")
+    assert ws.commit_all(wt, "T-009: test")
+    staged = ws.git(wt, "show", "--name-only", "--format=", "HEAD").out.split()
+    assert "real.txt" in staged and ".venv" not in staged
+    (wt / "p.sh").write_text("echo \"$PATH\"\n")
+    r = ws.run_script(wt, "p.sh", 30)
+    assert r.ok and str(Path(sys.executable).parent) not in r.out
+
+
+def test_rebase_feedback_names_the_main_commits_that_conflicted(git_repo, tmp_path):
+    from swarm.workspace import Workspace
+    ws = Workspace(git_repo, tmp_path / "wt")
+    wt = ws.provision("T-010")
+    (wt / "shared.txt").write_text("branch\n")
+    ws.commit_all(wt, "T-010: branch side")
+    (wt / "shared.txt").write_text("branch\n")
+    ws.push(wt, "task/T-010")
+    (git_repo / "shared.txt").write_text("main\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "infra: rewrite shared.txt")
+    _git(git_repo, "push", "-q", "origin", "main")
+    ok, conflicts, causes = ws.rebase_onto_main(wt)
+    assert not ok and conflicts == ["shared.txt"]
+    assert any("rewrite shared.txt" in c for c in causes)

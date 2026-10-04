@@ -2,6 +2,7 @@
 .env
 node_modules/
 .venv/
+.venv
 __pycache__/
 *.pyc
 artifacts/**/*.png
@@ -9,3 +10,4 @@ artifacts/**/*.mp4
 
 # planner scratch (swarm plan writes it every run)
 .swarm/tasks.proposed.json
+*.egg-info/

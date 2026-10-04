@@ -64,3 +64,15 @@ def test_headline_is_green_yellow_or_red_with_the_one_thing_to_know(cfg):
                       Task(id="T-4", title="d", milestone="M1", status=Status.FAILED, attempts=3, last_error="boom")]
     text, color = render_headline(cfg, bad, live, q, now)
     assert color == "red_background" and text.startswith("Risk")
+
+
+def test_needs_you_hides_harness_and_relay_notes(cfg):
+    from swarm.models import utcnow
+    qs = [Question(id="Q-1", text="Tap or rail?", task_id="T-3", status="Open", kind="blocking"),
+          Question(id="Q-2", text="[harness] T-3: 1 note", task_id="T-3", status="Open", kind="harness"),
+          Question(id="Q-3", text="[relay] T-3 → T-4: hi", task_id="T-4", status="Applied", kind="relay"),
+          Question(id="Q-4", text="[harness] T-4: 2 notes", task_id="T-4", status="Open", kind="harness")]
+    text = render_status(cfg, [], [], qs, utcnow())
+    needs = next(ln for ln in text.splitlines() if ln.startswith("Needs you: "))
+    assert "Q-1" in needs and "Q-2" not in needs and "Q-4" not in needs
+    assert "Harness notes: 2 open" in text

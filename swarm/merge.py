@@ -96,11 +96,12 @@ class Merger:
     def merge(self, task: Task) -> bool:
         wt = self.ws.provision(task.id, reuse_branch=True)
         try:
-            ok, conflicts = self.ws.rebase_onto_main(wt)
+            ok, conflicts, causes = self.ws.rebase_onto_main(wt)
             if not ok:
                 return self._back(task, "Rebase onto main conflicted. Resolve conflicts in: " + ", ".join(conflicts)
+                                  + (" (main changed them in: " + "; ".join(causes) + ")" if causes else "")
                                   + f". Run `git fetch origin && git rebase origin/{self.cfg.main_branch}`, "
-                                  "resolve, then `git rebase --continue`.")
+                                  "resolve keeping main's intent, then `git rebase --continue`.")
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
             verify = self.ws.run_script(wt, self.cfg.verify.fast, 900)
             if verify is not None and not verify.ok:

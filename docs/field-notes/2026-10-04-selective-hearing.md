@@ -20,7 +20,11 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 11 | `swarm tell` / worker `messages` only reach a task's **next** attempt (feedback is read when a run starts) | design | acceptable; the skill says so. Idea: for Running tasks, also append the message to the task's Notion page so a human sees it immediately |
 | 12 | codex-b heartbeat gap (3 min) 20 min into its first task: laptop sleep or runner stop on laptop-b | `swarm status` 23:52 UTC | reminded the user; the reaper requeues after `heartbeat_stale_minutes` (10) |
 
+| 13 | Root cause of #10 found by the T-002 worker via `harness_feedback`: `.gitignore` had `.venv/` only, which does not match a symlink; the harness's `git add -A` committed a worktree's `.venv` link in T-003's PR, and the next `git pull` in the main checkout replaced the real venv with it | Q-010 | project + template gitignore gain bare `.venv`; worktrees get `.venv`/`node_modules` in `info/exclude`; `run_script` strips swarm's venv from PATH; `setup_worktree` failures fail the attempt (runner) / escalate (reviewer); rebase feedback names the main commits that conflicted; Codex gets `--add-dir <main checkout>` so pip can write the shared venv (Q-003); `context7` dropped for workers (Q-001); verify_full tolerates pytest exit 5 (Q-002); "Needs you" hides harness/relay notes |
+| 14 | The user merged PRs #1, #3, #4 by hand while the swarm was looping; T-001 stayed Running on a silent codex-b | GitHub timestamps 23:27-23:29Z | marked Done by hand; rule added to the skill |
+
 ## Ideas for the harness (not done)
+- serve: when a task's PR is MERGED on GitHub but the task is not Done, mark it Done (handles human merges).
 - `swarm doctor`: fail when `.venv/bin/python` (or the configured interpreter) does not resolve; warn when `.venv` is a symlink in the main checkout.
 - reviewer: include the interpreter path and `pip freeze | head` in the verify_full failure finding so a bad environment is obvious at a glance.
 - `swarm plan`: when stdin is not a TTY, print the table and exit 0 with "run `swarm apply-proposals`" instead of "Aborted".

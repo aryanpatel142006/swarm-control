@@ -78,12 +78,16 @@ class Reviewer:
     def review(self, task: Task) -> Verdict:
         wt = self.ws.provision(task.id, reuse_branch=True)
         try:
-            self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            if setup is not None and not setup.ok:
+                return Verdict("escalate", "setup_worktree.sh failed (environment, not code)",
+                               [{"severity": "high", "file": self.cfg.verify.setup_worktree or "",
+                                 "issue": setup.tail(1200), "fix": "orchestrator: fix the environment, then re-review"}])
             full = self.ws.run_script(wt, self.cfg.verify.full, 1800)
             if full is not None and not full.ok:
                 return Verdict("request_changes", "verify_full.sh failed",
                                [{"severity": "high", "file": self.cfg.verify.full or "", "issue": full.tail(1500),
-                                 "fix": "make the full verify pass"}])
+                                 "fix": "make the full verify pass (the tail above is the exact command output)"}])
             role = self.cfg.reviewer
             if role is None:
                 return Verdict("approve", "no reviewer configured; verify passed", [])

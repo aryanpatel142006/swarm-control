@@ -317,14 +317,22 @@ class Runner:
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
             if reuse:   # a parked branch drifts from main; start the resume from current main, or say why not
-                ok, conflicts = self.ws.rebase_onto_main(wt)
+                ok, conflicts, causes = self.ws.rebase_onto_main(wt)
                 if not ok:
                     note = ("Rebase onto main conflicted in: " + ", ".join(conflicts)
+                            + (" (main changed them in: " + "; ".join(causes) + ")" if causes else "")
                             + f". First run `git fetch {self.ws.remote} && git rebase {self.ws.remote}/{self.cfg.main_branch}`, "
-                            "resolve every conflict, `git rebase --continue`, then do the task.")
+                            "resolve every conflict keeping main's intent, `git rebase --continue`, then do the task.")
                     task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
                     self.log(f"[{task.id}] resume: rebase conflicted ({', '.join(conflicts)})")
-            self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            if setup is not None and not setup.ok:   # a broken environment is not the model's job to debug
+                task.last_error = f"{self.cfg.verify.setup_worktree} failed: {setup.tail(600)}"[:1900]
+                task.flags = list(dict.fromkeys(task.flags + ["env"]))
+                task.status = Status.FAILED
+                self.board.update_task(task, PUBLISH_FIELDS)
+                self.log(f"[{task.id}] setup_worktree failed: {setup.tail(200)!r}")
+                return Outcome(task, None, None, None, Status.FAILED)
             deps = {}
             for d in task.depends_on:
                 dep = self.board.get_task(d)

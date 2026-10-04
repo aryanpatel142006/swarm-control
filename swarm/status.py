@@ -53,11 +53,15 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         if counts[Status.BLOCKED] + counts[Status.FAILED] >= 2:
             risks.append(f"{ms} has {counts[Status.BLOCKED]} blocked and {counts[Status.FAILED]} failed tasks")
     lines.append("")
-    needs = [f"{q.id} ({q.task_id}) \"{q.text}\"" for q in questions if q.status == "Open"]
+    human_kinds = ("blocking", "fyi")
+    needs = [f"{q.id} ({q.task_id}) \"{q.text}\"" for q in questions if q.status == "Open" and q.kind in human_kinds]
     needs += [f"{t.id} failed ×{t.attempts}: {t.last_error[:60]}" for t in tasks if t.status is Status.FAILED]
     needs += [f"{t.id} blocked" for t in tasks
               if t.status is Status.BLOCKED and not any(q.task_id == t.id for q in questions)]
     lines.append("Needs you: " + ("; ".join(needs) if needs else "nothing"))
+    harness_open = sum(1 for q in questions if q.status == "Open" and q.kind in ("harness", "relay"))
+    if harness_open:
+        lines.append(f"Harness notes: {harness_open} open (for the orchestrator: `swarm answer Q-x` after triage)")
     lines.append("")
     for r in risks:
         lines.append(f"RISK: {r}")

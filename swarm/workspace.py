@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import threading
 from dataclasses import dataclass
@@ -93,7 +94,8 @@ class Workspace:
         start = remote_branch if (reuse_branch and has_remote) else self._main_ref()
         self.git(self.repo_root, "worktree", "add", "-q", "-B", branch, str(path), start)
         (path / ".swarm-run").mkdir(exist_ok=True)
-        self._ensure_excluded(".swarm-run/")
+        for pattern in (".swarm-run/", ".venv", "node_modules", "frontend/node_modules", "web/node_modules"):
+            self._ensure_excluded(pattern)   # links made by setup_worktree.sh must never reach a commit (Oct 4 2026)
         return path
 
     def _ensure_excluded(self, pattern: str) -> None:
@@ -138,15 +140,19 @@ class Workspace:
     def diff_stat(self, path: Path) -> str:
         return self.git(path, "diff", "--stat", self._main_ref(), check=False).out
 
-    def rebase_onto_main(self, path: Path) -> tuple[bool, list[str]]:
+    def rebase_onto_main(self, path: Path) -> tuple[bool, list[str], list[str]]:
+        """(ok, conflicting files, main commits that touched them): the worker needs to know *what* changed on
+        main, not just that it conflicted (T-002 piled up fallbacks for two rounds without that, Oct 4 2026)."""
         self.fetch()
         r = self.git(path, "-c", "user.email=swarm@local", "-c", "user.name=swarm",
                      "rebase", self._main_ref(), check=False)
         if r.ok:
-            return True, []
-        conflicts = self.git(path, "diff", "--name-only", "--diff-filter=U", check=False).out.split()
+            return True, [], []
+        conflicts = sorted(self.git(path, "diff", "--name-only", "--diff-filter=U", check=False).out.split())
         self.git(path, "rebase", "--abort", check=False)
-        return False, sorted(conflicts)
+        causes = self.git(path, "log", "--format=%h %s", "-5", self._main_ref(), "--not", "HEAD", "--",
+                          *conflicts, check=False).out.splitlines() if conflicts else []
+        return False, conflicts, [c.strip() for c in causes if c.strip()]
 
     def run_script(self, path: Path, script_rel: str | None, timeout: int) -> CmdResult | None:
         if not script_rel:
@@ -154,7 +160,11 @@ class Workspace:
         script = path / script_rel
         if not script.exists():
             return None
-        return run_cmd(["bash", str(script)], cwd=path, timeout=timeout)
+        # the target repo's scripts must not resolve `python3` to swarm-control's own venv
+        own_bin = str(Path(sys.executable).parent)
+        path_env = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if p and p != own_bin)
+        return run_cmd(["bash", str(script)], cwd=path, timeout=timeout,
+                       env={"PATH": path_env, **{k: v for k, v in (("VIRTUAL_ENV", ""),) if False}})
 
     # ----- GitHub -----
     def pr_create_or_update(self, branch: str, title: str, body: str) -> str:
