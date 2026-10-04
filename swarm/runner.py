@@ -135,10 +135,14 @@ class Runner:
         if (not force and self._last_heartbeat
                 and (now - self._last_heartbeat).total_seconds() < self.cfg.heartbeat_seconds):
             return
+        first = self._last_heartbeat is None
         self._last_heartbeat = now
         for name, a in self.agents.items():
             row = self.board.get_agent(name) or AgentRow(name=name)
             row.provider, row.host, row.last_heartbeat = a.provider, self.host, now
+            if first and not row.note.startswith("models ok:"):   # keep a `doctor --models` probe result if present
+                from .doctor import cli_version, models_note
+                row.note = models_note(a, cli_version(a, cwd=self.cfg.repo_root))
             with self.lock:
                 current = sorted(self.active[name])
             if row.cooldown_until and row.cooldown_until > now:

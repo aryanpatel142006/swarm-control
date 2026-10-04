@@ -94,12 +94,17 @@ def main(ctx: typer.Context,
 
 @app.command()
 def doctor(offline: bool = typer.Option(False, "--offline", help="skip network checks"),
-           smoke: str = typer.Option(None, "--smoke", help="agent name to smoke-test with a 1-turn prompt")):
+           smoke: str = typer.Option(None, "--smoke", help="agent name to smoke-test with a 1-turn prompt"),
+           models: str = typer.Option(None, "--models", help="agent name: try every configured model id once and "
+                                                              "record which ones work on this laptop's board row")):
     """Check tokens, CLIs, git, gh, verify scripts."""
-    from .doctor import run_checks, smoke_agent
+    from .doctor import probe_models, run_checks, smoke_agent
     checks = run_checks(_cfg(), state.host, offline=offline)
     if smoke:
         checks.append(smoke_agent(_cfg(), smoke, _cfg().worktree_root / "_smoke"))
+    if models:
+        board = None if offline else make_board(_cfg(), state.memory)
+        checks.extend(probe_models(_cfg(), models, _cfg().worktree_root / "_smoke", board=board))
     table = Table("check", "ok", "detail")
     for c in checks:
         table.add_row(c.name, "[green]yes[/green]" if c.ok else "[red]NO[/red]", c.detail)

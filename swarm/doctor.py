@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
+from .models import utcnow
 from .workspace import run_cmd
 
 CLI_BINARY = {"claude": "claude", "codex": "codex", "antigravity": "agy", "gemini": "gemini", "grok": "grok"}
@@ -114,7 +115,39 @@ def context_checks(cfg: Config) -> list[Check]:
     return checks
 
 
-def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path) -> Check:
+def models_note(agent, cli_version: str) -> str:
+    """One line for the agent's board row: which CLI version runs here and which model each tier maps to."""
+    tiers = " ".join(f"{t}={agent.models[t]}" for t in ("best", "high", "mid", "low") if t in agent.models)
+    return f"{agent.provider} {cli_version or '?'} · {tiers}"
+
+
+def cli_version(agent, *, which=shutil.which, run=run_cmd, cwd: Path | None = None) -> str:
+    binary = CLI_BINARY.get(agent.provider, "")
+    if not binary or not which(binary):
+        return ""
+    r = run([binary, "--version"], cwd=cwd or Path.cwd(), timeout=30)
+    text = (r.out or r.err).strip()
+    return text.splitlines()[0].strip() if text else ""
+
+
+def probe_models(cfg: Config, agent_name: str, tmp_dir: Path, *, board=None, smoke=None) -> list[Check]:
+    """Try every distinct model id an agent is configured with (one cheap turn each) and write the result into
+    the agent's board row, so the orchestrator always knows which models each laptop can actually run."""
+    smoke = smoke or smoke_agent
+    a = cfg.agents[agent_name]
+    checks = [smoke(cfg, agent_name, tmp_dir, model=m) for m in dict.fromkeys(a.models.values())]
+    ok = [c.name.rsplit(":", 1)[-1] for c in checks if c.ok]
+    bad = [c.name.rsplit(":", 1)[-1] for c in checks if not c.ok]
+    if board is not None:
+        from .models import AgentRow
+        row = board.get_agent(agent_name) or AgentRow(name=agent_name)
+        row.note = (f"models ok: {', '.join(ok) or '-'}" + (f" · failed: {', '.join(bad)}" if bad else "")
+                    + f" · probed {utcnow().strftime('%b %d %H:%M')} UTC")[:1900]
+        board.upsert_agent(row)
+    return checks
+
+
+def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path, model: str | None = None) -> Check:
     from .adapters import get_adapter
     from .adapters.base import RunSpec
     a = cfg.agents[agent_name]
@@ -126,9 +159,11 @@ def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path) -> Check:
                   "write that JSON to .swarm-run/report.json.")
     schema = {"type": "object", "properties": {"status": {"type": "string"}, "summary": {"type": "string"}},
               "required": ["status"]}
-    spec = RunSpec(prompt_file=pf, model=a.models["low"], effort=a.effort.get("low"), max_turns=3, budget_usd=0.5,
-                   timeout_s=180, cwd=tmp_dir, schema=schema, sandbox=a.sandbox)
+    tier = next((t for t, m in a.models.items() if m == model), "low") if model else "low"
+    spec = RunSpec(prompt_file=pf, model=model or a.models["low"], effort=a.effort.get(tier), max_turns=3,
+                   budget_usd=0.5, timeout_s=180, cwd=tmp_dir, schema=schema, sandbox=a.sandbox)
     r = get_adapter(a).run(spec)
     ok = r.ok and (r.structured_output is not None or (tmp_dir / ".swarm-run" / "report.json").exists())
     cost = f" · ${r.usage.cost_usd}" if r.usage.cost_usd else ""
-    return Check(f"smoke:{agent_name}", ok, (r.error or "ok")[:200] + cost)
+    name = f"smoke:{agent_name}" + (f":{model}" if model else "")
+    return Check(name, ok, (r.error or "ok")[:200] + cost)
