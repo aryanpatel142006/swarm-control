@@ -96,10 +96,18 @@ def main(ctx: typer.Context,
 def doctor(offline: bool = typer.Option(False, "--offline", help="skip network checks"),
            smoke: str = typer.Option(None, "--smoke", help="agent name to smoke-test with a 1-turn prompt")):
     """Check tokens, CLIs, git, gh, verify scripts."""
-    from .doctor import run_checks, smoke_agent
+    from .doctor import Check, run_checks, smoke_agent
     checks = run_checks(_cfg(), state.host, offline=offline)
     if smoke:
-        checks.append(smoke_agent(_cfg(), smoke, _cfg().worktree_root / "_smoke"))
+        from .preflight import check_headless
+        checks.append(check_headless(_cfg(), smoke))
+        failures = [c.name for c in checks if not c.ok]
+        if failures:
+            checks.append(Check(f"smoke:{smoke}", False, "not run; fix failed checks first: " + ", ".join(failures)))
+        elif offline:
+            checks.append(Check(f"smoke:{smoke}", False, "not run in offline mode; rerun without --offline for a live check"))
+        else:
+            checks.append(smoke_agent(_cfg(), smoke, _cfg().worktree_root / "_smoke"))
     table = Table("check", "ok", "detail")
     for c in checks:
         table.add_row(c.name, "[green]yes[/green]" if c.ok else "[red]NO[/red]", c.detail)
@@ -396,6 +404,17 @@ def run(agent: str = typer.Option(None, "--agent", help="only this agent"),
         raise typer.Exit(code=_fail("set SWARM_HOST or pass --host"))
     if state.host not in _cfg().hosts:
         raise typer.Exit(code=_fail(f"host '{state.host}' is not in config.hosts ({', '.join(_cfg().hosts)})"))
+    if not state.memory and not dry_run:
+        from .preflight import check_headless
+        local = _cfg().agents_on_host(state.host)
+        if agent:
+            local = [a for a in local if a.name == agent]
+            if not local:
+                raise typer.Exit(code=_fail(f"{agent} is not an agent on host {state.host}"))
+        for configured_agent in local:
+            check = check_headless(_cfg(), configured_agent.name)
+            if not check.ok:
+                raise typer.Exit(code=_fail(f"{check.name}: {check.detail}; run swarm doctor --smoke {configured_agent.name}"))
     board = make_board(_cfg(), state.memory)
     r = Runner(_cfg(), board, state.host, _workspace(_cfg()), ledger=_ledger(_cfg()),
                log=console.print, executor=SyncExecutor() if once else None)

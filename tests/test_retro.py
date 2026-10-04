@@ -127,6 +127,8 @@ def test_run_retro_writes_lessons_and_tuning_to_main(cfg, git_repo, tmp_path):
     from swarm.board.memory import InMemoryBoard
     from swarm.retro import run_retro
     from swarm.workspace import CmdResult, Workspace
+    # This project has a usable server to promote, regardless of developer laptop setup.
+    cfg.mcp_servers["playwright"] = {"command": "npx", "args": ["@playwright/mcp@latest"]}
     board = InMemoryBoard()
     board.create_task(Task(id="", title="Panel", type="frontend", size="M", status=Status.DONE, agent="claude-a", milestone="M1"))
     board.create_task(Task(id="", title="Landing", type="frontend", size="M", status=Status.DONE, agent="claude-a", milestone="M1", review_rounds=3))

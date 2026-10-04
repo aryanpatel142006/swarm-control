@@ -74,7 +74,7 @@ def test_ensure_plugins_installs_missing_and_enables_disabled():
 
     logs = []
     missing = ensure_plugins(["context7", "playwright", "frontend-design@claude-plugins-official", "broken"],
-                             run=run, log=logs.append)
+                             run=run, log=logs.append, which=lambda name: "/fake/claude")
     assert missing == ["broken"]
     assert ["claude", "plugin", "enable", "playwright"] in calls
     assert ["claude", "plugin", "install", "frontend-design@claude-plugins-official"] in calls
@@ -98,7 +98,7 @@ def test_ensure_plugins_can_install_without_enabling():
             return CmdResult(0, json.dumps(LISTING), "")
         return CmdResult(0, "", "")
 
-    assert ensure_plugins(["playwright", "hf"], run=run, enable=False) == []
+    assert ensure_plugins(["playwright", "hf"], run=run, enable=False, which=lambda name: "/fake/claude") == []
     assert ["claude", "plugin", "install", "hf@claude-plugins-official"] in calls
     assert not any(a[:3] == ["claude", "plugin", "enable"] for a in calls)
 

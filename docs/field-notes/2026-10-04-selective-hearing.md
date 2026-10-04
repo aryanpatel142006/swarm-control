@@ -11,6 +11,13 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 4 | `gh repo create --source . --push` failed to push (exit 1) right after creating the repo; a plain `git push -u origin main` a second later succeeded | repo creation step | transient; note only |
 | 5 | Codex reviewer would spend the teammate's limited credits on reviews | config design | reviewer = claude-a (sonnet); codex-b parallel 1, mid model for normal work |
 
+## Provider readiness follow-up
+- Provider adapters can emit flags that an installed CLI no longer supports. Derive the preflight flags from the actual adapter command and compare with the local CLI's help; use `codex exec --help` for Codex. Run this preflight before live smoke checks and before the worker accesses the board.
+- Doctor previously made its smoke call even after failed setup checks or with `--offline`. It now prints a skipped-smoke failure and leaves the model untouched.
+- Successful CLI exit or arbitrary fallback-file existence is not proof of the requested response. Smoke now validates the exact current `done` / `smoke ok` report and removes stale fallback files.
+- Custom CLI templates split after path substitution, breaking prompt and cwd arguments containing spaces. Split the template first, then substitute within arguments.
+- Coverage includes all built-in providers' incompatible help, unknown/missing/custom CLIs, failed preflight, stale/malformed reports, offline operation, and paths with spaces. Validation: 271 passed, 1 skipped; live Codex flag preflight passed; combined setup/readiness checks passed and both patches combine cleanly. No live worker or global provider settings changed.
+
 ## Ideas for the harness (not done)
 - `swarm init` idempotency (still deferred from the ledger).
 - A `swarm plan --dry-run` that only prints the planner prompt size, for budgeting.

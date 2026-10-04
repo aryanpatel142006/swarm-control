@@ -1,6 +1,7 @@
 """Environment checks: tokens, CLIs, git, gh, verify scripts, and a one-turn smoke test per agent."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -120,15 +121,25 @@ def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path) -> Check:
     a = cfg.agents[agent_name]
     tmp_dir.mkdir(parents=True, exist_ok=True)
     (tmp_dir / ".swarm-run").mkdir(exist_ok=True)
+    report_path = tmp_dir / ".swarm-run" / "report.json"
+    report_path.unlink(missing_ok=True)  # a previous smoke's fallback is not proof this run worked
     pf = tmp_dir / "smoke.md"
     pf.write_text("Reply with exactly this JSON and nothing else, then stop: "
                   '{"status":"done","summary":"smoke ok"}. If you cannot return structured output, '
                   "write that JSON to .swarm-run/report.json.")
     schema = {"type": "object", "properties": {"status": {"type": "string"}, "summary": {"type": "string"}},
-              "required": ["status"]}
+              "required": ["status", "summary"]}
     spec = RunSpec(prompt_file=pf, model=a.models["low"], effort=a.effort.get("low"), max_turns=3, budget_usd=0.5,
-                   timeout_s=180, cwd=tmp_dir, schema=schema, sandbox=a.sandbox)
+                   timeout_s=180, cwd=tmp_dir, schema=schema, sandbox=a.sandbox, extra_args=list(a.extra_args))
     r = get_adapter(a).run(spec)
-    ok = r.ok and (r.structured_output is not None or (tmp_dir / ".swarm-run" / "report.json").exists())
+    report = r.structured_output
+    if report is None and report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+        except (OSError, ValueError):
+            report = None
+    valid = isinstance(report, dict) and report.get("status") == "done" and report.get("summary") == "smoke ok"
+    ok = r.ok and valid
+    detail = "ok" if ok else (r.error or "expected report: status=done, summary=smoke ok")
     cost = f" · ${r.usage.cost_usd}" if r.usage.cost_usd else ""
-    return Check(f"smoke:{agent_name}", ok, (r.error or "ok")[:200] + cost)
+    return Check(f"smoke:{agent_name}", ok, detail[:200] + cost)

@@ -88,6 +88,16 @@ def test_antigravity_gemini_grok_generic_commands(tmp_path):
     assert argv[:2] == ["bash", "run.sh"] and argv[3] == "m" and stdin is None
 
 
+def test_generic_template_preserves_paths_with_spaces(tmp_path):
+    folder = tmp_path / 'project with spaces'
+    folder.mkdir()
+    run = spec(folder)
+    adapter = GenericAdapter(AgentConfig(name='custom', provider='generic', host='h',
+                                        command_template='custom --prompt {prompt_file} --cwd {cwd} --model {model}'))
+    argv, _ = adapter.build_command(run)
+    assert argv == ['custom', '--prompt', str(run.prompt_file), '--cwd', str(folder), '--model', 'm']
+
+
 def test_get_adapter_dispatch():
     for provider, cls in [("claude", ClaudeAdapter), ("codex", CodexAdapter), ("antigravity", AntigravityAdapter),
                           ("gemini", GeminiAdapter), ("grok", GrokAdapter)]:

@@ -11,5 +11,7 @@ class GenericAdapter(Adapter):
 
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
         template = (self.cfg.command_template if self.cfg else None) or "cat {prompt_file}"
-        cmd = template.format(prompt_file=str(spec.prompt_file), model=spec.model, cwd=str(spec.cwd))
-        return shlex.split(cmd) + list(spec.extra_args), None
+        # Split the configured template first so substituted paths with spaces stay single arguments.
+        argv = [arg.format(prompt_file=str(spec.prompt_file), model=spec.model, cwd=str(spec.cwd))
+                for arg in shlex.split(template)]
+        return argv + list(spec.extra_args), None

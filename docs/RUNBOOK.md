@@ -55,3 +55,9 @@
 | A task keeps failing | It becomes a Question after 3 attempts. Cut, split, or fix by hand. |
 | One laptop idle while the other has a queue | serve rebalances one task per tick to an idle agent of equal strength; to move a specific card, `swarm assign T-012 --agent <name>` or drag it in Notion. |
 | Two agents fight over files | Give one task a dependency on the other; the next plan lint will warn about overlaps. |
+
+## Adding or upgrading a worker CLI
+
+Run `swarm doctor --smoke <agent>` before routing real work to that agent. It checks the installed CLI's help against the flags emitted by its adapter, then runs the live smoke only if setup checks pass. `--offline` never invokes a model. The smoke must return `{"status":"done","summary":"smoke ok"}` as structured output or a fresh `.swarm-run/report.json`; a file's existence or a successful exit alone is insufficient.
+
+`swarm run` checks headless compatibility before reading or claiming tasks. This detects removed CLI flags without spending model credits. Custom `generic` commands are checked for a valid template and executable; their compatibility still needs a live smoke because arbitrary command flags cannot be inferred. A passing smoke verifies one configured model, not every tier or every MCP server's authentication. Validate new tiers and task-specific tools with a disposable task before routing production work.

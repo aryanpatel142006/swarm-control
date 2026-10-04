@@ -105,6 +105,7 @@ Task types: frontend, backend, realtime, ml_audio, ml_vision, ml_fusion, eval, t
 
 ## Field rules
 Learned from real runs; newest last. Each is one line: rule (evidence).
+- Provider upgrades: headless compatibility is checked before task claims; `doctor --smoke` never calls a model after failed setup checks or in offline mode, and requires the exact current smoke report (Oct 4).
 - Branch names repeat across projects (`task/T-001`); never reuse a GitHub repo across boards (Roomcast, Sep 28: 4 "merged" tasks never landed).
 - Sleep kills runs; `caffeinate -dims` on every loop, check `swarm doctor` sleep row (Sep 28 laptop-b drops).
 - Restart the teammate's runner after every harness or board change; stale runners heartbeat but never claim (night of Sep 28).
