@@ -107,7 +107,7 @@ TYPE_COLORS = {"frontend": "yellow", "backend": "yellow", "realtime": "yellow", 
 AGENT_STATUS_COLORS = {"idle": "gray", "running": "green", "cooldown": "yellow", "offline": "red"}
 PROVIDER_COLORS = {"claude": "orange", "codex": "green", "antigravity": "blue", "gemini": "blue", "grok": "gray",
                    "generic": "gray", "serve": "purple"}
-KIND_COLORS = {"blocking": "red", "fyi": "blue"}
+KIND_COLORS = {"blocking": "red", "fyi": "blue", "harness": "purple", "relay": "gray"}
 IMPACT_COLORS = {"high": "red", "medium": "orange", "low": "gray"}
 QSTATUS_COLORS = {"Open": "red", "Applied": "green"}
 
@@ -247,7 +247,7 @@ def QUESTIONS_SCHEMA(tasks_ds_id: str | None = None) -> dict:  # noqa: N802
     init adds it afterwards with TASK_RELATION (it is cosmetic: the harness links by Task ID)."""
     schema = {
         "Question": {"title": {}}, "Status": _sel(["Open", "Applied"], QSTATUS_COLORS), "ID": {"rich_text": {}},
-        "Kind": _sel(["blocking", "fyi"], KIND_COLORS),
+        "Kind": _sel(["blocking", "fyi", "harness", "relay"], KIND_COLORS),
         "Context": {"rich_text": {}}, "Options": {"rich_text": {}}, "Proceeding With": {"rich_text": {}},
         "Impact": _sel(["high", "medium", "low"], IMPACT_COLORS),
         "Task ID": {"rich_text": {}}, "Asked By": {"rich_text": {}},

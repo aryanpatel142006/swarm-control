@@ -239,6 +239,16 @@ def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page
     agents_sync()
 
 
+@app.command()
+def tell(task_id: str, text: str):
+    """Send a message into a task's next prompt (orchestrator → worker); logged as a relay note on the board."""
+    from .relay import tell as _tell
+    q = _tell(make_board(_cfg(), state.memory), task_id, text)
+    if q is None:
+        raise typer.Exit(code=_fail(f"{task_id} not found or already closed"))
+    console.print(f"{q.id}: {q.text}")
+
+
 @app.command("agents-sync")
 def agents_sync():
     """Refresh Agent rows (and the Agent select options) from config."""

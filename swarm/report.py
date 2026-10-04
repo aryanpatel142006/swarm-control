@@ -32,6 +32,10 @@ REPORT_SCHEMA = {
             "options": {"type": "array", "items": {"type": "string"}}, "proceeding_with": {"type": "string"}},
             "required": ["kind", "text"]},
         "notes_for_reviewer": {"type": "string"},
+        "messages": {"type": "array", "description": "Notes for other tasks' agents (an interface you changed, a "
+                     "file you need them to leave alone); relayed into that task's next prompt by the harness",
+                     "items": {"type": "object", "properties": {"to": {"type": "string", "description": "task id, e.g. T-012"},
+                                                                "text": {"type": "string"}}, "required": ["to", "text"]}},
         "harness_feedback": {"type": "array", "description": "Problems with the harness, prompt, rules, skills, "
                              "tools or verify scripts that cost you time; the orchestrator fixes them, not you",
                              "items": {"type": "object", "properties": {
@@ -90,6 +94,7 @@ def parse_report(structured: dict | None, worktree: Path, *, changed_files: list
         tools_used=_tools(data.get("tools_used")), question=q,
         notes_for_reviewer=str(data.get("notes_for_reviewer") or ""),
         harness_feedback=_feedback(data.get("harness_feedback")),
+        messages=[m for m in (data.get("messages") or []) if isinstance(m, dict)],
     )
 
 
@@ -110,7 +115,7 @@ def harness_feedback_question(task: Task, r: Report) -> dict | None:
         return None
     n = len(r.harness_feedback)
     lines = [f"- {f['what']}" + (f" → {f['suggestion']}" if f.get("suggestion") else "") for f in r.harness_feedback]
-    return {"kind": "fyi", "text": f"[harness] {task.id}: {n} note{'s' if n != 1 else ''} from {task.agent or 'worker'}"
+    return {"kind": "harness", "text": f"[harness] {task.id}: {n} note{'s' if n != 1 else ''} from {task.agent or 'worker'}"
             f" — {r.harness_feedback[0]['what']}"[:190],
             "options": [], "proceeding_with": "orchestrator triages: fix harness / tune project / update skill",
             "context": "\n".join(lines)}

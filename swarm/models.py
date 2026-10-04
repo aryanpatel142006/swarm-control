@@ -87,7 +87,7 @@ class Task:
 class Question:
     id: str
     text: str
-    kind: str = "blocking"  # blocking | fyi
+    kind: str = "blocking"  # blocking | fyi | harness (worker feedback about the harness) | relay (agent-to-agent note)
     context: str = ""
     options: list[str] = field(default_factory=list)
     proceeding_with: str = ""
@@ -154,4 +154,5 @@ class Report:
     question: dict | None = None
     notes_for_reviewer: str = ""
     harness_feedback: list[dict] = field(default_factory=list)   # {what, suggestion}: the orchestrator fixes these
+    messages: list[dict] = field(default_factory=list)           # {to: task id, text}: relayed into that task's prompt
     synthesized: bool = False

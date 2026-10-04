@@ -105,7 +105,7 @@ def test_harness_feedback_is_parsed_logged_and_becomes_a_board_note(tmp_path):
     task = Task(id="T-007", title="DFN3 stage", type="ml_audio", importance="high", size="M", status="Running",
                 agent="claude-a")
     q = harness_feedback_question(task, r)
-    assert q["kind"] == "fyi" and q["text"].startswith("[harness] T-007")
+    assert q["kind"] == "harness" and q["text"].startswith("[harness] T-007")
     assert "ruff" in q["context"] and "resampler" in q["context"]
     md = decisions_markdown(task, r)
     assert "Harness feedback" in md and "add ruff" in md

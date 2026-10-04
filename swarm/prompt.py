@@ -94,7 +94,7 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
     parts += ["", "### Description", "", task.description.strip() or "(none)", "", "### Acceptance criteria", "",
               task.acceptance.strip() or "(none given; make it work and test it)"]
     if task.feedback.strip():
-        parts += ["", "## Feedback from the previous attempt (address every item)", "", task.feedback.strip()]
+        parts += ["", "## Feedback and messages for this task (address every item)", "", task.feedback.strip()]
     parts += tools_section(task, list(mcp), list(skills))
     parts += ["", "## Project context", ""]
     for ref in select_docs(cfg, task.type):

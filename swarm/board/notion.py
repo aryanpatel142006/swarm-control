@@ -366,6 +366,8 @@ def asset_url(filename: str, assets_url: str | None = None) -> str | None:
 
 def row_icon(kind: str, value: str) -> dict | None:
     """Icon object for a task type, question kind, or agent row; None when no public art is configured."""
+    if kind == "question" and value not in ("blocking", "fyi"):
+        value = "fyi"   # harness / relay notes reuse the fyi art
     name = {"type": f"type-{value}", "question": f"q-{value}", "agent": "serve" if value == "serve" else "agent"}[kind]
     url = asset_url(f"icon-{name}.png")
     return {"type": "external", "external": {"url": url}} if url else None

@@ -471,6 +471,9 @@ class Runner:
         hf = harness_feedback_question(task, report)
         if hf:
             self._file_question(task, report, hf, context=hf.pop("context"))
+        from .relay import deliver_messages
+        for note in deliver_messages(self.board, task, report):
+            self.log(f"[{task.id}] {note.text[:120]}")
 
         status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error)
         task.status = status
