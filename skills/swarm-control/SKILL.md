@@ -80,7 +80,7 @@ Do not let improvement work starve the product: harness fixes happen between mil
 | Provider | best | high | mid | low | Notes (Oct 4 2026) |
 |---|---|---|---|---|---|
 | Claude Code | `fable` (long-horizon; planner, orchestrator) | `opus` (frontend #1 on WebDev Arena) | `sonnet` | `haiku` (never on frontend pages) | ids are aliases accepted by `claude --model` |
-| Codex | `gpt-6-astra` | `gpt-6-astra` | `gpt-6-sol` — **a newer Sol release exists; confirm its exact id on the Codex laptop and put it in `models.mid`** | `gpt-6-luna` | ids come from the Codex model picker on the laptop that runs it |
+| Codex | `gpt-6-astra` | `gpt-6-astra` | `gpt-6.1-sol` (confirmed Oct 4 2026 via the teammate's PR; `gpt-6-sol` is the older release) | `gpt-6-luna` | ids come from the Codex model picker on the laptop that runs it |
 | Gemini / Antigravity | parked (login issues, quota) | | | | see rehearsal notes |
 Change a tier in `.swarm/config.yaml` → `agents.<name>.models`; running tasks keep their model, new claims use the new one; the teammate's runner needs a `git pull` + restart to see config changes.
 
