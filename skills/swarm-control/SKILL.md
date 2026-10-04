@@ -21,6 +21,8 @@ swarm status                               # Agents table: the teammate's agent 
 - The teammate's runner (e.g. codex-b on laptop-b) must be heartbeating **before** you plan, or routing sends everything to laptop-a. An agent that never checked in is never routed to.
 - No machine in the swarm may sleep while its loop runs: `caffeinate -dims swarm run|serve` on macOS, sleep disabled elsewhere, plugged in, lid open. `swarm run` now warns at startup when sleep is possible; tell every teammate this before they start (codex-b went offline twice on Oct 4 from sleep).
 
+Workers are separate headless CLI processes started by `swarm run` on each laptop (one per task, model chosen from the task's importance tier), not subagents of this session: they never appear in the Claude Code agent panel. See them with `pgrep -fl "claude -p"` (laptop-a) or the Agents table (any laptop).
+
 ## 1. Start the loops (laptop-a)
 Run both as background processes that survive across turns (Bash `run_in_background: true`), logging to files you can grep:
 ```bash
