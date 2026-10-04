@@ -11,7 +11,14 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 4 | `gh repo create --source . --push` failed to push (exit 1) right after creating the repo; a plain `git push -u origin main` a second later succeeded | repo creation step | transient; note only |
 | 5 | Codex reviewer would spend the teammate's limited credits on reviews | config design | reviewer = claude-a (sonnet); codex-b parallel 1, mid model for normal work |
 
+| 6 | claude-a idle while T-002 (infra, Ready) waited behind codex-b's single busy slot; `rebalance` required equal-or-greater strength | `swarm status` 23:12 UTC | rebalance steals when the donor is saturated and the idle agent scores ≥ 3 (commit 273b3a6) |
+| 7 | Workers had no channel to report harness/prompt/skill problems; orchestrator-only ownership of the harness was implicit | user request | `harness_feedback` in the report → `[harness]` fyi question + decision log; rule 10 in worker rules, AGENTS.md, ORCHESTRATOR.md, skill (dc85895) |
+| 8 | No automatic record of which models each laptop can run | user request | runner publishes CLI version + tier map on first heartbeat; `swarm doctor --models` probes ids (ea4ee99) |
+| 9 | `swarm plan` without a TTY aborts at the confirm prompt after spending the planner call; proposals are kept in `.swarm/tasks.proposed.json` | plan-M0.log | use `apply-proposals` (worked); idea: auto-detect non-TTY and skip the prompt with a notice |
+
 ## Ideas for the harness (not done)
+- `swarm plan`: when stdin is not a TTY, print the table and exit 0 with "run `swarm apply-proposals`" instead of "Aborted".
+- Worker → worker messages (`messages` in the report, `swarm tell`), plus an "Agent messages" view on the Questions database.
 - `swarm init` idempotency (still deferred from the ledger).
 - A `swarm plan --dry-run` that only prints the planner prompt size, for budgeting.
 

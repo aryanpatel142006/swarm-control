@@ -114,3 +114,6 @@ Learned from real runs; newest last. Each is one line: rule (evidence).
 - `*_by_type` keys must match task types; `ml` used to match nothing until family keys were added (Oct 4, selective-hearing setup).
 - `docs_by_type` section refs match the heading text (`PLAN.md#Ground rules`, not `#ground-rules`); `swarm doctor` now flags refs that resolve to nothing and unknown `*_by_type` keys (Oct 4).
 - `swarm` loads `~/.swarm/env` itself when `NOTION_TOKEN`/`SWARM_HOST` are missing (Oct 4); the shell's values win, so `source` it only when you want to override.
+- An idle agent now steals a Ready task from a saturated agent even when weaker (strength ≥ 3); before Oct 4 claude-a idled while T-002 waited behind codex-b's single slot. If you still see an idle agent next to a Ready task, check `swarm status` for `cooldown`/`offline` and `swarm reroute`.
+- Workers' `harness_feedback` arrives as `[harness]` fyi questions; `swarm doctor --models <agent>` records which model ids a laptop accepts in its Agents row; the first heartbeat writes the CLI version + tier map there too (Oct 4).
+- Changing `agents.<name>.models` in config does not touch already-routed tasks: re-point them with `swarm assign T-x --agent A --model M` (Oct 4: eight critical tasks moved to Fable by hand).
