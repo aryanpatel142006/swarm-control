@@ -83,3 +83,20 @@ def test_inline_mcp_server_definitions(project_dir, sample_config_dict):
     (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
     cfg = load_config(project_dir / ".swarm" / "config.yaml")
     assert cfg.mcp_servers["playwright"]["args"][-1] == "--headless"
+
+
+def test_family_keys_cover_subtypes(project_dir, sample_config_dict):
+    """`ml` in a *_by_type map applies to ml_audio / ml_vision / ml_fusion; the exact type is listed first."""
+    sample_config_dict["skills_by_type"] = {"ml": ["huggingface-best"], "ml_audio": ["audio-stack"]}
+    sample_config_dict["mcp_by_type"] = {"ml": ["context7"]}
+    sample_config_dict["plugins_by_type"] = {"ml": ["hf-plugin"]}
+    sample_config_dict["docs_by_type"] = {"_all": ["PLAN.md#summary"], "ml": ["docs/ARCHITECTURE.md#ml"]}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.skills_for("ml_audio") == ["audio-stack", "huggingface-best"]
+    assert cfg.skills_for("ml_vision") == ["huggingface-best"]
+    assert cfg.mcp_for("ml_fusion", cfg.agents["claude-a"]) == ["context7"]
+    assert cfg.plugins_for("ml_vision") == ["hf-plugin"]
+    assert cfg.skills_for("frontend") == []
+    from swarm.prompt import select_docs
+    assert select_docs(cfg, "ml_audio") == ["PLAN.md#summary", "docs/ARCHITECTURE.md#ml"]

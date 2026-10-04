@@ -117,24 +117,30 @@ class Config:
 
     def mcp_for(self, task_type: str, agent: AgentConfig, importance: str | None = None) -> list[str]:
         """MCP servers a worker run gets: the task type's, the importance tier's, then the agent's own."""
-        return list(dict.fromkeys(list(self.mcp_by_type.get(task_type, []))
+        return list(dict.fromkeys(by_type(self.mcp_by_type, task_type)
                                   + list(self.mcp_by_importance.get(importance or "", []))
                                   + list(agent.mcp)))
 
     def skills_for(self, task_type: str, importance: str | None = None) -> list[str]:
         """Skills the worker is told to invoke for this task type and importance tier."""
-        return list(dict.fromkeys(list(self.skills_by_type.get(task_type, []))
+        return list(dict.fromkeys(by_type(self.skills_by_type, task_type)
                                   + list(self.skills_by_importance.get(importance or "", []))))
 
     def plugins_for(self, task_type: str) -> list[str]:
         """Plugins that must be installed on the host before a task of this type runs."""
-        return list(dict.fromkeys(list(self.plugins_required) + list(self.plugins_by_type.get(task_type, []))))
+        return list(dict.fromkeys(list(self.plugins_required) + by_type(self.plugins_by_type, task_type)))
 
     def agents_on_host(self, host: str) -> list[AgentConfig]:
         return [a for a in self.agents.values() if a.host == host]
 
     def limit_for(self, size: str) -> TaskLimit:
         return self.task_limits[size]
+
+
+def by_type(mapping: dict[str, list[str]], task_type: str) -> list[str]:
+    """Entries for a task type: its own key first, then its family key (`ml` covers ml_audio, ml_vision, ml_fusion)."""
+    family = task_type.split("_", 1)[0]
+    return list(mapping.get(task_type, [])) + (list(mapping.get(family, [])) if family != task_type else [])
 
 
 def _dt(value, default: datetime) -> datetime:

@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path
 
-from .config import Config
+from .config import Config, by_type
 from .models import Task
 from .report import REPORT_SCHEMA
 
@@ -52,7 +52,7 @@ def read_doc(repo_root: Path, ref: str) -> str | None:
 
 
 def select_docs(cfg: Config, task_type: str) -> list[str]:
-    refs = list(cfg.docs_by_type.get("_all", [])) + list(cfg.docs_by_type.get(task_type, []))
+    refs = list(cfg.docs_by_type.get("_all", [])) + by_type(cfg.docs_by_type, task_type)
     return list(dict.fromkeys(refs))
 
 
