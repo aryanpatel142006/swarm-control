@@ -356,3 +356,33 @@ def test_status_write_also_updates_the_headline(cfg, git_repo, tmp_path):
     srv.write_status(force=True)
     text, color = board.headline
     assert color == "green_background" and "0/1 done" in text
+
+
+def test_rebalance_lets_a_competent_idle_agent_take_work_a_saturated_stronger_agent_cannot_start(cfg, git_repo, tmp_path):
+    """Oct 4 2026, selective-hearing M0: codex-b (infra 5, parallel 1) was busy, T-002 (infra) waited in its queue,
+    claude-a (infra 4) sat idle. Idle beats waiting: a weaker-but-competent agent takes the task once the donor
+    has no free slot; critical tasks still wait for the strongest agent."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    board.upsert_agent(AgentRow(name="codex-a", status="running", last_heartbeat=utcnow()))
+    codex, claude = cfg.agents["codex-a"], cfg.agents["claude-a"]
+    assert codex.strengths["infra"] > claude.strengths["infra"] >= 3
+    for i in range(codex.parallel):   # every slot busy
+        board.create_task(Task(id="", title=f"busy{i}", status=Status.RUNNING, agent="codex-a", type="infra"))
+    waiting = board.create_task(Task(id="", title="setup script", status=Status.READY, agent="codex-a", type="infra"))
+    crit = board.create_task(Task(id="", title="core types", status=Status.READY, agent="codex-a", type="backend",
+                                  importance="critical"))
+    assert srv.rebalance() == 1
+    assert board.get_task(waiting.id).agent == "claude-a"
+    assert board.get_task(crit.id).agent == "codex-a"
+
+
+def test_rebalance_leaves_work_with_a_stronger_agent_that_has_a_free_slot(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    board.upsert_agent(AgentRow(name="codex-a", status="running", last_heartbeat=utcnow()))
+    cfg.agents["codex-a"].parallel = 2          # one slot busy, one free
+    board.create_task(Task(id="", title="busy", status=Status.RUNNING, agent="codex-a", type="infra"))
+    waiting = board.create_task(Task(id="", title="setup script", status=Status.READY, agent="codex-a", type="infra"))
+    assert srv.rebalance() == 0          # codex-a will pick it up on its next poll; no need to downgrade
+    assert board.get_task(waiting.id).agent == "codex-a"

@@ -294,22 +294,33 @@ class Server:
         return n
 
     def rebalance(self) -> int:
-        """Work stealing: an idle agent takes one queued non-critical task from an agent with a backlog,
-        when it is at least as strong for that task type. Two Claude laptops otherwise leave one idle."""
+        """Work stealing: an idle agent takes one queued non-critical task from an agent with a backlog.
+        It may be weaker for that task type (strength >= 3) when the donor has no free slot: idle beats waiting
+        (Oct 4 2026: claude-a sat idle while T-002 waited behind codex-b's single slot). An equal-or-stronger
+        idle agent also takes from any backlog of two or more. Critical tasks wait for the strongest agent."""
         now = self.now()
         ctx = context_from_board(self.board, self.cfg, now)
         ready = self.board.list_tasks(status=[Status.READY])
+        running = {}
+        for t in self.board.list_tasks(status=[Status.RUNNING]):
+            running[t.agent] = running.get(t.agent, 0) + 1
         idle = [a for a in self.cfg.agents.values()
                 if ctx.queue_depth.get(a.name, 0) == 0 and is_available(a, ctx.rows.get(a.name), importance="normal", now=now)]
         moved = 0
         for idle_agent in idle:
+            def may_take(t: Task) -> bool:
+                donor = self.cfg.agents[t.agent]
+                mine, theirs = idle_agent.strengths.get(t.type, 3), donor.strengths.get(t.type, 3)
+                saturated = running.get(t.agent, 0) >= donor.parallel
+                return (mine >= theirs and ctx.queue_depth.get(t.agent, 0) >= 2) or (mine >= 3 and saturated)
             candidates = [t for t in ready if t.agent and t.agent != idle_agent.name and t.importance != "critical"
-                          and t.agent in self.cfg.agents
-                          and ctx.queue_depth.get(t.agent, 0) >= 2
-                          and idle_agent.strengths.get(t.type, 3) >= self.cfg.agents[t.agent].strengths.get(t.type, 3)]
+                          and t.agent in self.cfg.agents and may_take(t)]
             if not candidates:
                 continue
-            t = sorted(candidates, key=lambda x: (x.priority, x.id))[-1]  # the one furthest back in the donor's queue
+            # smallest strength gap first, then the one furthest back in the donor's queue
+            def gap(t: Task) -> int:
+                return self.cfg.agents[t.agent].strengths.get(t.type, 3) - idle_agent.strengths.get(t.type, 3)
+            t = sorted(candidates, key=lambda x: (-gap(x), x.priority, x.id))[-1]
             donor = t.agent
             t.agent = idle_agent.name
             t.model, t.effort = model_for(idle_agent, tier_for(t, self.cfg), t.type, self.cfg)
