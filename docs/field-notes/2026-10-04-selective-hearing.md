@@ -28,6 +28,8 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 17 | Teammate runners sit on old harness code until a human pulls | JOIN flow | `swarm/selfupdate.py`: idle runners fetch, fast-forward and re-exec every 10 min; `swarm run` warns when the machine can sleep (dd3fc51, 17373fb) |
 | 18 | The user expected worker processes to appear as this session's subagents; they are separate `claude -p` processes started by `swarm run` and do not show in the Claude Code agent panel | user question | documented in the skill §0; `pgrep -f "claude -p"` lists them with task worktree and model |
 
+| 19 | Orchestrator prioritisation: I noticed codex-b idle and kept shipping harness fixes for ~40 min before giving it work | user feedback 00:45 UTC | `swarm status` now raises a RISK line for any idle agent with nothing Ready while tasks remain; skill §3 step 0 "idle agents first" |
+
 ## Ideas for the harness (not done)
 - `swarm status`: list running worker processes on this host (pid, task, model, minutes) so the orchestrator never has to pgrep.
 - `swarm add` / `swarm deps T-x --depends ...`: a CLI to edit depends_on without the board API.

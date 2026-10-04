@@ -51,6 +51,7 @@ Model choice is yours: `swarm assign T-012 --agent claude-a --model opus --effor
 
 ## 3. Watch loop (the long-running part)
 Every 10-15 minutes (use Monitor on `serve.log` / ScheduleWakeup / a sleep-free poll, not a tight loop):
+0. **Idle agents first.** Any agent `idle` while tasks remain open is the top priority, above harness work, docs or anything else: give it work within minutes (`swarm status` prints a RISK line for it). If the Ready column is empty, the plan is chained too tightly: un-chain tasks that only need merged contracts, or split a running L task. An agent that just came back online is re-routed by serve automatically; check that it actually picked something up.
 1. `swarm status` → read RISK lines first, then Running/Blocked/Review.
 2. **Open questions**: answer reversible ones yourself with `swarm answer Q-007 "..."` (add `--follow-up` on an fyi that changes the agent's choice). Only escalate to the human what truly needs them (API keys, recordings, money, product taste). Tell the user in one line what you need. **`[harness]` notes** are worker feedback about the harness: triage them per §5 and answer the question with what you did.
 3. **Stuck work**: a task Running far past its size limit → `swarm logs T-xxx`; a failed task with 3 attempts → read the decision log, then cut + re-add a better-specified task (don't just retry). Offline agent → `swarm reroute`.

@@ -76,3 +76,18 @@ def test_needs_you_hides_harness_and_relay_notes(cfg):
     needs = next(ln for ln in text.splitlines() if ln.startswith("Needs you: "))
     assert "Q-1" in needs and "Q-2" not in needs and "Q-4" not in needs
     assert "Harness notes: 2 open" in text
+
+
+def test_idle_agent_with_nothing_ready_is_a_risk(cfg):
+    from swarm.models import utcnow
+    now = utcnow()
+    agents = [AgentRow(name="claude-a", status="running", current_task="T-1", last_heartbeat=now),
+              AgentRow(name="codex-a", status="idle", last_heartbeat=now)]
+    tasks = [Task(id="T-1", title="a", status=Status.RUNNING, agent="claude-a", milestone="M0"),
+             Task(id="T-2", title="b", status=Status.BACKLOG, agent="claude-a", milestone="M0", depends_on=["T-1"]),
+             Task(id="T-3", title="c", status=Status.BACKLOG, agent="codex-a", milestone="M1", depends_on=["T-2"])]
+    text = render_status(cfg, tasks, agents, [], now)
+    assert "RISK" in text and "codex-a is idle" in text and "un-chain" in text
+    tasks.append(Task(id="T-4", title="d", status=Status.READY, agent="codex-a", milestone="M0"))
+    text = render_status(cfg, tasks, agents, [], now)
+    assert "codex-a is idle" not in text
