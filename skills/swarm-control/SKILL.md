@@ -114,3 +114,5 @@ Learned from real runs; newest last. Each is one line: rule (evidence).
 - `*_by_type` keys must match task types; `ml` used to match nothing until family keys were added (Oct 4, selective-hearing setup).
 - `docs_by_type` section refs match the heading text (`PLAN.md#Ground rules`, not `#ground-rules`); `swarm doctor` now flags refs that resolve to nothing and unknown `*_by_type` keys (Oct 4).
 - `swarm` loads `~/.swarm/env` itself when `NOTION_TOKEN`/`SWARM_HOST` are missing (Oct 4); the shell's values win, so `source` it only when you want to override.
+
+- Codex setup needs no manual smoke-directory Git initialization or schema patch; the adapter normalizes strict schemas, and retro discovers permanently registered Codex MCP names, including disabled per-task servers (Oct 4 laptop-b).

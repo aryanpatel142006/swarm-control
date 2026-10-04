@@ -119,7 +119,13 @@ def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path) -> Check:
     from .adapters.base import RunSpec
     a = cfg.agents[agent_name]
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    if a.provider == "codex":
+        git = run_cmd(["git", "init", "-q", str(tmp_dir)], cwd=tmp_dir, timeout=30)
+        if not git.ok:
+            return Check(f"smoke:{agent_name}", False, "prepare smoke git repo: " + (git.err or git.out)[:200])
     (tmp_dir / ".swarm-run").mkdir(exist_ok=True)
+    report_path = tmp_dir / ".swarm-run" / "report.json"
+    report_path.unlink(missing_ok=True)  # a previous smoke's fallback is not proof this run worked
     pf = tmp_dir / "smoke.md"
     pf.write_text("Reply with exactly this JSON and nothing else, then stop: "
                   '{"status":"done","summary":"smoke ok"}. If you cannot return structured output, '
@@ -127,7 +133,7 @@ def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path) -> Check:
     schema = {"type": "object", "properties": {"status": {"type": "string"}, "summary": {"type": "string"}},
               "required": ["status"]}
     spec = RunSpec(prompt_file=pf, model=a.models["low"], effort=a.effort.get("low"), max_turns=3, budget_usd=0.5,
-                   timeout_s=180, cwd=tmp_dir, schema=schema, sandbox=a.sandbox)
+                   timeout_s=180, cwd=tmp_dir, schema=schema, sandbox=a.sandbox, extra_args=list(a.extra_args))
     r = get_adapter(a).run(spec)
     ok = r.ok and (r.structured_output is not None or (tmp_dir / ".swarm-run" / "report.json").exists())
     cost = f" · ${r.usage.cost_usd}" if r.usage.cost_usd else ""

@@ -23,3 +23,10 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 
 ## Run summary
 (filled in at the end of the run)
+
+## Laptop-b setup follow-up
+- A fresh `swarm doctor --smoke codex-b` needed manual Git initialization, and Codex rejected the unnormalized report schema. Normalize schemas in the adapter (closed objects, all keys required, null for optional values) and initialize the disposable smoke checkout before making the model call.
+- Retro discovered Claude MCP servers only; permanent Codex registration was invisible to tool promotion. Discover Codex registrations as well, including disabled servers that the runner enables per task.
+- Keep the end-to-end retro test's project config explicit about its usable Playwright server; verify Codex-only discovery through a local CLI fixture. Plugin-install tests declare their CLI availability instead of requiring Claude to be installed on a Codex laptop.
+- Smoke checks now discard stale fallback reports and inherit worker extra arguments. No live runner or global MCP configuration is changed by this PR.
+- Validation: full suite passed (254 passed, 1 skipped); permanently registered Context7 and Playwright names were discovered on laptop-b.
