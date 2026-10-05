@@ -36,7 +36,14 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 22 | Teammate replaced codex-b with antigravity-b by committing to main directly (20:13 EDT); the board kept a stale codex-b row in "cooldown" | git log | row retired by hand; idea: `agents-sync` marks rows missing from config as "removed" |
 | 23 | With 3 agents / ~10 slots only one task was open: the planner's later-milestone L tasks were chained one behind another | board 01:10 UTC | un-chained 7 tasks to true prerequisites, split T-015/T-016/T-018/T-021; skill rule "capacity jump → re-plan" |
 
+| 24 | Fable on every critical task burned the Max 5-hour window ($35 in 2.5 h): claude-a rate-limited at 03:12 UTC, three planner splits and one review failed with "session limit" | status, split logs | critical default back to Opus; Fable only by hand for T-010/T-019; reviewer moved to the Pro account; claude-a 4 slots |
+| 25 | Antigravity: `--model gemini-3.1-pro-high --effort medium` rejected by agy (T-022 failed twice) | task last_error | adapter skips --effort when the id carries it (d0da39d) |
+| 26 | Reviewer escalated T-022 to Blocked because *it* was rate-limited | Q-030 | reviewer returns `defer` on rate limit; task stays in Review (d0da39d) |
+| 27 | serve kept routing to codex-b after it was removed from config (serve loads config at start) | serve.log | restarted serve; idea: reload config on change |
+| 28 | 16 worker notes triaged in one pass: honest verify exit codes, shared models dir, auto dep reinstall, declared deps, ephemeral ports, no `timeout` on macOS, pip only from main | Q-011..Q-029 | project f5c5e10 + skill |
+
 ## Ideas for the harness (not done)
+- serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
 - `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
 - serve: when free slots across online agents exceed Ready tasks for N minutes, auto-run `swarm split` on the largest Backlog task whose deps are met, or at least raise a RISK line (done for idle agents).
 - `swarm status`: list running worker processes on this host (pid, task, model, minutes) so the orchestrator never has to pgrep.
