@@ -48,6 +48,10 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 31 | iLab rejects public keys (`gssapi-keyex,gssapi-with-mic,password,keyboard-interactive`); unattended access needs a Kerberos ticket (`kinit ap2772@CS.RUTGERS.EDU`), which only the human can mint; auto mode also blocks the orchestrator from reading credentials or editing `~/.ssh/config`, which is right | user screenshot, classifier denial | documented in the skill: never ask for or store passwords; ask the human for a ticket/key, not a secret |
 | 32 | Second overnight batch of worker notes (Q-053..Q-078): datasets decode, cv2 from mediapipe, onnxruntime 1.30 teardown abort masquerading as test failure, ruff rule families undocumented, mock transcript too short, host mismatch (laptop-b is a MacBook Air on Python 3.14), Codex sandbox commit denials (harness commits), HF skills still attached | board | hearing-stack gotchas, verify_fast crash detection, onnxruntime<1.29, mock-transcript task, prompts carry the execution host |
 
+| 33 | 'accept as is' on a reviewer escalation re-queued the task to the worker (T-010 attempt 4) | serve.log 08:24 | relay: an accept answer on an escalation with a PR goes to Merge Ready |
+| 34 | Morning of Oct 5: M0, M1, M2, M4 complete; Focus HQ integrated (T-019: 1 s window / 0.5 s hop, 1.5 s delay, MPS p50 237 ms); ASD calibrated (Light-ASD 0.906, lipmotion 0.827 frame accuracy on av_full); DFN3 streaming at 13 ms (dfn_ll); T-010 acceptance criterion corrected to noise-only | board | PLAN.md updated; decisions logged on the board |
+| 35 | Joseph's Codex hit its own usage limit (ChatGPT plan) twice; antigravity-b never ran a task overnight | board | nothing to fix in the harness; the human owns the plan limits |
+
 ## Ideas for the harness (not done)
 - serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
 - `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
