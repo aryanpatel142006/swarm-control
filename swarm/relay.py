@@ -12,9 +12,18 @@ from .models import Question, Report, Status, Task
 CLOSED = {Status.DONE, Status.CUT}
 
 
-def _append_feedback(board, target: Task, line: str) -> None:
+def append_feedback(board, target: Task, line: str) -> bool:
+    """Append one note to a task's feedback unless the same note is already there (Q-046: a rebase instruction
+    was relayed twice word for word). Returns True when something was written."""
+    line = line.strip()
+    if not line or line in target.feedback:
+        return False
     target.feedback = (target.feedback.rstrip() + "\n\n" + line).strip()[:1900]
     board.update_task(target, ["feedback"])
+    return True
+
+
+_append_feedback = append_feedback
 
 
 def _note(board, *, text: str, context: str, task_id: str, asked_by: str) -> Question:

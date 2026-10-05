@@ -366,7 +366,8 @@ class Runner:
                             + (" (main changed them in: " + "; ".join(causes) + ")" if causes else "")
                             + f". First run `git fetch {self.ws.remote} && git rebase {self.ws.remote}/{self.cfg.main_branch}`, "
                             "resolve every conflict keeping main's intent, `git rebase --continue`, then do the task.")
-                    task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
+                    if note not in task.feedback:
+                        task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
                     self.log(f"[{task.id}] resume: rebase conflicted ({', '.join(conflicts)})")
             setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
             if setup is not None and not setup.ok:   # a broken environment is not the model's job to debug

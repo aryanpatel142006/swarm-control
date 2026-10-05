@@ -36,3 +36,13 @@ def test_tell_from_the_orchestrator():
     assert "Message from orchestrator: use PCM16 LE" in board.get_task("T-002").feedback
     assert q.kind == "relay" and q.asked_by == "orchestrator"
     assert tell(board, "T-404", "nobody home") is None
+
+
+def test_identical_feedback_is_not_appended_twice():
+    from swarm.relay import append_feedback
+    from swarm.models import Task
+    board = InMemoryBoard()
+    t = board.create_task(Task(id="", title="x", status=Status.READY, agent="claude-a"))
+    append_feedback(board, t, "Rebase onto main conflicted in: pyproject.toml. Resolve it.")
+    append_feedback(board, t, "Rebase onto main conflicted in: pyproject.toml. Resolve it.")
+    assert board.get_task(t.id).feedback.count("Rebase onto main") == 1
