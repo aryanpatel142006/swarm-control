@@ -428,3 +428,14 @@ def test_critical_work_leaves_a_cooling_agent_for_an_idle_capable_one(cfg, git_r
     t = board.create_task(Task(id="", title="gate", status=Status.READY, agent="codex-a", type="backend", importance="critical"))
     assert srv.reroute() + srv.rebalance() >= 1
     assert board.get_task(t.id).agent == "claude-a"
+
+
+def test_accept_as_is_answer_to_a_reviewer_escalation_merges(cfg, git_repo, tmp_path):
+    """Oct 5 2026: 'accept as is' on T-010's escalation sent the task back to the worker for a 4th attempt."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    t = board.create_task(Task(id="", title="dfn", status=Status.BLOCKED, agent="claude-a", pr_url="https://x/pull/1"))
+    board.create_question(Question(id="", text=f"Reviewer escalated {t.id}: criterion not met", kind="blocking",
+                                   task_id=t.id, options=["cut", "split", "accept as is", "human fix"],
+                                   answer="accept as is"))
+    assert srv.relay() == 1
+    assert board.get_task(t.id).status is Status.MERGE_READY

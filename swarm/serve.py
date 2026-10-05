@@ -237,6 +237,12 @@ class Server:
                 t.status = Status.CUT
                 self.board.update_task(t, ["status"])
                 self.log(f"[{t.id}] cut by answer to {q.id}")
+            elif (q.kind == "blocking" and t and t.status is Status.BLOCKED and t.pr_url
+                  and q.answer.strip().lower().startswith("accept")):
+                # the human overrides the reviewer: ship what is on the branch (T-010, Oct 5 2026)
+                t.status, t.feedback, t.claim_nonce = Status.MERGE_READY, "", ""
+                self.board.update_task(t, ["status", "feedback", "claim_nonce"])
+                self.log(f"[{t.id}] accepted as is by answer to {q.id} → merge")
             elif q.kind == "blocking":
                 if t and t.status is Status.BLOCKED:
                     t.feedback = f"Human answer to \"{q.text}\": {q.answer}"[:1900]
