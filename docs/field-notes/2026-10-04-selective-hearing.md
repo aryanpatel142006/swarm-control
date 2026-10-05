@@ -54,7 +54,14 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 
 | 36 | T-043 bounced between codex-b cooldowns (ChatGPT plan limit) for ~1 h while both Claude agents idled: the rate-limit path requeued the task on the same agent | board 11:06-11:15 UTC | runner reroutes the task away immediately (`route(exclude=limited)`) |
 
+| 37 | 16:xx UTC: DNS failed on laptop-a for a few minutes; runners backed off up to 300 s between ticks, heartbeats went stale, serve reaped T-053 from a healthy claude-a run (three times) and handed it to codex-b | run-a.log, serve.log | tick backoff capped at 60 s; template `heartbeat_stale_minutes` 20; project set to 20 |
+
+| 38 | T-053 reaped six times: every reap followed a runner restart (self-update re-exec on laptop-b, Codex restarts, and two `pkill`s by the orchestrator during the DNS blip); a fresh runner's heartbeat lists no task, so serve's orphan rule fired on a healthy run | serve.log 627-639 | skill rule: never kill a runner with work in flight; idea: the runner persists its in-flight task ids to disk and re-lists them on the first heartbeat after a restart so the orphan rule does not fire |
+| 39 | The harness test suite looked hung; it was only slow: with seven worker processes and a bench on the laptop the e2e test's git steps exceeded 45 s | faulthandler trace | run the suite with a generous timeout when workers are busy; no code change |
+
 ## Ideas for the harness (not done)
+- runner: persist in-flight task ids (`~/.swarm/<project>/inflight-<host>.json`) and re-list them on the first heartbeat after a restart; serve then keeps the run alive until the real worker process is gone.
+- serve: before reaping a task from an agent on serve's own host, check the worker process is really gone (pgrep the worktree path).
 - serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
 - `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
 - serve: when free slots across online agents exceed Ready tasks for N minutes, auto-run `swarm split` on the largest Backlog task whose deps are met, or at least raise a RISK line (done for idle agents).

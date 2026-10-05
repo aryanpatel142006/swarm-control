@@ -503,7 +503,7 @@ class Server:
                 locked = self.acquire_lock()
                 break
             except Exception as e:  # noqa: BLE001
-                wait = min(300, 15 * 2 ** (attempt - 1))
+                wait = min(60, 15 * 2 ** (attempt - 1))   # see runner.backoff_seconds
                 self.log(f"serve: board unreachable at startup ({type(e).__name__}); retrying in {wait}s")
                 self.sleep(wait)
         else:

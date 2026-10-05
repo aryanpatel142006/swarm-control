@@ -18,7 +18,7 @@ serve_seconds: 30
 review_policy: high_and_above   # all | high_and_above | critical_only | none   (switch to `all` at T-4h)
 max_review_rounds: 2
 max_attempts: 3
-heartbeat_stale_minutes: 10
+heartbeat_stale_minutes: 20   # a laptop's Wi-Fi blip must not get its running tasks reaped (Oct 5 2026)
 max_queue_depth: 4        # beyond this, non-critical tasks spill to the next-best agent
 
 verify:

@@ -594,3 +594,11 @@ def test_rate_limited_task_is_rerouted_away_immediately(cfg, git_repo, tmp_path)
     fresh = board.get_task(t.id)
     assert fresh.status is Status.READY and fresh.agent == "claude-a"
     assert board.get_agent("codex-a").status == "cooldown"
+
+
+
+def test_tick_backoff_never_exceeds_a_minute():
+    """Oct 5 2026: a DNS blip made the runner back off 5 minutes between ticks, its heartbeat went stale and serve
+    reaped a healthy worker's task."""
+    from swarm.runner import backoff_seconds
+    assert [backoff_seconds(n) for n in (1, 2, 3, 4, 8)] == [15, 30, 60, 60, 60]

@@ -28,7 +28,13 @@ HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itse
 RATE_LIMIT_COOLDOWN_MIN = 15
 IDLE_AFTER_S = 300
 TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
-SELF_UPDATE_EVERY_S = 600          # idle runners look for a newer harness every 10 minutes
+SELF_UPDATE_EVERY_S = 600
+
+
+def backoff_seconds(failures: int) -> int:
+    """Retry delay after a failed tick: 15, 30, then 60 s at most. Longer gaps let the heartbeat go stale and a
+    healthy worker's task gets reaped during an ordinary Wi-Fi blip (Oct 5 2026)."""
+    return min(60, 15 * 2 ** (max(1, failures) - 1))          # idle runners look for a newer harness every 10 minutes
 PUBLISH_FIELDS = ["status", "attempts", "flags", "pr_url", "claim_nonce", "feedback", "last_error", "review_rounds", "model", "effort"]
 
 
@@ -261,7 +267,7 @@ class Runner:
                     raise
                 except Exception as e:   # board or network outage: keep the agent alive, back off, retry
                     failures += 1
-                    wait = min(300, 15 * 2 ** (failures - 1))
+                    wait = backoff_seconds(failures)
                     self.log(f"tick failed ({type(e).__name__}: {str(e)[:160]}); retrying in {wait}s")
                     if once:
                         break
