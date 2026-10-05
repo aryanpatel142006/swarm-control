@@ -64,5 +64,11 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 - Planner set to Fable on the user's request; reviewer claude-a/sonnet to protect the teammate's Codex credits.
 - Not run yet: `swarm plan PLAN.md --milestone M0` (the user starts the run). Context resolution checked with `select_docs` for ml_audio/backend/eval/frontend/infra.
 
+## Night summary (Oct 5, 04:10 UTC; the swarm keeps running)
+- Product: 12 tasks merged (types, audio I/O, metrics, scenes, transcriber, setup/CI, GTCRN stage, session server, console, ASR/TTS adapters, remote GPU path, voice-match contract); M0 nearly done, M1 3/5, M4 3/6, M5 2/3. Fixtures (T-006) and DFN3 (T-010) are the long poles.
+- Harness: ~20 commits, 240+ tests. New since start of day: family type keys, doctor checks, env autoload, harness_feedback + relay messages + `swarm tell`, idle steal, redistribute on return, merged-PR reconcile, superseded-result guard, self-update + `swarm restart`, model probe, per-agent env (second account), antigravity flag fix, reviewer defer on rate limit, split guard, `swarm handoff`, idle-agent RISK line.
+- Cost: Max account ~$37 (hit the 5-hour window once), Pro ~$6, planner ~$12 across plans and splits.
+- Orchestrator mistakes worth remembering: edited an open task's scope on main; restarted a busy runner; left an agent idle while fixing the harness; re-ran a split without checking the board; let a failing test through a `pytest | tail && commit` chain (use `pytest > log; rc=$?`).
+
 ## Run summary
 (filled in at the end of the run)
