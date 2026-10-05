@@ -52,6 +52,8 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 34 | Morning of Oct 5: M0, M1, M2, M4 complete; Focus HQ integrated (T-019: 1 s window / 0.5 s hop, 1.5 s delay, MPS p50 237 ms); ASD calibrated (Light-ASD 0.906, lipmotion 0.827 frame accuracy on av_full); DFN3 streaming at 13 ms (dfn_ll); T-010 acceptance criterion corrected to noise-only | board | PLAN.md updated; decisions logged on the board |
 | 35 | Joseph's Codex hit its own usage limit (ChatGPT plan) twice; antigravity-b never ran a task overnight | board | nothing to fix in the harness; the human owns the plan limits |
 
+| 36 | T-043 bounced between codex-b cooldowns (ChatGPT plan limit) for ~1 h while both Claude agents idled: the rate-limit path requeued the task on the same agent | board 11:06-11:15 UTC | runner reroutes the task away immediately (`route(exclude=limited)`) |
+
 ## Ideas for the harness (not done)
 - serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
 - `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
