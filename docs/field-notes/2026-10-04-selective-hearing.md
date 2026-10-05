@@ -62,6 +62,8 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 40 | iLab GPU reached via the human's SSH ControlMaster socket; torch had to be shipped as wheels from the Mac (iLab drops >300 MB downloads); cluster rejects --cpus-per-task/--mem; clearvoice needs --no-deps | iLab setup 19:00-20:30 UTC | project docs/DEPLOY + task T-054 (gpu_up.sh ilab mode); skill: hand the human a ControlMaster command when a host refuses keys |
 | 41 | GPU bake-off on 80 two-face clips overturned the provisional decision: Enrolled audio-only TSE +10.1..11.5 dB at 0.5..2 s windows vs AV-MossFormer2 +11.2 only at 2 s; Dolphin negative. Focus HQ can run ~1 s behind live | eval/results/ilab | PLAN updated; decision-v2 task; T-055 briefed |
 
+| 42 | Mac vs GPU bake-off (80 two-face clips, identical SI-SDRi): Enrolled 0.5 s window = 150/234 ms p50/p95 on M4 Pro MPS vs 109/154 ms on RTX 4500 Ada; AV-MossFormer2 2 s = 405/498 vs 261/263 ms. Real WER: AV@2 s 0.485 beats Enrolled@2 s 0.571 (input 0.873). GPU buys a ~2-3× compute margin, not quality | eval/results | T-056 briefed; decision: Enrolled 1 s local / 0.5 s GPU for live, AV 2 s for the Synthetic/Text feed |
+
 ## Ideas for the harness (not done)
 - runner: persist in-flight task ids (`~/.swarm/<project>/inflight-<host>.json`) and re-list them on the first heartbeat after a restart; serve then keeps the run alive until the real worker process is gone.
 - serve: before reaping a task from an agent on serve's own host, check the worker process is really gone (pgrep the worktree path).
