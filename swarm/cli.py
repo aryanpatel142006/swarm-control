@@ -379,6 +379,8 @@ def split(task_id: str, apply: bool = typer.Option(False, "--apply")):
     t = board.get_task(task_id)
     if not t:
         raise typer.Exit(code=_fail(f"{task_id} not found"))
+    if t.status in (Status.CUT, Status.DONE):   # a second split of a cut task made five duplicates (Oct 5 2026)
+        raise typer.Exit(code=_fail(f"{task_id} is {t.status.value}: it was already split or finished; check the board"))
     pl = Planner(_cfg(), board, _workspace(_cfg()), log=console.print)
     proposals = pl.propose(_cfg().repo_root / "PLAN.md", split_of=t)
     _print_proposals(proposals)

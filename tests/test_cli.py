@@ -206,3 +206,15 @@ def test_agents_sync_retires_rows_missing_from_config(project_dir, monkeypatch):
     c.agents_sync()
     old = board.get_agent("codex-old")
     assert old.status == "removed" and old.current_task == "" and "config" in old.note
+
+
+def test_split_refuses_a_cut_or_done_task(project_dir, monkeypatch):
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import Status, Task
+    from swarm import cli as c
+    board = InMemoryBoard()
+    t = board.create_task(Task(id="", title="big", status=Status.CUT))
+    monkeypatch.setattr(c, "make_board", lambda cfg, memory=False: board)
+    c.state.cfg = None; c.state.config_path = project_dir / ".swarm" / "config.yaml"; c.state.memory = True
+    r = runner.invoke(app, ["split", t.id, "--apply"])
+    assert r.exit_code != 0 and "already split" in (r.stdout + str(r.output))

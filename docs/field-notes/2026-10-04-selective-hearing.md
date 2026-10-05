@@ -42,6 +42,8 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 27 | serve kept routing to codex-b after it was removed from config (serve loads config at start) | serve.log | restarted serve; idea: reload config on change |
 | 28 | 16 worker notes triaged in one pass: honest verify exit codes, shared models dir, auto dep reinstall, declared deps, ephemeral ports, no `timeout` on macOS, pip only from main | Q-011..Q-029 | project f5c5e10 + skill |
 
+| 29 | Re-ran `swarm split T-018` after a rate-limit error although the first run had applied; five duplicates (T-044..T-048) created and cut | board | `split` refuses Cut/Done tasks; skill rule |
+
 ## Ideas for the harness (not done)
 - serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
 - `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
