@@ -33,7 +33,12 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 20 | Restarting a busy runner (to raise parallelism) parked T-006 (Fable) and three Opus runs; codex-b's tasks had just been rerouted to claude-a because Codex hit a rate limit (cooldown) | run-a.log 00:1x UTC | `swarm restart` / SIGUSR1 drains then re-execs (feb00b4); skill rule; the self-updater already waits for idle |
 | 21 | User wants more throughput: Max plan + a second Pro account | user | laptop-a 6 slots; per-agent `env` so `claude-a2` can run under `CLAUDE_CONFIG_DIR=~/.claude-pro` (feb00b4) |
 
+| 22 | Teammate replaced codex-b with antigravity-b by committing to main directly (20:13 EDT); the board kept a stale codex-b row in "cooldown" | git log | row retired by hand; idea: `agents-sync` marks rows missing from config as "removed" |
+| 23 | With 3 agents / ~10 slots only one task was open: the planner's later-milestone L tasks were chained one behind another | board 01:10 UTC | un-chained 7 tasks to true prerequisites, split T-015/T-016/T-018/T-021; skill rule "capacity jump → re-plan" |
+
 ## Ideas for the harness (not done)
+- `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
+- serve: when free slots across online agents exceed Ready tasks for N minutes, auto-run `swarm split` on the largest Backlog task whose deps are met, or at least raise a RISK line (done for idle agents).
 - `swarm status`: list running worker processes on this host (pid, task, model, minutes) so the orchestrator never has to pgrep.
 - `swarm add` / `swarm deps T-x --depends ...`: a CLI to edit depends_on without the board API.
 - serve: when a task's PR is MERGED on GitHub but the task is not Done, mark it Done (handles human merges).
