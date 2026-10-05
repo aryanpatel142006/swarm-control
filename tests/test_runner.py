@@ -575,3 +575,22 @@ def test_request_restart_drains_then_restarts(cfg, git_repo, tmp_path, monkeypat
     assert not r.finish_drain_if_idle()           # still busy
     r.active["claude-a"].clear()
     assert r.finish_drain_if_idle() and restarted == [True]
+
+
+def test_rate_limited_task_is_rerouted_away_immediately(cfg, git_repo, tmp_path):
+    """Oct 5 2026: T-043 bounced between codex-b's cooldowns for an hour while two Claude agents idled."""
+    from swarm.runner import Runner
+    from swarm.board.memory import InMemoryBoard
+    from swarm.workspace import Workspace
+    from swarm.usage import Ledger
+    from swarm.models import AgentRow, RunResult, Status, Task, utcnow
+    board = InMemoryBoard()
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    board.upsert_agent(AgentRow(name="codex-a", status="running", last_heartbeat=utcnow()))
+    r = Runner(cfg, board, "host-a", Workspace(git_repo, tmp_path / "wt"), ledger=Ledger(tmp_path / "u.jsonl"), log=lambda *a: None)
+    t = board.create_task(Task(id="", title="bakeoff", status=Status.RUNNING, agent="codex-a", type="eval",
+                               importance="critical", claim_nonce="n1"))
+    r._rate_limited(t, RunResult(ok=False, exit_code=1, stdout="", stderr="", error="usage limit", rate_limited=True))
+    fresh = board.get_task(t.id)
+    assert fresh.status is Status.READY and fresh.agent == "claude-a"
+    assert board.get_agent("codex-a").status == "cooldown"

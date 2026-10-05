@@ -451,16 +451,27 @@ class Runner:
 
     def _rate_limited(self, task: Task, result: RunResult) -> Outcome:
         now = self.now()
-        task.status, task.claim_nonce = Status.READY, ""
-        task.last_error = f"rate limited: {result.error[:300]}"
-        self.board.update_task(task, ["status", "claim_nonce", "last_error"])
-        row = self.board.get_agent(task.agent) or AgentRow(
-            name=task.agent, provider=self.agents[task.agent].provider, host=self.host)
+        limited = task.agent
+        row = self.board.get_agent(limited) or AgentRow(
+            name=limited, provider=self.agents[limited].provider, host=self.host)
         row.status = "cooldown"
         row.cooldown_until = result.reset_at or (now + timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN))
         row.note = f"rate limited at {now.isoformat(timespec='minutes')}"
         self.board.upsert_agent(row)
-        self.log(f"[{task.id}] rate limited; {task.agent} cooling down until {row.cooldown_until}")
+        # hand the task to someone else now; otherwise it bounces back to this agent at every cooldown end
+        # (T-043 lost an hour that way on Oct 5 2026 while two agents idled)
+        try:
+            from .router import context_from_board, route
+            agent, model, effort = route(task, self.cfg, context_from_board(self.board, self.cfg, now), exclude={limited})
+            if agent != limited:
+                task.agent, task.model, task.effort = agent, model, effort
+        except Exception as e:  # noqa: BLE001 - routing must never block the requeue
+            self.log(f"[{task.id}] reroute after rate limit failed: {e!r}")
+        task.status, task.claim_nonce = Status.READY, ""
+        task.last_error = f"rate limited: {result.error[:300]}"
+        self.board.update_task(task, ["status", "claim_nonce", "last_error", "agent", "model", "effort"])
+        self.log(f"[{task.id}] rate limited; {limited} cooling down until {row.cooldown_until}"
+                 + (f"; task rerouted → {task.agent}" if task.agent != limited else ""))
         return Outcome(task, None, result, None, Status.READY)
 
     def _publish(self, task: Task, wt: Path, attempt: int, result: RunResult) -> Outcome:
