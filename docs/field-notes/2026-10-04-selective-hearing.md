@@ -87,6 +87,11 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 - Cost: Max account ~$37 (hit the 5-hour window once), Pro ~$6, planner ~$12 across plans and splits.
 - Orchestrator mistakes worth remembering: edited an open task's scope on main; restarted a busy runner; left an agent idle while fixing the harness; re-ran a split without checking the board; let a failing test through a `pytest | tail && commit` chain (use `pytest > log; rc=$?`).
 
+## Plan complete (Oct 5, 19:00 UTC)
+- M0-M5 all done (M3 6/6 after T-053 merged as a provisional decision). Laptop-a ledger: **$147 over 300 runs, $3.42 per merged task**; waste $45 (failed runs $31, mostly T-053's six reaped attempts). Final retro: 3 findings (undersized, shared-file, tool-default).
+- Still running outside the swarm: the real av_full two-face bake-off on laptop-a (orchestrator-run; results to `eval/results/bakeoff-av_full.json`), to replace T-053's copied numbers via a follow-up task.
+- iLab GPU: not reached. Public keys refused; Kerberos port 88 unreachable from off campus and from campus Wi-Fi; the remaining route is an SSH ControlMaster session opened by the human.
+
 ## Run summary (Oct 5, 11:15 UTC: voice engine built)
 - 36 h after `swarm init`, M0-M5 are done except the bake-off write-up (T-043) and two small follow-ups. ~50 tasks merged, 80 commits on main, 470+ tests, `docs/BENCHMARKS.md` generated from a 21-minute full run on laptop-a: Natural fast `dfn_ll` 13 ms / +4.1 dB SI-SDRi noise-only; Focus HQ `av_mossformer2@2` +13.8 dB SI-SDRi, WER 1.28 → 0.78 on GRID; Enrolled audio-only +11.8 dB; Light-ASD 0.906 frame accuracy; Text WER 0.55 → 0.73?? (raw 0.588 vs cleaned 0.730: cleaning hurt captions, a finding for the slides).
 - Spend: Max ≈ $110, Pro ≈ $40, Codex/Antigravity on the teammate's plans; the planner ran ~$15.
