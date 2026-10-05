@@ -44,6 +44,10 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 
 | 29 | Re-ran `swarm split T-018` after a rate-limit error although the first run had applied; five duplicates (T-044..T-048) created and cut | board | `split` refuses Cut/Done tasks; skill rule |
 
+| 30 | 04:03-08:00 UTC: the Max account rate-limited again; seven **critical** Ready tasks stayed on it for four hours while claude-a2 sat idle, because stealing and rerouting excluded critical work | watcher + status | reroute moves a cooling/offline agent's critical tasks to an idle capable agent (`route(exclude=owner)`); test updated to the new policy |
+| 31 | iLab rejects public keys (`gssapi-keyex,gssapi-with-mic,password,keyboard-interactive`); unattended access needs a Kerberos ticket (`kinit ap2772@CS.RUTGERS.EDU`), which only the human can mint; auto mode also blocks the orchestrator from reading credentials or editing `~/.ssh/config`, which is right | user screenshot, classifier denial | documented in the skill: never ask for or store passwords; ask the human for a ticket/key, not a secret |
+| 32 | Second overnight batch of worker notes (Q-053..Q-078): datasets decode, cv2 from mediapipe, onnxruntime 1.30 teardown abort masquerading as test failure, ruff rule families undocumented, mock transcript too short, host mismatch (laptop-b is a MacBook Air on Python 3.14), Codex sandbox commit denials (harness commits), HF skills still attached | board | hearing-stack gotchas, verify_fast crash detection, onnxruntime<1.29, mock-transcript task, prompts carry the execution host |
+
 ## Ideas for the harness (not done)
 - serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
 - `agents-sync`: retire board rows for agents no longer in config (status "removed", note with the commit).
