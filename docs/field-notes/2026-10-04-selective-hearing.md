@@ -64,7 +64,10 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 
 | 42 | Mac vs GPU bake-off (80 two-face clips, identical SI-SDRi): Enrolled 0.5 s window = 150/234 ms p50/p95 on M4 Pro MPS vs 109/154 ms on RTX 4500 Ada; AV-MossFormer2 2 s = 405/498 vs 261/263 ms. Real WER: AV@2 s 0.485 beats Enrolled@2 s 0.571 (input 0.873). GPU buys a ~2-3× compute margin, not quality | eval/results | T-056 briefed; decision: Enrolled 1 s local / 0.5 s GPU for live, AV 2 s for the Synthetic/Text feed |
 
+| 43 | Evening of Oct 5: GPU backend shipped end to end (gpu_up.sh ilab, RTT 5.6 ms; console Local/GPU/Auto with camera forwarding; tiers v2 ladder from the real bake-off; /simple test page). Board empty again. The orchestrator ran the bake-off itself outside the swarm because its budget (75 min) could not hold a 2 h GPU job: a harness gap (long-running "job" tasks) | board | idea below |
+
 ## Ideas for the harness (not done)
+- Task size XL (hours) for jobs that mostly wait on compute, with a lower model tier and a `swarm job` wrapper that runs a shell command under the task id and attaches the log, so the orchestrator never has to run product evaluations by hand.
 - runner: persist in-flight task ids (`~/.swarm/<project>/inflight-<host>.json`) and re-list them on the first heartbeat after a restart; serve then keeps the run alive until the real worker process is gone.
 - serve: before reaping a task from an agent on serve's own host, check the worker process is really gone (pgrep the worktree path).
 - serve/runner: reload `.swarm/config.yaml` when its mtime changes (agents added/removed without a restart).
