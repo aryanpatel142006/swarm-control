@@ -218,3 +218,18 @@ def test_split_refuses_a_cut_or_done_task(project_dir, monkeypatch):
     c.state.cfg = None; c.state.config_path = project_dir / ".swarm" / "config.yaml"; c.state.memory = True
     r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "split", t.id, "--apply"])
     assert r.exit_code != 0 and "already split" in (r.stdout + str(r.output))
+
+
+def test_handoff_writes_a_resume_file(project_dir, monkeypatch, tmp_path):
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import Question, Status, Task
+    from swarm import cli as c
+    board = InMemoryBoard()
+    board.create_task(Task(id="", title="dfn stage", status=Status.RUNNING, agent="claude-a", model="opus"))
+    board.create_question(Question(id="", text="which headphones?", kind="blocking", task_id="T-001"))
+    monkeypatch.setattr(c, "make_board", lambda cfg, memory=False: board)
+    out = tmp_path / "HANDOFF.md"
+    r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "handoff", "--out", str(out)])
+    assert r.exit_code == 0, r.output
+    text = out.read_text()
+    assert "Orchestrator handoff" in text and "which headphones?" in text and "dfn stage" in text and "swarm status" in text

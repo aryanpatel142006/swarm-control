@@ -59,6 +59,12 @@ Every 10-15 minutes (use Monitor on `serve.log` / ScheduleWakeup / a sleep-free 
 5. **Costs**: `swarm usage --since 5h`. Waste (retries, failed attempts) above ~30 % means tasks are badly specified, so fix the planning, not the workers.
 6. Milestone ~70 % done → plan the next milestone. Milestone 100 % → serve runs the retro automatically; read `docs/retro/<stamp>.md` and the new `docs/LESSONS.md` lines.
 
+## 3b. Orchestrator failover (the orchestrator's own account can hit a limit too)
+The swarm never depends on this session: serve and the runners keep reviewing, merging, re-routing and self-updating without it. But planning, triage and harness fixes stop when the orchestrator's account is rate-limited (Oct 5 2026: the Max account hit its 5-hour window at 03:12; planner, reviewer and the orchestrator all stalled together). Rules:
+- Watch the orchestrator account's share of `$/5h` in `swarm status` (its workers are the proxy). At **~70 %**, or on the first "session limit" error from any tool call, run `swarm handoff` (writes `.swarm/HANDOFF.md`, commit it) and tell the human: *"open a new orchestrator session on the other account: `CLAUDE_CONFIG_DIR=~/.claude-pro claude` in the project repo, say 'resume as orchestrator from .swarm/HANDOFF.md'"*. The new session reads the handoff and this skill and continues; the old one stops acting.
+- Keep planner and reviewer on different accounts from the orchestrator when possible (`planner.agent`, `reviewer.agent` in config), so a limit on one does not freeze all three.
+- Never let the orchestrator's account also run the bulk of the workers when a second account exists: spread parallel slots across accounts.
+
 ## 4. Human touchpoints
 - The Notion dashboard ("Swarm · <project>") is the human control plane: Agents table, Questions for you, Tasks board, Status block.
 - When the user is AFK, keep going: answer what you can, park what you can't (the task waits as Blocked; other work proceeds), and leave a short summary in `docs/` of the harness repo or the project for when they return.

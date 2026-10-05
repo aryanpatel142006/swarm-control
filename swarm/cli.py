@@ -264,6 +264,31 @@ def restart():
     console.print(f"restart requested for {len(pids)} runner process(es); they restart once idle")
 
 
+@app.command()
+def handoff(out: Path = typer.Option(None, "--out", help="where to write (default .swarm/HANDOFF.md)")):
+    """Write everything a new orchestrator session needs to take over: status page, open questions, running
+    tasks, pending human inputs and the resume steps. Use it when this orchestrator's account nears its limit."""
+    from .status import render_status
+    board = make_board(_cfg(), state.memory)
+    tasks, agents, questions = board.list_tasks(), board.list_agents(), board.list_questions()
+    status = render_status(_cfg(), tasks, agents, questions, utcnow())
+    open_q = [q for q in questions if q.status == "Open"]
+    lines = [f"# Orchestrator handoff · {_cfg().project} · {utcnow().strftime('%Y-%m-%d %H:%M UTC')}", "",
+             "Written by `swarm handoff`. A new orchestrator session (any account, any laptop) resumes from here:",
+             "1. open Claude Code in this repo with the `swarm-control` skill available; the harness keeps running meanwhile",
+             "2. read this file, then `swarm status`; answer Open questions; check RISK lines",
+             "3. keep the loop in the skill §3; append to swarm-control/docs/field-notes/ as you go", "",
+             "## Status page", "```", status, "```", "",
+             "## Open questions"] + [f"- {q.id} [{q.kind}] {q.task_id}: {q.text}" for q in open_q] + ["",
+             "## Running / Ready tasks"] + [f"- {t.id} [{t.status.value}] {t.agent}/{t.model}: {t.title}" for t in tasks
+                                            if t.status in (Status.RUNNING, Status.READY, Status.REVIEW, Status.MERGE_READY)] + ["",
+             "## Harness loops on this laptop", "- `caffeinate -dims swarm serve` (one per project) and `caffeinate -dims swarm run [--agent X]` per account",
+             "- logs: ~/.swarm/<project>/{serve,run-*}.log · restart runners with `swarm restart`", ""]
+    path = out or (_cfg().repo_root / ".swarm" / "HANDOFF.md")
+    path.write_text("\n".join(lines))
+    console.print(f"handoff written to {path}")
+
+
 @app.command("agents-sync")
 def agents_sync():
     """Refresh Agent rows (and the Agent select options) from config."""
