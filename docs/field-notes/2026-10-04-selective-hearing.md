@@ -30,6 +30,9 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 
 | 19 | Orchestrator prioritisation: I noticed codex-b idle and kept shipping harness fixes for ~40 min before giving it work | user feedback 00:45 UTC | `swarm status` now raises a RISK line for any idle agent with nothing Ready while tasks remain; skill §3 step 0 "idle agents first" |
 
+| 20 | Restarting a busy runner (to raise parallelism) parked T-006 (Fable) and three Opus runs; codex-b's tasks had just been rerouted to claude-a because Codex hit a rate limit (cooldown) | run-a.log 00:1x UTC | `swarm restart` / SIGUSR1 drains then re-execs (feb00b4); skill rule; the self-updater already waits for idle |
+| 21 | User wants more throughput: Max plan + a second Pro account | user | laptop-a 6 slots; per-agent `env` so `claude-a2` can run under `CLAUDE_CONFIG_DIR=~/.claude-pro` (feb00b4) |
+
 ## Ideas for the harness (not done)
 - `swarm status`: list running worker processes on this host (pid, task, model, minutes) so the orchestrator never has to pgrep.
 - `swarm add` / `swarm deps T-x --depends ...`: a CLI to edit depends_on without the board API.

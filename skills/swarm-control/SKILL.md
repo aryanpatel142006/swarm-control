@@ -29,7 +29,7 @@ Run both as background processes that survive across turns (Bash `run_in_backgro
 caffeinate -dims swarm serve  > ~/.swarm/<project>/serve.log 2>&1     # ONE serve across all laptops
 caffeinate -dims swarm run    > ~/.swarm/<project>/run-a.log 2>&1     # this laptop's workers
 ```
-Never hot-edit the installed harness while these run (see §5 for how to ship a harness fix).
+Never hot-edit the installed harness while these run (see §5 for how to ship a harness fix). To pick up new code or config, use **`swarm restart`** (SIGUSR1): the runner stops claiming, finishes in-flight runs, then re-execs. Never `pkill` a busy runner: it parks half-done work and a Fable run was lost that way on Oct 4. Runners older than feb00b4 have no SIGUSR1 handler and would die on it; restart those only when `pgrep -f 'claude -p'` shows nothing in flight.
 
 ## 2. Plan a milestone
 ```bash
@@ -78,6 +78,9 @@ The harness gets better each time it is used. Whenever something surprises you (
 5. At the end of the run, write a short summary into the field-notes file: tasks done, cost, top 3 findings, what was fixed.
 
 Do not let improvement work starve the product: harness fixes happen between milestones or while workers are busy, and anything larger than ~30 minutes becomes a note for later.
+
+## Several accounts on one laptop
+A second Claude account runs as its own agent with its own config dir: log it in once in a real terminal (`CLAUDE_CONFIG_DIR=$HOME/.claude-pro claude`, then `/login`), then add an agent with `env: {CLAUDE_CONFIG_DIR: /Users/<you>/.claude-pro}` and raise the host's `max_parallel.claude`. Give the cheaper plan the normal/low tiers (Sonnet) and keep critical work on the Max account.
 
 ## Model roster (verify ids before the event; update this list when a provider ships a new model)
 | Provider | best | high | mid | low | Notes (Oct 4 2026) |
