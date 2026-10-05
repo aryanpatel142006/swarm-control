@@ -47,6 +47,19 @@ transcription). Numbers from the run, all from the harness's own ledger and [fie
 | **Agents in the swarm** | Claude Code on two accounts, Codex and Antigravity on a teammate's laptop |
 | **41 incidents logged** | nearly every one became a tested code fix, a planner rule, or a rule in the orchestrator skill |
 
+<table>
+<tr>
+<td width="44%"><img src="docs/images/notion-dashboard.jpg" alt="The live Notion dashboard: status line and the Agents table with heartbeats and current tasks"></td>
+<td width="56%"><img src="docs/images/notion-tasks.jpg" alt="The Tasks table: every task with its status, agent, importance, type, size and milestone"></td>
+</tr>
+<tr>
+<td align="center"><sub>The real dashboard mid-run: a live status line written by <code>swarm serve</code>, and each agent's heartbeat and current task</sub></td>
+<td align="center"><sub>The Tasks board: every task with the agent it was routed to, its importance, type, size and milestone</sub></td>
+</tr>
+</table>
+
+![Cost by model and runs per hour, from the real usage ledger](docs/images/ledger.svg)
+
 And an unattended overnight practice run (`swarm night`), before the real project:
 
 | | |
