@@ -59,6 +59,9 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 | 38 | T-053 reaped six times: every reap followed a runner restart (self-update re-exec on laptop-b, Codex restarts, and two `pkill`s by the orchestrator during the DNS blip); a fresh runner's heartbeat lists no task, so serve's orphan rule fired on a healthy run | serve.log 627-639 | skill rule: never kill a runner with work in flight; idea: the runner persists its in-flight task ids to disk and re-lists them on the first heartbeat after a restart so the orphan rule does not fire |
 | 39 | The harness test suite looked hung; it was only slow: with seven worker processes and a bench on the laptop the e2e test's git steps exceeded 45 s | faulthandler trace | run the suite with a generous timeout when workers are busy; no code change |
 
+| 40 | iLab GPU reached via the human's SSH ControlMaster socket; torch had to be shipped as wheels from the Mac (iLab drops >300 MB downloads); cluster rejects --cpus-per-task/--mem; clearvoice needs --no-deps | iLab setup 19:00-20:30 UTC | project docs/DEPLOY + task T-054 (gpu_up.sh ilab mode); skill: hand the human a ControlMaster command when a host refuses keys |
+| 41 | GPU bake-off on 80 two-face clips overturned the provisional decision: Enrolled audio-only TSE +10.1..11.5 dB at 0.5..2 s windows vs AV-MossFormer2 +11.2 only at 2 s; Dolphin negative. Focus HQ can run ~1 s behind live | eval/results/ilab | PLAN updated; decision-v2 task; T-055 briefed |
+
 ## Ideas for the harness (not done)
 - runner: persist in-flight task ids (`~/.swarm/<project>/inflight-<host>.json`) and re-list them on the first heartbeat after a restart; serve then keeps the run alive until the real worker process is gone.
 - serve: before reaping a task from an agent on serve's own host, check the worker process is really gone (pgrep the worktree path).
