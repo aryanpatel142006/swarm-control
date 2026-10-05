@@ -1,110 +1,235 @@
+<div align="center">
+
+![swarm-control](docs/images/banner.jpg)
+
 # swarm-control
 
-A small harness that lets a two-person team run several AI coding agents in parallel across two laptops from one Notion board. Each task runs in a fresh, size-capped CLI session inside its own git worktree; the tool verifies, pushes, opens the PR, and reports. A control loop reviews, merges, recovers dead work, and relays your answers to blocked agents.
+**Run a team of AI coding agents in parallel across several laptops, from one Notion board.**
 
-Built for HackRU Fall 2026. It is a development tool, not a hackathon project: keep it in its own public repo and list it in your submission.
+Claude Code, Codex, Gemini, Antigravity and Grok each take tasks from a shared board, work in their own git worktree,
+and open verified pull requests. A control loop reviews, merges, retries, reroutes around rate limits, and asks a human
+only when it has to.
 
-## Install
+![Python](https://img.shields.io/badge/Python_3.11+-3776ab?logo=python&logoColor=white)
+![Notion API](https://img.shields.io/badge/Notion_API-000000?logo=notion&logoColor=white)
+![GitHub CLI](https://img.shields.io/badge/GitHub_CLI-181717?logo=github&logoColor=white)
+![Claude Code](https://img.shields.io/badge/Claude_Code-d97757?logo=anthropic&logoColor=white)
+![Codex](https://img.shields.io/badge/Codex_CLI-412991?logo=openai&logoColor=white)
+![Gemini](https://img.shields.io/badge/Gemini_CLI-8e75b2?logo=googlegemini&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-pytest-2ea44f)
 
-```
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-export NOTION_TOKEN=...      # internal connection token
-export SWARM_HOST=laptop-a   # your name in config.hosts
-```
+</div>
 
-Requirements: Python 3.11+, `git`, `gh` (logged in), and whichever agent CLIs you use (`claude`, `codex`, `gemini`, `agy`, `grok`, or anything via the generic adapter). Gemini: `brew install gemini-cli`, run `gemini` once in a real terminal and pick "Login with Google" (the AI Pro subscription gives Flash; Pro needs a billed API key), then `swarm doctor --smoke gemini-a`.
+> Agents execute autonomously in fresh, bounded contexts.
+> Humans own intent through Notion.
+> Merged, verified code is the only proof of progress.
 
-## For a teammate joining (second laptop)
+## Why
 
-```
-git clone https://github.com/aryanpatel142006/swarm-control.git && cd swarm-control
-python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-pytest                                   # should be all green with no setup
-```
+One giant AI coding session is slow, burns its whole context on unrelated files, and stops dead when its subscription
+hits a rate limit. A team with two laptops and a few AI subscriptions has far more capacity than that, but no way to
+point it all at one plan.
 
-Then, to work the same board as the rest of the team:
+swarm-control turns a written plan into small, independent tasks and hands each one to the best available agent in a
+**fresh, size-capped session**. Cheap work goes to cheap models; critical work gets the strongest one. Every task ends
+as a reviewed, tested pull request, and the humans steer from a Notion board instead of babysitting terminals.
 
-1. Get the Notion token from a teammate privately (never through git or chat logs) and put it in your shell profile
-   along with your laptop's name from the project's `.swarm/config.yaml`:
-   ```
-   export NOTION_TOKEN=ntn_...
-   export SWARM_HOST=laptop-b
-   ```
-2. Accept the invite to the project repo, clone it next to swarm-control, and run `swarm doctor` inside it.
-   Then `swarm tools --install` there: it installs the plugins the project's config asks for (and Playwright's browser). On a Codex laptop also register the MCP servers named in config with `codex mcp add` (docs/RUNBOOK.md step 7).
-   Every row must say yes except CLIs you don't have.
-3. `swarm doctor --smoke <your agent>` once per agent you'll run (Claude Code, Codex, Antigravity...).
-4. `caffeinate -dims swarm run` and leave it. Cards assigned to your agents start moving on the shared board.
+## What it did on a real project
 
-Only one laptop runs `swarm serve`; ask before starting a second one.
+swarm-control was built for **HackRU Fall 2026** as the tool our team uses to build its hackathon project,
+*selective-hearing* (a real-time speech-isolation and captioning engine: noise suppression, active-speaker detection,
+transcription). Numbers from the run, all from the harness's own ledger and [field notes](docs/field-notes/):
 
-## Ten-line mental model
+| | |
+|---|---|
+| **36 hours** after `swarm init` | milestones M0–M5 built: ~50 tasks merged, 80 commits on `main`, 470+ tests in the project |
+| **$3.42 per merged task** | laptop A's ledger: $147 across 300 agent runs, including retries and reviews |
+| **Agents in the swarm** | Claude Code on two accounts, Codex and Antigravity on a teammate's laptop |
+| **41 incidents logged** | nearly every one became a tested code fix, a planner rule, or a rule in the orchestrator skill |
 
-1. `PLAN.md` is the product. `swarm plan` turns a milestone of it into tasks with types, importance, sizes, scopes, and dependencies.
-2. A router picks the strongest configured agent for each task type and the model tier from importance. Critical gets the best model; low gets the cheapest.
-3. Tasks live in a Notion database with board views by status and by agent. Humans can drag cards.
-4. `swarm run` on each laptop polls for its agents' Ready tasks, claims one, makes a worktree, compiles a prompt from the task card and only the docs that type needs, runs the CLI headless with turn, time, and budget caps, runs `verify_fast.sh`, pushes, opens a PR, and posts the report to the card.
-5. The model must end with a structured report: status, summary, files, tests, temporary hacks, decisions, and an optional question.
-6. `swarm serve` on one laptop reaps stale tasks, retries failures up a model tier, relays your answers, promotes tasks whose dependencies merged, reviews high-importance work with a different model family, rebases and merges, reroutes around rate limits, and rewrites a status page.
-7. Blocked agents ask in the Questions database. You type the answer there or run `swarm answer`. The task resumes on its branch with your answer in the prompt.
-8. Decisions and debts are written per task into `docs/decisions/` and `docs/debt/` on the branch, so the pitch has receipts.
-9. Every run's tokens and cost go to a local ledger and the Agents database; soft caps and cooldowns keep one subscription from becoming the bottleneck.
-10. Everything above is configuration in `.swarm/config.yaml`.
+And an unattended overnight practice run (`swarm night`), before the real project:
+
+| | |
+|---|---|
+| **7 cycles, 30 of 35 tasks merged** | each cycle builds a small app from scratch; the last four merged every task on its first attempt |
+| **~$1 per merged task** | $32 over 57 runs, with 93% of prompt tokens served from cache |
+| **~25 harness fixes overnight** | each landed on `main` with a test, from what the cycles exposed |
+
+## How it works
+
+![One board, many agents, several laptops](docs/images/overview.svg)
+
+1. **`PLAN.md` is the product.** `swarm plan` turns a milestone of it into tasks with a type, importance, size, file
+   scope and dependencies, and creates them on the Notion board.
+2. **A router picks the agent and the model.** Each agent scores 1–5 per task type; importance picks the model tier.
+3. **`swarm run` on every laptop** claims its agents' Ready tasks, makes a git worktree, compiles a prompt from the task
+   card and *only* the docs that task type needs, runs the agent CLI headless with turn, time and budget caps, runs
+   `verify_fast.sh`, pushes, opens a PR and posts a structured report to the card.
+4. **`swarm serve` on one laptop** reaps stale work, retries failures one model tier up, reviews important work with a
+   different model family, rebases and merges, promotes tasks whose dependencies merged, reroutes around rate limits,
+   and keeps a live status page on the board.
+5. **Humans steer from Notion.** Blocked agents ask in a Questions table; you answer there (or `swarm answer`) and the
+   task resumes on its branch with your answer in the prompt. You can drag cards to reassign or reprioritise.
+
+![The life of a task](docs/images/task-flow.svg)
+
+### It learns from its own runs
+
+![The self-improvement loop](docs/images/learning-loop.svg)
+
+When a milestone finishes, `swarm serve` runs a **retro**: it reads the board, the usage ledger, `main`'s history and
+every task's decision log, then writes `docs/LESSONS.md` (included in every future brief and plan) and
+`.swarm/tuning.yaml` (safe config changes, such as raising a task type's model floor when a cheap model keeps running
+out of turns). Workers can also flag problems with the harness itself in their report, which become questions for the
+orchestrator.
 
 ## Quick start
 
-```
-swarm template ../myproject && cd ../myproject     # scaffold the project repo
-# edit .swarm/config.yaml: agents, hosts, models, event times
-swarm init --parent-page <notion page id>          # creates databases + board views, writes .swarm/notion.yaml
-swarm doctor && swarm doctor --smoke claude-a      # tokens, CLIs, gh, verify scripts, one-turn smoke run
-swarm plan PLAN.md --milestone M1                  # propose + create tasks
-caffeinate -i swarm serve                          # laptop A only
-swarm run                                          # every laptop
+Requirements: Python 3.11+, `git`, the GitHub CLI `gh` (logged in), a Notion internal-integration token, and the agent
+CLIs you want to use (`claude`, `codex`, `gemini`, `agy`, `grok`, or anything else through the generic adapter).
+
+```bash
+git clone https://github.com/aryanpatel142006/swarm-control.git && cd swarm-control
+python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+pytest                                             # green with no setup: Notion, git and CLIs are faked
+
+export NOTION_TOKEN=ntn_...                        # your Notion integration token
+export SWARM_HOST=laptop-a                         # this laptop's name in config.hosts
+
+swarm template ../myproject && cd ../myproject     # scaffold a project repo
+# edit .swarm/config.yaml: agents, hosts, models, strengths
+swarm init --parent-page <notion page id>          # builds the board, dashboards and views
+swarm doctor && swarm doctor --smoke claude-a      # checks tokens, CLIs, gh, verify scripts; one-turn smoke run
+swarm plan PLAN.md --milestone M1                  # propose tasks, then create them
+caffeinate -i swarm serve                          # on ONE laptop
+caffeinate -dims swarm run                         # on every laptop
 swarm status                                       # any time
 ```
 
-## The Notion board
+### A teammate joining from a second laptop
 
-`swarm init` builds one dashboard page per project under your parent page, plus the Tasks board as a full page next to it (so a task opens full-screen). The dashboard reads top to bottom: a how-to callout, the Agents table (name, status, last heartbeat, cooldown, current task, spend), Questions for you (open questions first), then two columns: a tile that opens the Tasks board and the live Status block that `swarm serve` rewrites every few minutes. Column order, board card fields, icons and covers are set by init; delete a finished project's pages yourself when you are done with them (the harness never deletes).
+1. Clone and install as above, then get the Notion token from a teammate privately (never through git or chat logs) and
+   put it in your shell profile with your laptop's name from the project's `.swarm/config.yaml`.
+2. Accept the invite to the project repo, clone it next to swarm-control, and run `swarm doctor` inside it, then
+   `swarm tools --install` (installs the plugins the project's config asks for, plus Playwright's browser). On a Codex
+   laptop also register the config's MCP servers with `codex mcp add` ([RUNBOOK](docs/RUNBOOK.md), step 7).
+3. `swarm doctor --smoke <your agent>` once per agent you'll run.
+4. `caffeinate -dims swarm run` and leave it. Only one laptop runs `swarm serve`.
 
-## Task statuses
+Idle runners keep themselves current: they fetch this repo, fast-forward and restart, so nobody has to pull by hand.
 
-`Backlog → Ready → Running → Review → Merge Ready → Done`, with `Changes Requested` (verify failed, reviewer findings, rebase conflict; same worker resumes), `Blocked` (waiting on a Question), `Failed` (retry ladder: same agent, one tier up, then a Question), and `Cut`.
+## Commands
 
-## Routing
+| Command | What it does |
+|---|---|
+| `swarm template <dir>` | Scaffold a project repo: config, verify scripts, skills, agent docs |
+| `swarm init` | Build the Notion dashboard, Tasks board, Questions and Agents tables with their views |
+| `swarm doctor` | Check tokens, CLIs, `gh`, verify scripts, doc references, sleep settings; `--smoke` runs one turn; `--models` probes model ids |
+| `swarm plan` / `apply-proposals` | Turn a milestone of `PLAN.md` into tasks; apply a saved proposal |
+| `swarm run` | Work this laptop's agents' tasks |
+| `swarm serve` | The control loop: reap, retry, review, merge, promote, reroute, status |
+| `swarm status` / `logs` / `usage` | What's happening, a task's logs, tokens and cost per agent |
+| `swarm answer` / `tell` | Answer a blocked task; send a note to a task's next attempt |
+| `swarm add` / `assign` / `split` / `cut` / `reroute` | Edit the plan from the terminal |
+| `swarm handoff` / `restart` | Move a task between agents; drain and restart a runner safely |
+| `swarm retro` / `night` | Run a retro now; run unattended practice cycles |
+| `swarm tools` / `agents-sync` | Show and install plugins, skills, MCP servers; sync the Agents table with config |
 
-`agents.<name>.strengths` is a 1–5 score per task type; the highest wins, ties go to the shortest queue then the cheaper provider. `routing.importance_to_tier` maps importance to a model tier; `type_model_overrides` encodes evidence-based exceptions (Opus 5.5 outranks Fable 5.1 on frontend, so critical frontend runs Opus). Override any task with `swarm assign`, or drag its card in Notion.
+## Reference
 
-## Toolbox (plugins, skills, MCP servers)
+<details>
+<summary><b>Task statuses</b></summary>
 
-Workers get the tools their task type needs and nothing else, on both CLIs:
+`Backlog → Ready → Running → Review → Merge Ready → Done`, plus `Changes Requested` (verify failed, reviewer findings or
+a rebase conflict; the same worker resumes), `Blocked` (waiting on a question), `Failed` (retry ladder: same agent, one
+tier up, then a question) and `Cut`.
+</details>
 
-- **Plugins (Claude Code).** `plugins_required` are installed and enabled on every laptop (`swarm tools --install`, checked by `swarm doctor`). `plugins_by_type` are installed but may stay disabled globally: the runner loads them for one run with `--plugin-dir`. Every other plugin enabled on that laptop is switched off for the run with `--settings`, which halves a worker's base context (measured 7.6k → 3.9k tokens).
-- **Skills.** `swarm template` vendors seven skills into the project's `.claude/skills` (TDD, verification, debugging, Hugging Face model choice, local inference, transformers.js); `.agents/skills` symlinks there for Codex. `skills_by_type` / `skills_by_importance` name the ones the prompt tells the worker to invoke.
-- **MCP servers.** `mcp_by_type` / `mcp_by_importance` / `agents.<name>.mcp` pick servers per run. Claude gets exactly those via `--mcp-config … --strict-mcp-config` (definitions come from `claude mcp list`, installed plugins, or inline `mcp_servers`); Codex gets `-c mcp_servers.<name>.enabled=true` for servers registered once with `codex mcp add`.
-- **Feedback loop.** Every report carries `tools_used` (skill / MCP server / plugin, helped or not), which the harness writes into `docs/decisions/<id>.md` next to the worker's decisions, so after a few tasks you can see which tools earn their context and promote them in config. Critical tasks are also told they may install a further official plugin mid-run and must log it there. `swarm tools` shows the whole picture for this laptop.
+<details>
+<summary><b>Routing</b></summary>
 
-## Self-improvement
+`agents.<name>.strengths` is a 1–5 score per task type; the highest wins, ties go to the shortest queue, then the
+cheaper provider. `routing.importance_to_tier` maps importance to a model tier; `type_model_overrides` encodes
+evidence-based exceptions (for example, critical frontend work runs on the model that measured best at frontend).
+Idle agents steal work from saturated ones, a returning agent triggers a redistribution, and a rate-limited agent's
+tasks move straight to another agent with capacity. Override any task with `swarm assign`, or drag its card in Notion.
+</details>
 
-The swarm learns from its own runs. When every task of a milestone is Done or Cut, `swarm serve` runs a retro (`swarm retro` runs it by hand, `--dry-run` only prints). It reads the board, the usage ledger, main's history and the decision logs, applies fixed rules and writes two things to main: `docs/LESSONS.md`, a short list that every worker brief and the planner include (undersized tasks, files fought over by several tasks, review-heavy work), and `.swarm/tuning.yaml`, safe config changes merged over `config.yaml` on load (a cheap model that keeps hitting the turn limit on a task type raises that type's floor; a tool that helped on two tasks of a type becomes its default). Each retro also leaves a report in `docs/retro/`. Delete a line from `tuning.yaml` to undo a change.
+<details>
+<summary><b>Toolbox: plugins, skills and MCP servers per task</b></summary>
 
-## Unattended practice runs
+Workers get the tools their task type needs and nothing else, on every CLI:
 
-`caffeinate -dims swarm night --cycles 6 --no-improve` runs practice cycles while you are away: each adds one small app to PLAN.md as a new milestone (Notecard, Quizlet-mini, Kanban-mini, Pomodoro-log, then repeats), lets every agent that is online build it, answers blocking questions on its own, waits for the milestone retro, and writes the cycle's log to `docs/night/`. Without `--no-improve` it also hands each log to a fresh Claude session that makes one tested change to the harness on a `night/<n>` branch, merged only when the suite is green. Keep the laptop plugged in with the lid open; `swarm doctor` warns if it can sleep.
+- **Plugins (Claude Code).** `plugins_required` are installed on every laptop (`swarm tools --install`, checked by
+  `swarm doctor`). `plugins_by_type` are loaded for one run with `--plugin-dir`; every other enabled plugin is switched
+  off for the run, which halved a worker's base context (measured 7.6k → 3.9k tokens).
+- **Skills.** `swarm template` vendors skills into the project's `.claude/skills` (`.agents/skills` symlinks there for
+  Codex). `skills_by_type` / `skills_by_importance` name the ones a brief tells the worker to use.
+- **MCP servers.** `mcp_by_type` / `mcp_by_importance` / `agents.<name>.mcp` pick servers per run: Claude gets exactly
+  those via `--mcp-config … --strict-mcp-config`; Codex enables servers registered with `codex mcp add`.
+- **Feedback loop.** Every report lists the tools used and whether they helped; the harness writes that into the task's
+  decision log, so after a few tasks you can see which tools earn their context.
+</details>
 
-## Adding a provider
+<details>
+<summary><b>Unattended practice runs</b></summary>
 
-Use `provider: generic` with a `command_template` such as `mycli --prompt-file {prompt_file} --model {model} --cwd {cwd}`. The model must write its report to `.swarm-run/report.json`. For a first-class adapter, subclass `swarm.adapters.base.Adapter`.
+`caffeinate -dims swarm night --cycles 6` runs practice cycles while you're away: each adds one small app to `PLAN.md`
+as a new milestone (Notecard, Quizlet-mini, Kanban-mini, Pomodoro-log…), lets every online agent build it, answers
+blocking questions itself, waits for the retro, and logs the cycle to `docs/night/`. Unless you pass `--no-improve`,
+each log goes to a fresh session that makes one tested change to the harness on a `night/<n>` branch, merged only when
+the suite is green. Keep the laptop plugged in with the lid open; `swarm doctor` warns if it can sleep.
+</details>
 
-## Testing
+<details>
+<summary><b>Adding a provider</b></summary>
 
-`pytest` runs unit tests, adapter tests with a fake CLI, and an end-to-end run against an in-memory board and a temporary git remote. `SWARM_NOTION_TOKEN=... SWARM_NOTION_PARENT=... pytest tests/test_notion_integration.py` exercises a real Notion page.
+Use `provider: generic` with a `command_template` such as
+`mycli --prompt-file {prompt_file} --model {model} --cwd {cwd}`. The model must write its report to
+`.swarm-run/report.json`. For a first-class adapter, subclass `swarm.adapters.base.Adapter`
+(see [`swarm/adapters/`](swarm/adapters/) for Claude, Codex, Gemini, Antigravity and Grok).
+</details>
+
+<details>
+<summary><b>Testing</b></summary>
+
+`pytest` runs unit tests, adapter tests against a fake CLI, and an end-to-end run against an in-memory board and a
+temporary git remote. `SWARM_NOTION_TOKEN=... SWARM_NOTION_PARENT=... pytest tests/test_notion_integration.py` exercises
+a real Notion page.
+</details>
+
+## Project structure
+
+```
+swarm/
+├── cli.py               every `swarm` command
+├── planner.py           PLAN.md milestone → tasks (type, importance, size, scope, deps)
+├── router.py, policy.py which agent and which model tier
+├── runner.py            claim → worktree → prompt → agent CLI → verify → PR → report
+├── serve.py             the control loop: reap, retry, review, merge, promote, reroute
+├── reviewer.py, merge.py cross-family review, rebase and merge
+├── relay.py             questions and answers between agents and humans
+├── retro.py, night.py   self-improvement and unattended practice cycles
+├── usage.py             token and cost ledger, caps and cooldowns
+├── adapters/            claude, codex, gemini, antigravity, grok, generic
+├── board/               Notion (and an in-memory board for tests)
+└── template/            what `swarm template` scaffolds
+docs/
+├── RUNBOOK.md           game-day steps
+├── field-notes/         every incident from the real run, and what was changed
+├── night/, rehearsals/  logs from practice runs
+└── superpowers/specs/   the original design spec
+```
 
 ## Docs
 
-- Design spec: `docs/superpowers/specs/2026-09-26-swarm-control-design.md`
-- Visual plan: `docs/plan-visual/SWARM_CONTROL_Plan.pdf`
-- Game day: `docs/RUNBOOK.md`
-- Orchestrator session: `ORCHESTRATOR.md`
+- Design spec: [`docs/superpowers/specs/2026-09-26-swarm-control-design.md`](docs/superpowers/specs/2026-09-26-swarm-control-design.md)
+- Visual plan: [`docs/plan-visual/SWARM_CONTROL_Plan.pdf`](docs/plan-visual/SWARM_CONTROL_Plan.pdf)
+- Game day: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- Orchestrator session: [`ORCHESTRATOR.md`](ORCHESTRATOR.md) and the [orchestrator skill](skills/swarm-control/SKILL.md)
+- Field notes from the real run: [`docs/field-notes/`](docs/field-notes/)
+
+---
+
+Built by [Aryan Patel](https://github.com/aryanpatel142006) for HackRU Fall 2026. swarm-control is a development tool,
+not the hackathon project itself.
