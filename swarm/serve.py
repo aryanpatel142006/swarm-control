@@ -206,7 +206,8 @@ class Server:
                 t.importance = escalate_importance(t.importance)
             t.agent, t.model, t.effort = route(t, self.cfg, ctx)
             t.status, t.claim_nonce = Status.READY, ""
-            t.feedback = (f"Previous attempt failed: {t.last_error[:600]}. Start fresh from main."
+            t.feedback = (f"Previous attempt failed: {t.last_error[:600]}. Your branch keeps the earlier commits; "
+                          "continue from it (rebase onto main first) unless it is empty."
                           if t.last_error else "")
             t.flags = [f for f in t.flags if f != "resume"]
             self.board.update_task(t, ["status", "claim_nonce", "importance", "agent", "model", "effort",

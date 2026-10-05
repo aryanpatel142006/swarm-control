@@ -107,6 +107,8 @@ class Reviewer:
                 self.ledger.append(agent=role.agent, model=spec.model, task_id=task.id, usage=result.usage, role="reviewer",
                                    duration_s=time.time() - started, ok=result.ok)
             if not result.ok and result.structured_output is None:
+                if result.rate_limited:   # the reviewer's provider is out of quota, not the code: try again later
+                    return Verdict("defer", f"reviewer rate limited: {result.error[:200]}", [])
                 return Verdict("escalate", f"reviewer run failed: {result.error[:300]}", [])
             return parse_verdict(result.structured_output, wt)
         finally:
@@ -114,6 +116,9 @@ class Reviewer:
 
     def apply(self, task: Task, v: Verdict) -> Task:
         round_no = task.review_rounds + 1
+        if v.verdict == "defer":          # leave it in Review; serve picks it up on a later tick
+            self.log(f"[{task.id}] review deferred: {v.summary[:120]}")
+            return task
         md = f"**Verdict:** `{v.verdict}`\n\n{v.summary}\n\n" + "\n".join(
             f"- [{f.get('severity', '?')}] {f.get('file', '')}:{f.get('line', '')} {f.get('issue', '')} → {f.get('fix', '')}"
             for f in v.findings)

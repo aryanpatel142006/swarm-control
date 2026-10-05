@@ -14,8 +14,8 @@ class AntigravityAdapter(Adapter):
     def build_command(self, spec: RunSpec) -> tuple[list[str], bytes | None]:
         argv = ["agy", "-p", spec.prompt_file.read_text(), "--output-format", "json", "--model", spec.model,
                 "--print-timeout", f"{int(spec.timeout_s)}s"]
-        if spec.effort:
-            argv += ["--effort", spec.effort]
+        if spec.effort and not spec.model.endswith(("-high", "-medium", "-low")):
+            argv += ["--effort", spec.effort]   # agy refuses --effort when the model id already carries it
         if not spec.read_only:
             argv += ["--dangerously-skip-permissions"]
             if spec.schema:

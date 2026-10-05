@@ -108,3 +108,17 @@ def test_reviewer_run_is_recorded_in_the_ledger(cfg, git_repo, tmp_path):
     rev.process(t)
     assert ledger.totals("codex-a").input_tokens == 0 and len(ledger._rows()) == 1
     assert ledger._rows()[0]["task"] == t.id and ledger._rows()[0]["model"] == "gpt-6-sol"
+
+
+def test_rate_limited_reviewer_defers_instead_of_blocking(cfg, git_repo, tmp_path):
+    """Oct 5 2026: the reviewer hit the Claude session limit and escalated T-022 as if the code were bad."""
+    from swarm.reviewer import Reviewer, Verdict
+    from swarm.board.memory import InMemoryBoard
+    from swarm.workspace import Workspace
+    from swarm.models import Status, Task
+    board = InMemoryBoard()
+    t = board.create_task(Task(id="", title="x", status=Status.REVIEW, agent="claude-a", review_rounds=0))
+    rv = Reviewer(cfg, board, Workspace(git_repo, tmp_path / "wt"), log=lambda *a: None)
+    rv.apply(t, Verdict("defer", "reviewer rate limited; retry later", []))
+    fresh = board.get_task(t.id)
+    assert fresh.status is Status.REVIEW and fresh.review_rounds == 0 and not board.list_questions()

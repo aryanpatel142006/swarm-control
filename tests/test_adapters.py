@@ -333,3 +333,18 @@ def test_agent_env_reaches_the_cli_process(project_dir, sample_config_dict, tmp_
     (tmp_path / ".swarm-run").mkdir(exist_ok=True)
     get_adapter(cfg.agents["claude-a"]).run(RunSpec(prompt_file=pf, model="sonnet", effort=None, max_turns=1, budget_usd=1.0, timeout_s=60, cwd=tmp_path), runner=fake_runner)
     assert seen["env"]["CLAUDE_CONFIG_DIR"] == "/tmp/claude-pro" and "PATH" in seen["env"]
+
+
+def test_antigravity_skips_effort_when_the_model_id_carries_it(cfg, tmp_path):
+    """agy rejects `--model gemini-3.1-pro-high --effort medium` (T-022, Oct 5 2026)."""
+    from swarm.adapters.antigravity import AntigravityAdapter
+    from swarm.adapters.base import RunSpec
+    from swarm.config import AgentConfig
+    a = AgentConfig(name="agy", provider="antigravity", host="host-b", models={"best": "x", "high": "x", "mid": "x", "low": "x"})
+    pf = tmp_path / "p.md"; pf.write_text("hi")
+    argv, _ = AntigravityAdapter(a).build_command(RunSpec(prompt_file=pf, model="gemini-3.1-pro-high", effort="medium",
+                                                           max_turns=3, budget_usd=1.0, timeout_s=60, cwd=tmp_path))
+    assert "--effort" not in argv
+    argv, _ = AntigravityAdapter(a).build_command(RunSpec(prompt_file=pf, model="gemini-3.1-pro", effort="medium",
+                                                           max_turns=3, budget_usd=1.0, timeout_s=60, cwd=tmp_path))
+    assert "--effort" in argv

@@ -193,3 +193,16 @@ def test_sleep_warning_only_when_the_mac_can_sleep(tmp_path):
     assert sleep_warning(run=lambda a, cwd, timeout=15: R(" sleep 0 (sleep prevented by caffeinate)\n"), platform="darwin") is None
     assert "caffeinate" in sleep_warning(run=lambda a, cwd, timeout=15: R(" sleep 10\n"), platform="darwin")
     assert "cannot sleep" in sleep_warning(platform="win32")
+
+
+def test_agents_sync_retires_rows_missing_from_config(project_dir, monkeypatch):
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import AgentRow
+    from swarm import cli as c
+    board = InMemoryBoard()
+    board.upsert_agent(AgentRow(name="codex-old", status="cooldown", current_task="T-9"))
+    monkeypatch.setattr(c, "make_board", lambda cfg, memory=False: board)
+    c.state.cfg = None; c.state.config_path = project_dir / ".swarm" / "config.yaml"; c.state.memory = True
+    c.agents_sync()
+    old = board.get_agent("codex-old")
+    assert old.status == "removed" and old.current_task == "" and "config" in old.note

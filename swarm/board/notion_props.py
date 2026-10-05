@@ -104,7 +104,7 @@ SIZE_COLORS = {"S": "green", "M": "yellow", "L": "orange"}
 TYPE_COLORS = {"frontend": "yellow", "backend": "yellow", "realtime": "yellow", "integration": "yellow", "infra": "yellow",
                "ml_audio": "purple", "ml_vision": "purple", "ml_fusion": "purple", "eval": "purple",
                "tests": "pink", "bugfix": "pink", "docs": "green", "research": "green"}
-AGENT_STATUS_COLORS = {"idle": "gray", "running": "green", "cooldown": "yellow", "offline": "red"}
+AGENT_STATUS_COLORS = {"idle": "gray", "running": "green", "cooldown": "yellow", "offline": "red", "removed": "brown"}
 PROVIDER_COLORS = {"claude": "orange", "codex": "green", "antigravity": "blue", "gemini": "blue", "grok": "gray",
                    "generic": "gray", "serve": "purple"}
 KIND_COLORS = {"blocking": "red", "fyi": "blue", "harness": "purple", "relay": "gray"}
