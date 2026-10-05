@@ -47,6 +47,7 @@ class AgentConfig:
     experimental: bool = False
     command_template: str | None = None
     extra_args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)      # extra environment for the CLI (e.g. CLAUDE_CONFIG_DIR for a 2nd account)
     mcp: list[str] = field(default_factory=list)          # MCP server names this agent always gets
 
 
@@ -209,6 +210,7 @@ def load_config(path: Path | str) -> Config:
             soft_cap_5h_usd=a.get("soft_cap_5h_usd"), sandbox=a.get("sandbox"),
             experimental=bool(a.get("experimental", False)),
             command_template=a.get("command_template"), extra_args=list(a.get("extra_args") or []),
+            env={str(k): str(v) for k, v in (a.get("env") or {}).items()},
             mcp=[str(m) for m in (a.get("mcp") or [])],
         )
     if not agents:

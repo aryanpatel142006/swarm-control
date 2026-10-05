@@ -87,9 +87,9 @@ class Adapter:
                          error="" if code == 0 else f"exit {code}")
 
     @staticmethod
-    def _run_watched(argv: list[str], spec: RunSpec, stdin: bytes | None) -> subprocess.CompletedProcess:
+    def _run_watched(argv: list[str], spec: RunSpec, stdin: bytes | None, env: dict | None = None) -> subprocess.CompletedProcess:
         """Like subprocess.run, but polls spec.should_stop and kills the CLI when it says so (exit -3)."""
-        proc = subprocess.Popen(argv, cwd=str(spec.cwd), stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        proc = subprocess.Popen(argv, cwd=str(spec.cwd), env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
 
         def stop(sig):   # the CLI spawns children (shells, servers); signal the whole process group
@@ -141,10 +141,11 @@ class Adapter:
         (spec.cwd / ".swarm-run").mkdir(exist_ok=True)
         for attempt in (1, 2):
             try:
+                env = {**os.environ, **(getattr(self.cfg, "env", None) or {})}
                 if spec.should_stop is not None:
-                    proc = self._run_watched(argv, spec, stdin)
+                    proc = self._run_watched(argv, spec, stdin, env=env)
                 else:
-                    proc = runner(argv, cwd=str(spec.cwd), input=stdin, capture_output=True, timeout=spec.timeout_s)
+                    proc = runner(argv, cwd=str(spec.cwd), input=stdin, capture_output=True, timeout=spec.timeout_s, env=env)
                 break
             except subprocess.TimeoutExpired as e:
                 return RunResult(ok=False, exit_code=-1, stdout=(e.stdout or b"").decode(errors="replace"),

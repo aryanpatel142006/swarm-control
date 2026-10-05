@@ -348,7 +348,7 @@ def test_loop_installs_signal_handlers_that_park(cfg, git_repo, tmp_path):
         return signal.SIG_DFL
 
     r.install_signal_handlers(signal_fn=fake_signal)
-    assert set(captured) == {signal.SIGINT, signal.SIGTERM}
+    assert {signal.SIGINT, signal.SIGTERM} <= set(captured)      # plus SIGUSR1 = graceful restart
     captured[signal.SIGTERM](signal.SIGTERM, None)
     assert r._stopping is True
 
@@ -557,3 +557,21 @@ def test_runner_does_not_overwrite_a_task_closed_while_it_ran(cfg, git_repo, tmp
     closed = board.get_task(t.id); closed.status = Status.DONE; board.update_task(closed, ["status"])
     assert runner.publish_outcome(t, Status.FAILED) is False
     assert board.get_task(t.id).status is Status.DONE
+
+
+def test_request_restart_drains_then_restarts(cfg, git_repo, tmp_path, monkeypatch):
+    """SIGUSR1: stop claiming, let in-flight runs finish, then re-exec on the new code (never park busy work)."""
+    from swarm.runner import Runner
+    from swarm.board.memory import InMemoryBoard
+    from swarm.workspace import Workspace
+    from swarm.usage import Ledger
+    board = InMemoryBoard()
+    r = Runner(cfg, board, "host-a", Workspace(git_repo, tmp_path / "wt"), ledger=Ledger(tmp_path / "u.jsonl"), log=lambda *a: None)
+    restarted = []
+    monkeypatch.setattr("swarm.selfupdate.restart_self", lambda: restarted.append(True))
+    r.active["claude-a"].add("T-001")           # one run in flight
+    r.request_restart()
+    assert r.draining and r.tick() == 0          # nothing new is claimed while draining
+    assert not r.finish_drain_if_idle()           # still busy
+    r.active["claude-a"].clear()
+    assert r.finish_drain_if_idle() and restarted == [True]

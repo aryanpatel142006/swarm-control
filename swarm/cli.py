@@ -249,6 +249,21 @@ def tell(task_id: str, text: str):
     console.print(f"{q.id}: {q.text}")
 
 
+@app.command()
+def restart():
+    """Gracefully restart the runner(s) on this laptop: they finish in-flight work, then re-exec on the current code."""
+    import signal
+    import subprocess
+    r = subprocess.run(["pgrep", "-f", "swarm run"], capture_output=True, text=True)
+    pids = [int(x) for x in r.stdout.split() if x.isdigit() and int(x) != os.getpid()]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGUSR1)
+        except OSError:
+            pass
+    console.print(f"restart requested for {len(pids)} runner process(es); they restart once idle")
+
+
 @app.command("agents-sync")
 def agents_sync():
     """Refresh Agent rows (and the Agent select options) from config."""

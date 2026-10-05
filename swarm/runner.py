@@ -102,10 +102,26 @@ class Runner:
         self.auto_update = True
         self._idle_since = None
         self._stopping = False
+        self.draining = False
 
     def stop(self) -> None:
         """Ask in-flight runs to requeue their task instead of publishing (Ctrl-C / kill path)."""
         self._stopping = True
+
+    def request_restart(self) -> None:
+        """SIGUSR1 / `swarm restart`: claim nothing new, let in-flight runs finish, then re-exec on the current code.
+        Killing a busy runner parks half-done work (T-006 lost Fable minutes on Oct 4 2026); draining does not."""
+        self.draining = True
+        self.log("restart requested: finishing in-flight runs, claiming nothing new")
+
+    def finish_drain_if_idle(self) -> bool:
+        if not self.draining or any(self.active.values()):
+            return False
+        from .selfupdate import restart_self
+        self.log("drained; restarting runner")
+        self.heartbeat(force=True)
+        restart_self()
+        return True
 
     def install_signal_handlers(self, signal_fn=None) -> None:
         """SIGINT and SIGTERM park in-flight work. Explicit handlers also work when SIGINT was inherited as ignored."""
@@ -120,6 +136,12 @@ class Runner:
             try:
                 signal_fn(sig, handler)
             except (ValueError, OSError):  # not the main thread, or unsupported platform
+                pass
+        usr1 = getattr(signal, "SIGUSR1", None)
+        if usr1 is not None:
+            try:
+                signal_fn(usr1, lambda signum, frame: self.request_restart())
+            except (ValueError, OSError):
                 pass
 
     # ----- capacity -----
@@ -184,6 +206,9 @@ class Runner:
 
     def tick(self) -> int:
         self.heartbeat()
+        if self.draining:
+            self.finish_drain_if_idle()
+            return 0
         dispatched = 0
         now = self.now()
         rows = {a.name: a for a in self.board.list_agents()}

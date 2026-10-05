@@ -312,3 +312,24 @@ def test_run_stops_the_cli_when_asked(tmp_path):
     t0 = time.time()
     r = a.run(spec(tmp_path, schema=None, timeout_s=60, should_stop=should_stop, stop_poll_s=0.2))
     assert not r.ok and r.exit_code == -3 and "stopped" in r.error and time.time() - t0 < 10
+
+
+def test_agent_env_reaches_the_cli_process(project_dir, sample_config_dict, tmp_path):
+    """A second Claude account on the same laptop runs under its own CLAUDE_CONFIG_DIR (Oct 4 2026)."""
+    import subprocess, yaml
+    from swarm.adapters import get_adapter
+    from swarm.adapters.base import RunSpec
+    from swarm.config import load_config
+    sample_config_dict["agents"]["claude-a"]["env"] = {"CLAUDE_CONFIG_DIR": "/tmp/claude-pro"}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.agents["claude-a"].env == {"CLAUDE_CONFIG_DIR": "/tmp/claude-pro"}
+    seen = {}
+
+    def fake_runner(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, b'{"result": "{\\"status\\":\\"done\\",\\"summary\\":\\"x\\"}"}', b"")
+    pf = tmp_path / "p.md"; pf.write_text("hi")
+    (tmp_path / ".swarm-run").mkdir(exist_ok=True)
+    get_adapter(cfg.agents["claude-a"]).run(RunSpec(prompt_file=pf, model="sonnet", effort=None, max_turns=1, budget_usd=1.0, timeout_s=60, cwd=tmp_path), runner=fake_runner)
+    assert seen["env"]["CLAUDE_CONFIG_DIR"] == "/tmp/claude-pro" and "PATH" in seen["env"]
