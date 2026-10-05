@@ -216,5 +216,5 @@ def test_split_refuses_a_cut_or_done_task(project_dir, monkeypatch):
     t = board.create_task(Task(id="", title="big", status=Status.CUT))
     monkeypatch.setattr(c, "make_board", lambda cfg, memory=False: board)
     c.state.cfg = None; c.state.config_path = project_dir / ".swarm" / "config.yaml"; c.state.memory = True
-    r = runner.invoke(app, ["split", t.id, "--apply"])
+    r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "split", t.id, "--apply"])
     assert r.exit_code != 0 and "already split" in (r.stdout + str(r.output))
