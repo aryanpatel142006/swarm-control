@@ -142,10 +142,11 @@ def test_reroute_unknown_agent_and_cooldown(cfg, git_repo, tmp_path):
                                   importance="normal"))
     crit = board.create_task(Task(id="", title="k", status=Status.READY, agent="codex-a", type="backend",
                                   importance="critical"))
-    assert srv.reroute() == 2
+    assert srv.reroute() == 3
     assert board.get_task(ghost.id).agent == "claude-a"
     assert board.get_task(cold.id).agent == "claude-a"
-    assert board.get_task(crit.id).agent == "codex-a"
+    # critical work also leaves a cooling agent when a capable agent is idle (Oct 5 2026: four hours lost otherwise)
+    assert board.get_task(crit.id).agent == "claude-a"
 
 
 def test_tick_writes_status(cfg, git_repo, tmp_path):
@@ -414,3 +415,16 @@ def test_redistribute_when_an_agent_comes_back_online(cfg, git_repo, tmp_path):
     agents = {board.get_task(f"T-00{i}").agent for i in (1, 2, 3)}
     assert "codex-a" in agents                       # codex-a is the stronger backend agent and is back
     assert srv.redistribute_on_return() == 0          # steady state: no churn
+
+
+def test_critical_work_leaves_a_cooling_agent_for_an_idle_capable_one(cfg, git_repo, tmp_path):
+    """Oct 5 2026 04:03-08:00 UTC: seven critical Ready tasks waited four hours on a rate-limited agent while
+    another agent sat idle, because stealing excluded critical work."""
+    from datetime import timedelta
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = utcnow()
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now))
+    board.upsert_agent(AgentRow(name="codex-a", status="cooldown", last_heartbeat=now, cooldown_until=now + timedelta(hours=1)))
+    t = board.create_task(Task(id="", title="gate", status=Status.READY, agent="codex-a", type="backend", importance="critical"))
+    assert srv.reroute() + srv.rebalance() >= 1
+    assert board.get_task(t.id).agent == "claude-a"

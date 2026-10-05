@@ -333,9 +333,16 @@ class Server:
             unknown = t.agent not in self.cfg.agents
             cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
             offline = bool(row and row.status == "offline")
-            if not unknown and not offline and not (cooling and t.importance != "critical"):
+            if not unknown and not offline and not cooling:
                 continue
-            agent, model, effort = route(t, self.cfg, ctx)
+            if cooling and t.importance == "critical":
+                # critical work waits for the strongest agent only while someone capable is NOT idle
+                others_idle = any(a.name != t.agent and ctx.queue_depth.get(a.name, 0) == 0
+                                  and is_available(a, ctx.rows.get(a.name), importance="critical", now=now)
+                                  and a.strengths.get(t.type, 3) >= 3 for a in self.cfg.agents.values())
+                if not others_idle:
+                    continue
+            agent, model, effort = route(t, self.cfg, ctx, exclude={t.agent} if (cooling or offline) else None)
             if agent == t.agent:
                 continue
             t.agent, t.model, t.effort = agent, model, effort

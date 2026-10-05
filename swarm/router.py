@@ -66,8 +66,8 @@ def is_available(agent: AgentConfig, row: AgentRow | None, *, importance: str, n
     return True
 
 
-def route(task: Task, cfg: Config, ctx: RouteContext) -> tuple[str, str, str | None]:
-    agents = list(cfg.agents.values())
+def route(task: Task, cfg: Config, ctx: RouteContext, *, exclude: set[str] | None = None) -> tuple[str, str, str | None]:
+    agents = [a for a in cfg.agents.values() if not exclude or a.name not in exclude] or list(cfg.agents.values())
     candidates = [a for a in agents
                   if is_available(a, ctx.rows.get(a.name), importance=task.importance, now=ctx.now)]
     if not candidates:   # nobody fully available: prefer agents that are alive (capped or cooling) over dead ones

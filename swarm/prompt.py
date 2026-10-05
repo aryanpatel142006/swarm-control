@@ -82,7 +82,10 @@ def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
 
 def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: dict[str, str],
                    structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = ()) -> str:
-    parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", "## Task", "",
+    import platform
+    host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
+                 "Measurements requested for another host are not yours to take: say so in the report.")
+    parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", host_line, "", "## Task", "",
              f"- ID: {task.id}", f"- Title: {task.title}", f"- Type: {task.type}",
              f"- Importance: {task.importance}", f"- Size: {task.size}",
              f"- Milestone: {task.milestone or '-'}",
