@@ -78,5 +78,8 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 - Cost: Max account ~$37 (hit the 5-hour window once), Pro ~$6, planner ~$12 across plans and splits.
 - Orchestrator mistakes worth remembering: edited an open task's scope on main; restarted a busy runner; left an agent idle while fixing the harness; re-ran a split without checking the board; let a failing test through a `pytest | tail && commit` chain (use `pytest > log; rc=$?`).
 
-## Run summary
-(filled in at the end of the run)
+## Run summary (Oct 5, 11:15 UTC: voice engine built)
+- 36 h after `swarm init`, M0-M5 are done except the bake-off write-up (T-043) and two small follow-ups. ~50 tasks merged, 80 commits on main, 470+ tests, `docs/BENCHMARKS.md` generated from a 21-minute full run on laptop-a: Natural fast `dfn_ll` 13 ms / +4.1 dB SI-SDRi noise-only; Focus HQ `av_mossformer2@2` +13.8 dB SI-SDRi, WER 1.28 → 0.78 on GRID; Enrolled audio-only +11.8 dB; Light-ASD 0.906 frame accuracy; Text WER 0.55 → 0.73?? (raw 0.588 vs cleaned 0.730: cleaning hurt captions, a finding for the slides).
+- Spend: Max ≈ $110, Pro ≈ $40, Codex/Antigravity on the teammate's plans; the planner ran ~$15.
+- Harness: 30+ commits during the run, 35 field-note rows, every one turned into code, a rule or a planner instruction.
+- Still open for the humans: iLab Kerberos ticket (GPU bake-off at 2 s windows), ElevenLabs key, wired-headphone latency rehearsal (Thu Oct 9).
