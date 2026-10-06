@@ -1129,3 +1129,27 @@ def test_stray_patterns():
     paths = ["docs/BENCHMARKS.md-e", "a.orig", "x.rej", "notes.bak", "f.py~", ".DS_Store", "web/.DS_Store",
              "docs/pre-e.md", "scripts/run-e", "src/ok.py", "tests/test_some-e2e.mjs"]
     assert stray_files(paths, DEFAULT_STRAY_PATTERNS) == paths[:7]
+
+
+def test_finished_attempt_sent_back_gets_its_report_and_notes_restored(cfg, git_repo, tmp_path):
+    """Q-202/Q-203/Q-208: a merge-only re-run found only prompt.md and rebuilt its report from docs/decisions."""
+    adapter = FakeAdapter(files={"src/a.py": "x = 1\n", ".swarm-run/notes.md": "- eval pair1 F1 0.91\n"},
+                          structured={"status": "done", "summary": "association evals done, table in docs"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="sonnet", effort="medium")
+    assert r.run_task(t).status is Status.MERGE_READY
+    stored = board.get_task(t.id)
+    stored.status, stored.feedback = Status.CHANGES_REQUESTED, "Main moved and now conflicts with this branch in: docs/X.md."
+    board.update_task(stored, ["status", "feedback"])
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        seen["notes"] = (spec.cwd / ".swarm-run" / "notes.md").read_text()
+        seen["report"] = (spec.cwd / ".swarm-run" / "previous_report.json").read_text()
+        return orig(spec)
+    adapter.run = run
+    adapter.files = {"src/a.py": "x = 2\n"}
+    r.run_task(board.get_task(t.id))
+    assert "eval pair1 F1 0.91" in seen["notes"] and "association evals done" in seen["report"]
+    assert "association evals done" in adapter.prompts[1] and "update this report instead of rebuilding" in adapter.prompts[1]

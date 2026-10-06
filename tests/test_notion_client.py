@@ -149,7 +149,7 @@ def _board_with_fake_notion(q_schema=None):
             counter["n"] += 1
             ds = body["parent"]["data_source_id"]
             page = {"id": f"pg{counter['n']}", "properties": body["properties"], "icon": body.get("icon"),
-                    "last_edited_time": "2026-10-10T16:00:00.000Z"}
+                    "last_edited_time": "2026-10-10T16:00:00.000Z", "created_time": "2026-10-10T16:00:00.000Z"}
             store[ds][page["id"]] = page
             return httpx.Response(200, json=page)
         if req.method == "PATCH" and path.startswith("/v1/pages/"):
@@ -462,3 +462,34 @@ def test_a_long_question_falls_back_to_context_when_the_schema_cannot_change():
     board.create_question(Question(id="", text=LONG_QUESTION, context="ctx"))
     back = board.list_questions()[0]
     assert back.text == LONG_QUESTION and back.context == "ctx"
+
+
+def test_question_ids_stay_unique_when_the_query_lags():
+    """Q-209 (Oct 6): two questions filed in one publish got the same id; Notion's query had not seen the first."""
+    board, store = _board_with_fake_notion()
+    real_query = board.c.query
+
+    def lagging(ds, filter=None, sorts=None):
+        rows = real_query(ds, filter=filter, sorts=sorts) if sorts else real_query(ds, filter=filter)
+        return rows if filter else [r for r in rows if not r.get("_fresh")]
+    board.c.query = lagging
+    created = []
+    for text in ("harness note", "fyi note"):
+        q = board.create_question(Question(id="", text=text))
+        store["ds-q"][q.page_id]["_fresh"] = True          # invisible to the next unfiltered query
+        created.append(q.id)
+    assert created == ["Q-001", "Q-002"]
+
+
+def test_question_id_taken_by_another_process_is_renumbered():
+    board, store = _board_with_fake_notion()
+    store["ds-q"]["pg0"] = {"id": "pg0", "created_time": "2026-10-06T10:00:00.000Z", "_hidden": True,
+                            "properties": {"ID": {"rich_text": [{"text": {"content": "Q-001"}}]}}}
+    real_query = board.c.query
+    board.c.query = lambda ds, filter=None, **kw: [r for r in real_query(ds, filter=filter)
+                                                   if filter or not r.get("_hidden")]
+    q = board.create_question(Question(id="", text="mine"))
+    assert q.id == "Q-002"
+    props = store["ds-q"][q.page_id]["properties"]
+    assert props["ID"]["rich_text"][0]["text"]["content"] == "Q-002"
+    assert props["Question"]["title"][0]["text"]["content"].startswith("Q-002 · mine")

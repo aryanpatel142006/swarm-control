@@ -263,3 +263,33 @@ def test_shell_expansion_hints_catch_a_lost_variable(tmp_path):
     hints = shell_expansion_hints(text, root=tmp_path)
     assert len(hints) == 2
     assert "`/demo_regress_<stamp>.json`" in hints[0] and "`/eval/results/x.json`" in hints[1]
+
+
+def test_answer_refuses_an_id_two_questions_share(project_dir, monkeypatch):
+    """Q-209 (Oct 6): a harness note and an fyi from one publish shared an id; `answer` closed only the first."""
+    import swarm.cli as cli
+    from swarm.models import Question
+
+    class TwoRowBoard:   # the memory board keys questions by id, so it cannot hold the duplicate
+        rows = [Question(id="Q-209", text="harness note", kind="harness", task_id="T-096", page_id="p1"),
+                Question(id="Q-209", text="fyi note", kind="fyi", task_id="T-096", page_id="p2")]
+
+        def list_questions(self, status=None):
+            return list(self.rows)
+
+        def update_question(self, q, fields):
+            return q
+
+        def __init__(self):
+            pass
+    board = TwoRowBoard()
+    monkeypatch.setattr(cli, "make_board", lambda cfg, memory=False: board)
+    base = ["--config", str(project_dir / ".swarm" / "config.yaml"), "answer", "Q-209", "done"]
+    r = runner.invoke(app, base)
+    assert r.exit_code != 0 and "2 questions share Q-209" in r.output and "kind=fyi" in r.output
+    assert all(not q.answer for q in board.list_questions())
+    r = runner.invoke(app, base + ["--kind", "fyi"])
+    assert r.exit_code == 0, r.output
+    assert {q.kind: q.answer for q in board.list_questions()} == {"harness": "", "fyi": "done"}
+    r = runner.invoke(app, base + ["--all"])
+    assert r.exit_code == 0 and all(q.answer == "done" for q in board.list_questions())

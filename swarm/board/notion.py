@@ -5,6 +5,7 @@ import hashlib
 import os
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterable
@@ -386,11 +387,23 @@ class NotionBoard:
         self.c = client
         self.ids = ids
         self._details_ok: bool | None = None   # Questions has a Details column (checked once per process)
+        # Highest id this process handed out per prefix. Notion's query is eventually consistent: a page created a
+        # moment ago may be missing from the next query, so two questions filed in one runner publish (T-096's
+        # harness note and its fyi) both became Q-209 and `swarm answer Q-209` closed only one (Oct 6).
+        self._issued: dict[str, int] = {}
+        self._id_lock = threading.Lock()
 
     # ----- tasks -----
+    def _allocate(self, prefix: str, ds: str) -> str:
+        with self._id_lock:
+            rows = self.c.query(ds)
+            n = int(next_id(prefix, (np.r_rich(r["properties"].get("ID", {})) for r in rows)).split("-")[1])
+            n = max(n, self._issued.get(prefix, 0) + 1)
+            self._issued[prefix] = n
+            return f"{prefix}-{n:03d}"
+
     def next_task_id(self) -> str:
-        rows = self.c.query(self.ids.tasks_ds)
-        return next_id("T", (np.r_rich(r["properties"].get("ID", {})) for r in rows))
+        return self._allocate("T", self.ids.tasks_ds)
 
     def create_task(self, task: Task) -> Task:
         if not task.id:
@@ -428,8 +441,21 @@ class NotionBoard:
 
     # ----- questions -----
     def next_question_id(self) -> str:
-        rows = self.c.query(self.ids.questions_ds)
-        return next_id("Q", (np.r_rich(r["properties"].get("ID", {})) for r in rows))
+        return self._allocate("Q", self.ids.questions_ds)
+
+    def _dedupe_question_id(self, q: Question) -> None:
+        """Another process (serve, the other laptop's runner) may have taken the same id meanwhile: the row created
+        later moves to a fresh id. Best effort; a query that cannot see the other row yet cannot help."""
+        for _ in range(3):
+            rows = self.c.query(self.ids.questions_ds, filter={"property": "ID", "rich_text": {"equals": q.id}})
+            if len(rows) < 2:
+                return
+            rows.sort(key=lambda r: (str(r.get("created_time") or ""), str(r.get("id"))))
+            if rows[0].get("id") == q.page_id:
+                return
+            q.id = self.next_question_id()
+            props = np.question_to_props(q)
+            self.c.update_page(q.page_id, {"ID": props["ID"], "Question": props["Question"]})
 
     def _questions_have_details(self) -> bool:
         """Boards made before Oct 6 2026 have no Details column: add it once (the integration owns the schema).
@@ -463,6 +489,10 @@ class NotionBoard:
         page = self.c.create_page(self.ids.questions_ds, self._question_props(q, task_page_id=task_page),
                                   icon=row_icon("question", q.kind))
         q.page_id = page["id"]
+        try:
+            self._dedupe_question_id(q)
+        except NotionError:
+            pass
         return q
 
     def list_questions(self, *, status: str | None = None) -> list[Question]:

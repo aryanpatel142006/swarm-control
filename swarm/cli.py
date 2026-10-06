@@ -449,16 +449,28 @@ def split(task_id: str, apply: bool = typer.Option(False, "--apply")):
 
 @app.command()
 def answer(question_id: str, text: str,
-           follow_up: bool = typer.Option(False, "--follow-up", help="fyi questions: create a follow-up task")):
+           follow_up: bool = typer.Option(False, "--follow-up", help="fyi questions: create a follow-up task"),
+           kind: str = typer.Option("", "--kind", help="pick one row when two questions share an id"),
+           task: str = typer.Option("", "--task", help="pick one row when two questions share an id"),
+           all_rows: bool = typer.Option(False, "--all", help="answer every row with this id")):
     """Answer a question (same as typing in Notion)."""
     board = make_board(_cfg(), state.memory)
     qs = [q for q in board.list_questions() if q.id == question_id]
     if not qs:
         raise typer.Exit(code=_fail(f"{question_id} not found"))
-    q = qs[0]
-    q.answer, q.needs_follow_up = text, follow_up
-    board.update_question(q, ["answer", "needs_follow_up"])
-    console.print(f"{q.id} answered; serve will relay it within {_cfg().serve_seconds}s")
+    picked = [q for q in qs if (not kind or q.kind == kind) and (not task or q.task_id == task)]
+    if not picked:
+        raise typer.Exit(code=_fail(f"no {question_id} row matches --kind {kind or '*'} --task {task or '*'}"))
+    if len(picked) > 1 and not all_rows:
+        # two rows once shared Q-209 and `answer` closed only the first (Oct 6): never guess which one
+        for q in picked:
+            console.print(f"  {q.id} · kind={q.kind} · task={q.task_id or '-'} · {q.status} · {q.text[:100]}")
+        raise typer.Exit(code=_fail(f"{len(picked)} questions share {question_id}: add --kind/--task, or --all"))
+    for q in picked:
+        q.answer, q.needs_follow_up = text, follow_up
+        board.update_question(q, ["answer", "needs_follow_up"])
+    console.print(f"{question_id} answered ({len(picked)} row{'s' if len(picked) > 1 else ''}); serve will relay it "
+                  f"within {_cfg().serve_seconds}s")
 
 
 @app.command()

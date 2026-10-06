@@ -492,6 +492,7 @@ class Runner:
                            + (f", {turns} turns" if agent_cfg.provider == "claude" else "")
                            + ". A background job still running when you stop is lost: bound long evaluations to fit, "
                            "start them early, and record their command, PID and output path in `.swarm-run/notes.md`.")
+            self._restore_carry(task.id, attempt, wt)
             prompt = compile_prompt(task, self.cfg, rules_text=self.rules_text, deps_summaries=deps,
                                     structured_output_supported=structured, mcp=mcp, skills=skills,
                                     skill_tool=agent_cfg.provider == "claude", conflicts_note=conflicts_note,
@@ -614,6 +615,15 @@ class Runner:
                     (logdir / "commands.md").write_text(digest)
                 except OSError as e:
                     self.log(f"[{task_id}] could not keep the command digest: {e}")
+        if final_report and result is not None and isinstance(result.structured_output, dict):
+            # a finished attempt sent back only for a merge conflict or verify: the next one reuses this report
+            # instead of rebuilding it from docs/decisions and docs/debt (Q-202, Q-203, Q-208)
+            try:
+                import json as _json
+                logdir.mkdir(parents=True, exist_ok=True)
+                (logdir / "final_report.json").write_text(_json.dumps(result.structured_output, indent=1)[:CARRY_CAP])
+            except (OSError, TypeError, ValueError) as e:
+                self.log(f"[{task_id}] could not keep the final report: {e}")
         for name in CARRY_FILES:
             if name == "report.json" and final_report:
                 continue
@@ -635,6 +645,9 @@ class Runner:
             parts = []
             texts = []
             for name, label in (("notes.md", "`.swarm-run/notes.md`"), ("report.json", "draft `.swarm-run/report.json`"),
+                                ("final_report.json", "final report (that attempt finished; if the feedback above "
+                                 "only asks for conflicts or verify fixes, update this report instead of rebuilding "
+                                 "it; it is also in `.swarm-run/previous_report.json`)"),
                                 ("commands.md", "last shell commands and their output (from the CLI transcript; "
                                  "it wrote no notes)")):
                 f = d / name
@@ -652,6 +665,28 @@ class Runner:
                                  "logs; a file written later was finished by a background job):\n\n" + status)
                 return "\n\n".join(parts)
         return ""
+
+    def _restore_carry(self, task_id: str, attempt: int, wt: Path) -> None:
+        """Put the newest earlier attempt's notes back at `.swarm-run/notes.md` (so the worker keeps appending to
+        them) and its final or draft report at `.swarm-run/previous_report.json` (Q-202, Q-203, Q-208: a merge-only
+        re-run found only prompt.md and rebuilt its report by hand)."""
+        base = self.log_dir / task_id
+        for k in range(attempt - 1, 0, -1):
+            d = base / f"attempt-{k}"
+            report = next((d / n for n in ("final_report.json", "report.json") if (d / n).is_file()), None)
+            notes = d / "notes.md"
+            if not report and not notes.is_file():
+                continue
+            try:
+                run_dir = wt / ".swarm-run"
+                run_dir.mkdir(exist_ok=True)
+                if notes.is_file() and not (run_dir / "notes.md").exists():
+                    (run_dir / "notes.md").write_text(notes.read_text(errors="replace"))
+                if report:
+                    (run_dir / "previous_report.json").write_text(report.read_text(errors="replace"))
+            except OSError as e:
+                self.log(f"[{task_id}] could not restore the previous attempt's notes: {e}")
+            return
 
     def _notes_files(self, attempt_dir: Path, text: str, wt: Path | None) -> str:
         from .feedback import notes_files_status
