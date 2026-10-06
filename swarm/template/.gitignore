@@ -8,6 +8,12 @@ __pycache__/
 artifacts/**/*.png
 artifacts/**/*.mp4
 
+# shared generated data (linked into every worktree by scripts/setup_worktree.sh)
+eval/fixtures/generated/
+eval/fixtures/generated
+eval/results/
+eval/results
+
 # planner scratch (swarm plan writes it every run)
 .swarm/tasks.proposed.json
 *.egg-info/
