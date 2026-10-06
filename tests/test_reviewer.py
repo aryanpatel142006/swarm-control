@@ -122,3 +122,22 @@ def test_rate_limited_reviewer_defers_instead_of_blocking(cfg, git_repo, tmp_pat
     rv.apply(t, Verdict("defer", "reviewer rate limited; retry later", []))
     fresh = board.get_task(t.id)
     assert fresh.status is Status.REVIEW and fresh.review_rounds == 0 and not board.list_questions()
+
+
+def test_long_reviews_keep_every_finding_with_its_text():
+    """Q-080: a flat [:1900] cut delivered '- [medium] hearing/tse/av_mossformer.py:1' with no text at all."""
+    from swarm.reviewer import Verdict, findings_to_feedback
+    long = "x" * 900
+    v = Verdict("request_changes", "s" * 700, [
+        {"severity": "high", "file": "tests/a.py", "line": 50, "issue": long, "fix": long},
+        {"severity": "high", "file": "b.py", "issue": long, "fix": long},
+        {"severity": "medium", "file": "hearing/tse/av_mossformer.py", "line": 1, "issue": "MODELS.md row missing",
+         "fix": "add the row"},
+        {"severity": "low", "file": "c.py", "summary": "only a summary key"},
+        {"severity": "low", "file": "d.py"},
+    ])
+    fb = findings_to_feedback(v, cap=2000)
+    assert len(fb) <= 2000
+    assert "hearing/tse/av_mossformer.py:1: MODELS.md row missing → add the row" in fb
+    assert "only a summary key" in fb and "d.py: (the reviewer gave no text" in fb
+    assert "…" in fb   # the long items were shortened instead

@@ -58,14 +58,38 @@ def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: s
     return "\n".join(parts)
 
 
-def findings_to_feedback(v: Verdict) -> str:
-    lines = [f"Reviewer requested changes: {v.summary}".strip()]
-    for f in v.findings:
-        loc = f.get("file", "")
-        if f.get("line"):
-            loc += f":{f['line']}"
-        lines.append(f"- [{f.get('severity', '?')}] {loc}: {f.get('issue', '')} → {f.get('fix', '')}")
-    return "\n".join(lines)[:1900]
+FEEDBACK_CAP = 6000   # Notion rich text is chunked (board/notion_props.py), so the field itself holds far more
+
+
+def _finding_text(f: dict, key: str, *alts: str) -> str:
+    for k in (key, *alts):
+        v = str(f.get(k) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def findings_to_feedback(v: Verdict, cap: int = FEEDBACK_CAP) -> str:
+    """Every finding reaches the worker with its text. Long reviews are shortened item by item, never cut at the
+    tail: a flat [:1900] once delivered '- [medium] hearing/tse/av_mossformer.py:1' with nothing after it (Q-080)."""
+    def render(limit: int | None) -> str:
+        def cut(s: str) -> str:
+            return s if limit is None or len(s) <= limit else s[:max(1, limit - 1)].rstrip() + "…"
+        lines = [f"Reviewer requested changes: {cut(v.summary)}".strip()]
+        for f in v.findings:
+            loc = str(f.get("file") or "")
+            if f.get("line"):
+                loc += f":{f['line']}"
+            issue = _finding_text(f, "issue", "summary", "description", "text", "message") \
+                or "(the reviewer gave no text for this item; see the review report on the task page)"
+            fix = _finding_text(f, "fix", "suggestion", "recommendation")
+            lines.append(f"- [{f.get('severity', '?')}] {loc or '(no file)'}: {cut(issue)}" + (f" → {cut(fix)}" if fix else ""))
+        return "\n".join(lines)
+
+    text, limit = render(None), 1500
+    while len(text) > cap and limit > 40:
+        text, limit = render(limit), int(limit * 0.7)
+    return text if len(text) <= cap else text[:cap - 1] + "…"
 
 
 class Reviewer:

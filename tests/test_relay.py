@@ -46,3 +46,10 @@ def test_identical_feedback_is_not_appended_twice():
     append_feedback(board, t, "Rebase onto main conflicted in: pyproject.toml. Resolve it.")
     append_feedback(board, t, "Rebase onto main conflicted in: pyproject.toml. Resolve it.")
     assert board.get_task(t.id).feedback.count("Rebase onto main") == 1
+
+
+def test_feedback_overflow_drops_the_oldest_note_not_the_newest():
+    from swarm.relay import clip_keep_newest
+    text = "\n\n".join(f"note {i} " + "y" * 500 for i in range(30))
+    out = clip_keep_newest(text, cap=3000)
+    assert len(out) <= 3000 and "note 29" in out and "note 0 " not in out and out.startswith("[older notes trimmed]")

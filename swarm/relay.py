@@ -12,13 +12,27 @@ from .models import Question, Report, Status, Task
 CLOSED = {Status.DONE, Status.CUT}
 
 
+FEEDBACK_CAP = 8000
+
+
+def clip_keep_newest(text: str, cap: int = FEEDBACK_CAP) -> str:
+    """Drop the OLDEST notes when feedback grows too long; a tail cut used to lose the newest message (Q-080)."""
+    if len(text) <= cap:
+        return text
+    notes = text.split("\n\n")
+    while len(notes) > 1 and len("\n\n".join(notes)) > cap - 40:
+        notes.pop(0)
+    kept = "\n\n".join(notes)
+    return ("[older notes trimmed]\n\n" + kept)[:cap] if len(kept) <= cap - 40 else kept[-cap:]
+
+
 def append_feedback(board, target: Task, line: str) -> bool:
     """Append one note to a task's feedback unless the same note is already there (Q-046: a rebase instruction
     was relayed twice word for word). Returns True when something was written."""
     line = line.strip()
     if not line or line in target.feedback:
         return False
-    target.feedback = (target.feedback.rstrip() + "\n\n" + line).strip()[:1900]
+    target.feedback = clip_keep_newest((target.feedback.rstrip() + "\n\n" + line).strip())
     board.update_task(target, ["feedback"])
     return True
 
