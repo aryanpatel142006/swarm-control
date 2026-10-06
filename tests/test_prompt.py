@@ -73,3 +73,11 @@ def test_small_tasks_get_skills_as_optional(cfg):
     p2 = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
                         skills=["frontend-design"])
     assert "Skills to invoke before you start" in p2
+
+
+def test_skill_line_tells_cli_without_a_skill_tool_where_to_read(cfg):
+    """Q-128: a Codex worker was told to use a Skill tool it does not have."""
+    t = Task(id="T-063", title="Page", type="frontend", importance="normal", size="M")
+    p = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                       skills=["frontend-design"])
+    assert ".claude/skills/<name>/SKILL.md" in p

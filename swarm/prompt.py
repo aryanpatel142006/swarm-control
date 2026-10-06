@@ -69,11 +69,12 @@ def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
     if skills and task.size == "S":   # a small wiring change paid ~6k tokens of general guides it never used (Q-123, Q-127)
         parts.append("- Skills available for this task: " + ", ".join(f"`{s}`" for s in skills)
                      + ". This is a small task: invoke only the ones whose area your change actually touches, and "
-                       "read only the sections you need.")
+                       "read only the sections you need (no Skill tool: read `.claude/skills/<name>/SKILL.md`).")
     elif skills:
         parts.append("- Skills to invoke before you start the relevant work: "
                      + ", ".join(f"`{s}`" for s in skills)
-                     + ". Invoke them with the Skill tool (or `/<name>`) and follow them.")
+                     + ". Invoke them with the Skill tool (or `/<name>`) and follow them. If your CLI has no Skill "
+                       "tool, read `.claude/skills/<name>/SKILL.md` (or `~/.claude/skills/<name>/SKILL.md`) and follow it.")
     if task.importance == "critical":
         parts.append("- This task is critical. If another official plugin or skill would clearly raise the "
                      "quality of the result, install it: `claude plugin install <name>@claude-plugins-official` "

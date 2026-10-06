@@ -20,7 +20,7 @@ You are one autonomous worker in a swarm building a hackathon project. Other age
 
 12. Facts in the task text can be stale or unverified: hardware names, CLI flags, file paths, "the fixtures are present", a bug seen in a screenshot. Check each one against the repo, the logs, `--help` and current main before you build on it. If one is wrong, work from what is true and say so in `notes_for_reviewer` (and in `harness_feedback` if the task text misled you).
 
-13. Your shell may be zsh, and every agent shares one virtualenv whose editable install points at the main checkout. Run code from the worktree root (`python -m pkg.module`, pytest, or a script inside the worktree); the harness puts the worktree first on `PYTHONPATH`, so do not unset it. Never keep a command in a `$VAR` and run `$VAR` (zsh does not word-split it): type the command inline or define a function.
+13. Your shell may be zsh, and every agent shares one virtualenv whose editable install points at the main checkout. Run code from the worktree root (`python -m pkg.module`, pytest, or a script inside the worktree); the harness puts the worktree first on `PYTHONPATH`, so do not unset it and do not use `python -I` or `-E` (both ignore `PYTHONPATH` and import the main checkout's code). Never keep a command in a `$VAR` and run `$VAR` (zsh does not word-split it): type the command inline or define a function.
 
 14. Scratch files go under `${TMPDIR:-/tmp}/$SWARM_TASK_ID-*` or `.swarm-run/` in the worktree. Never delete a path you did not create in this run; other agents use `/tmp` at the same time. Generated fixtures, downloads and benchmark results go where the project's env vars point (shared outside the worktree), never into a commit; the worktree is deleted when the task ends.
 
