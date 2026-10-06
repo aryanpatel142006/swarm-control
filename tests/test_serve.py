@@ -492,3 +492,13 @@ def test_an_agent_back_with_an_exhausted_plan_gets_no_tasks(cfg, git_repo, tmp_p
     board.upsert_agent(AgentRow(name="claude-a", status="running", last_heartbeat=now))
     board.create_task(Task(id="", title="busy", status=Status.RUNNING, agent="claude-a", type="backend"))
     assert srv.reroute() >= 1 and board.get_task(crit.id).agent == "claude-a"
+
+
+def test_reap_warns_once_about_a_heartbeat_from_the_future(cfg, git_repo, tmp_path):
+    logs = []
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    srv.log = logs.append
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-b", last_heartbeat=now + timedelta(hours=4), current_task=""))
+    srv.reap(); srv.reap()
+    assert sum("ahead of this clock" in m for m in logs) == 1

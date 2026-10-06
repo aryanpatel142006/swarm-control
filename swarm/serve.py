@@ -74,6 +74,7 @@ class Server:
         self.retro = self._default_retro
         self._holds_lock = False
         self._transport_failed_at = None  # last serve step that failed to reach the board at all
+        self._skew_warned: set[str] = set()
         self._slow_thread: threading.Thread | None = None
         self._slow_summary = {"reviewed": 0, "merged": 0}
 
@@ -123,6 +124,13 @@ class Server:
         # rerouted to the wrong laptop over a DNS blip, Oct 6 2026). Heartbeats are trusted again once a full
         # stale window has passed without a transport failure.
         outage = (self._transport_failed_at is not None and (now - self._transport_failed_at) < stale)
+        for name, row in rows.items():
+            # a heartbeat from the future means that laptop's clock is wrong: it can never go stale and its
+            # orphan checks are off by the skew (codex-b reported 09:02 UTC at 05:02 UTC, Oct 6 2026)
+            if row.last_heartbeat and (row.last_heartbeat - now) > timedelta(minutes=2) and name not in self._skew_warned:
+                self._skew_warned.add(name)
+                self.log(f"{name}: heartbeat {row.last_heartbeat:%H:%M} UTC is ahead of this clock ({now:%H:%M}); "
+                         f"fix that laptop's clock (reaping and orphan checks are unreliable for it)")
         n = 0
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             row = rows.get(t.agent or "")
