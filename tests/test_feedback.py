@@ -150,3 +150,17 @@ def test_notes_files_status_lists_results_a_cut_off_attempt_left(tmp_path):
     assert "NOT valid JSON" in lines[1]
     assert "2 lines" in lines[2] and "after that attempt ended" not in lines[2]
     assert notes_files_status("nothing here", [wt], {}) == ""
+
+
+def test_a_project_step_that_failed_after_green_pytest_is_named(cfg=None):
+    """Q-244 (T-099): verify_full ended with "demo replay regressed or failed" after two green pytest runs; the
+    note said "no failure recognised" and its context was cut before that line."""
+    from swarm.feedback import failing_step_line, verify_feedback
+    out = ("verify_fast: /x/.venv/bin/python\n" + "\n".join(f"0.{i}s call tests/t.py::t{i}" for i in range(40))
+           + "\n938 passed, 44 deselected, 1 warning in 42.22s\nverify_fast: PASS\n"
+           + "..........                                       [100%]\n28 passed, 952 deselected in 455.65s\n"
+           + "| stages | n | latency_ms |\n" * 30 + "focus_hq SI-SDRi 2.1 dB (median 3.4)\ndemo replay regressed or failed\n")
+    assert failing_step_line(out) == "demo replay regressed or failed"
+    fb = verify_feedback(out, script="scripts/verify_full.sh", code=1)
+    assert "the failing step is in this output" in fb and "demo replay regressed or failed" in fb
+    assert failing_step_line("verify_fast: PASS\n3 passed in 1.0s\n") == ""

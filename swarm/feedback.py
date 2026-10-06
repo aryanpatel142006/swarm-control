@@ -19,7 +19,10 @@ _PYTEST_SUMMARY = re.compile(r"^=*\s*(\d+ (passed|failed|errors?|skipped|deselec
 OTHER_CAP = 3000
 _TIMEOUT = re.compile(r"\[timeout after (\d+)s\]")
 _FAIL_HINT = re.compile(r"FAIL|ERROR|[Ee]rror|Traceback|exit(ed)? (code |status )?[1-9]|:\d+:\d+: [A-Z]+\d+"
-                        r"|would reformat|not found|[Dd]enied|[Ff]ound \d+ (error|issue)|over (the|its) .*budget")
+                        r"|would reformat|not found|[Dd]enied|[Ff]ound \d+ (error|issue)|over (the|its) .*budget"
+                        # a project step's own words: "demo replay regressed or failed" ended T-099's verify_full and
+                        # was "no failure recognised" (Q-244)
+                        r"|\b[Ff]ailed\b|\b[Rr]egress(ed|ion)\b")
 PYTEST_FAIL_CAP = 3000
 PYTEST_PASS_CAP = 500
 
@@ -56,6 +59,16 @@ def split_verify_output(text: str) -> tuple[str, str, bool | None]:
         passed = passed and not re.search(r"[FE]", "".join(ln for ln in pytest_part.splitlines()
                                                          if _PYTEST_PROGRESS.match(ln)))
     return other, pytest_part, passed
+
+
+def failing_step_line(output: str) -> str:
+    """The last line outside the pytest run that reads like a failure ("demo replay regressed or failed"), or ""."""
+    other, _, _ = split_verify_output(output or "")
+    for ln in reversed(other.splitlines()):
+        ln = ln.strip()
+        if ln and _FAIL_HINT.search(ln) and not re.search(r"\b0 failed\b|: PASS\b", ln):
+            return ln[:160]
+    return ""
 
 
 def verify_feedback(output: str, *, script: str = "scripts/verify_fast.sh", code: int | None = None,

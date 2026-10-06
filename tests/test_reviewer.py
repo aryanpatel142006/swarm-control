@@ -308,3 +308,17 @@ def test_fallback_agents_must_be_configured_agents(project_dir, sample_config_di
     p.write_text(yaml.safe_dump(sample_config_dict))
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+def test_flaky_note_without_a_test_id_names_the_failing_step_and_keeps_the_tail(cfg, git_repo, tmp_path):
+    """Q-244: the note read "no test id in the output" and its context stopped at verify_fast's PASS."""
+    counter = tmp_path / "runs.txt"
+    noise = "\\n".join(f"0.{i}s call tests/test_x.py::test_{i}" for i in range(80))
+    script = (f'#!/bin/sh\necho x >> "{counter}"\n[ "$(wc -l < "{counter}")" -ge 2 ] && exit 0\n'
+              f'printf "{noise}\\n"\necho "938 passed in 42.22s"\necho "verify_fast: PASS"\n'
+              'echo "demo replay regressed or failed"; exit 1\n')
+    rev, board, t, adapter = _setup_full(cfg, git_repo, tmp_path, script)
+    assert rev.process(t).status is Status.MERGE_READY
+    q = [q for q in board.list_questions() if q.kind == "harness"][0]
+    assert "no test id; failing step: demo replay regressed or failed" in q.text
+    assert "demo replay regressed or failed" in q.context and len(q.context) <= 1900

@@ -1211,3 +1211,33 @@ def test_resume_lists_results_written_to_shared_dirs_since_the_last_attempt(cfg,
     carry = r._previous_carry("T-9", 2)
     assert "shared data dirs since attempt 1 started" in carry
     assert "demo_regress_132522.json" in carry and "demo_regress_132736.json" in carry and "old.json" not in carry
+
+
+def test_rate_limit_on_a_changes_requested_round_keeps_status_and_agent_when_all_are_cooling(cfg, git_repo, tmp_path):
+    """Field note 85 (Oct 6 2026): T-095/T-102 were merge-conflict rounds (Changes Requested, PR open); the usage
+    limit put them back as Ready on another cooling account."""
+    from swarm.runner import Runner
+    from swarm.board.memory import InMemoryBoard
+    from swarm.workspace import Workspace
+    from swarm.usage import Ledger
+    from swarm.models import AgentRow, RunResult, Status, Task, utcnow
+    board = InMemoryBoard()
+    now = utcnow()
+    board.upsert_agent(AgentRow(name="codex-a", status="cooldown", last_heartbeat=now,
+                                cooldown_until=now + timedelta(hours=1)))
+    board.upsert_agent(AgentRow(name="fake-b", status="offline", last_heartbeat=now - timedelta(hours=2)))
+    r = Runner(cfg, board, "host-a", Workspace(git_repo, tmp_path / "wt"), ledger=Ledger(tmp_path / "u.jsonl"),
+               log=lambda *a: None)
+    t = board.create_task(Task(id="", title="x", status=Status.RUNNING, agent="claude-a", type="backend",
+                               claim_nonce="n", pr_url="https://x/pull/88", feedback="resolve the conflict"))
+    out = r._rate_limited(t, RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True,
+                                       usage_limited=True, error="You've hit your usage limit"),
+                          prev_status=Status.CHANGES_REQUESTED)
+    got = board.get_task(t.id)
+    assert got.status is Status.CHANGES_REQUESTED and out.status is Status.CHANGES_REQUESTED
+    assert got.agent == "claude-a" and got.claim_nonce == "" and got.feedback == "resolve the conflict"
+    # a Ready claim still goes back to Ready
+    t2 = board.create_task(Task(id="", title="y", status=Status.RUNNING, agent="claude-a", type="backend", claim_nonce="m"))
+    r._rate_limited(t2, RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True, error="429"),
+                    prev_status=Status.READY)
+    assert board.get_task(t2.id).status is Status.READY

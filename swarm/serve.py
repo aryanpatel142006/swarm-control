@@ -18,6 +18,10 @@ from .workspace import Workspace
 
 IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
 FAST_STEPS = ("assigned", "reaped", "reconciled", "redistributed", "retried", "relayed", "promoted", "rerouted")
+# Routing (reroute, rebalance, redistribute_on_return) only ever moves queued work. Review, Merge Ready, Blocked,
+# Running and Done rows are never reassigned, and routing never writes a status (field note 85: T-095, approved with
+# PR #88 open, and T-102, in Review with PR #93, bounced between two cooling agents and ended Ready, Oct 6 2026).
+ROUTABLE = (Status.READY, Status.BACKLOG)
 
 
 def _dependency_cycles(tasks: list[Task]) -> list[list[str]]:
@@ -75,6 +79,7 @@ class Server:
         self._holds_lock = False
         self._transport_failed_at = None  # last serve step that failed to reach the board at all
         self._skew_warned: set[str] = set()
+        self._waiting_logged: dict[str, str] = {}   # task id -> "HH:MM UTC" already logged as waiting on cooldowns
         self._slow_thread: threading.Thread | None = None
         self._slow_summary = {"reviewed": 0, "merged": 0}
 
@@ -157,6 +162,46 @@ class Server:
                 self.board.upsert_agent(row)
         return n
 
+    # ----- routing guards -----
+    def _still_routable(self, t: Task) -> bool:
+        """Re-read the row right before a routing write: the listing may be minutes old (a runner claimed it, the
+        reviewer moved it). Ready/Backlog rows move freely; a Changes Requested row may change agent only while no
+        run holds its claim, and keeps its status. Nothing else is touched."""
+        try:
+            fresh = self.board.get_task(t.id)
+        except Exception:   # noqa: BLE001 - when in doubt, leave the task where it is
+            return False
+        if fresh is None or fresh.agent != t.agent or fresh.status is not t.status:
+            return False
+        if fresh.status in ROUTABLE:
+            return True
+        return fresh.status is Status.CHANGES_REQUESTED and not fresh.claim_nonce
+
+    def _target_ok(self, t: Task, agent: str, ctx, *, leaving_dead: bool) -> bool:
+        """A move must land on an agent that can run the task now. Off an offline or unknown agent, a live one that
+        is only cooling is still better (it comes back on its own); between cooling agents nothing is gained, and
+        before this check reroute swapped T-095/T-102 between claude-a and claude-a2 on every tick (Oct 6 2026)."""
+        a = self.cfg.agents.get(agent)
+        if a is None:
+            return False
+        row = ctx.rows.get(agent)
+        if is_available(a, row, importance=t.importance, now=ctx.now):
+            return True
+        if not leaving_dead:
+            return False
+        return row.status != "offline" and row.last_heartbeat is not None and not usage_limited(row, ctx.now)
+
+    def _log_waiting(self, t: Task, ctx) -> None:
+        """One line per task and reset time while every candidate agent is cooling, instead of a move per tick."""
+        ends = [r.cooldown_until for name, r in ctx.rows.items()
+                if name in self.cfg.agents and r.cooldown_until and r.cooldown_until > ctx.now
+                and (not t.pinned_host or self.cfg.agents[name].host == t.pinned_host)]
+        until = min(ends).strftime("%H:%M") + " UTC" if ends else "an agent is free"
+        if self._waiting_logged.get(t.id) == until:
+            return
+        self._waiting_logged[t.id] = until
+        self.log(f"all agents cooling; {t.id} waits on {t.agent} until {until}")
+
     def redistribute_on_return(self) -> int:
         """When an agent comes back from offline, every Ready task is routed again with it available, so work that
         piled up on the survivors spreads out immediately instead of waiting for the slower stealing rule."""
@@ -173,8 +218,10 @@ class Server:
         ctx = context_from_board(self.board, self.cfg, self.now())
         n = 0
         for t in self.board.list_tasks(status=[Status.READY]):
+            if t.status not in ROUTABLE:
+                continue
             agent, model, effort = route(t, self.cfg, ctx)
-            if agent != t.agent:
+            if agent != t.agent and self._target_ok(t, agent, ctx, leaving_dead=False) and self._still_routable(t):
                 ctx.queue_depth[t.agent] = max(0, ctx.queue_depth.get(t.agent, 0) - 1)
                 ctx.queue_depth[agent] = ctx.queue_depth.get(agent, 0) + 1
                 t.agent, t.model, t.effort = agent, model, effort
@@ -351,6 +398,8 @@ class Server:
         ctx = context_from_board(self.board, self.cfg, now)
         n = 0
         for t in self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED]):
+            if t.status not in ROUTABLE and not (t.status is Status.CHANGES_REQUESTED and not t.claim_nonce):
+                continue
             row = ctx.rows.get(t.agent or "")
             unknown = t.agent not in self.cfg.agents
             cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
@@ -367,8 +416,15 @@ class Server:
             agent, model, effort = route(t, self.cfg, ctx, exclude={t.agent} if (cooling or offline) else None)
             if agent == t.agent:
                 continue
+            if not self._target_ok(t, agent, ctx, leaving_dead=unknown or offline):
+                if cooling:
+                    self._log_waiting(t, ctx)
+                continue
+            if not self._still_routable(t):
+                continue
+            self._waiting_logged.pop(t.id, None)
             t.agent, t.model, t.effort = agent, model, effort
-            self.board.update_task(t, ["agent", "model", "effort"])
+            self.board.update_task(t, ["agent", "model", "effort"])      # never the status (field note 85)
             self.log(f"[{t.id}] rerouted → {agent}/{model}")
             n += 1
         return n
@@ -380,7 +436,7 @@ class Server:
         idle agent also takes from any backlog of two or more. Critical tasks wait for the strongest agent."""
         now = self.now()
         ctx = context_from_board(self.board, self.cfg, now)
-        ready = self.board.list_tasks(status=[Status.READY])
+        ready = [t for t in self.board.list_tasks(status=[Status.READY]) if t.status in ROUTABLE]
         running = {}
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             running[t.agent] = running.get(t.agent, 0) + 1
@@ -402,13 +458,15 @@ class Server:
             def gap(t: Task) -> int:
                 return self.cfg.agents[t.agent].strengths.get(t.type, 3) - idle_agent.strengths.get(t.type, 3)
             t = sorted(candidates, key=lambda x: (-gap(x), x.priority, x.id))[-1]
+            ready.remove(t)
+            if not self._still_routable(t):
+                continue
             donor = t.agent
             t.agent = idle_agent.name
             t.model, t.effort = model_for(idle_agent, tier_for(t, self.cfg), t.type, self.cfg)
             self.board.update_task(t, ["agent", "model", "effort"])
             ctx.queue_depth[donor] -= 1
             ctx.queue_depth[idle_agent.name] = 1
-            ready.remove(t)
             self.log(f"[{t.id}] rebalanced {donor} → {idle_agent.name}")
             moved += 1
         return moved

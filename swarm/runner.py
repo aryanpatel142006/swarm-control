@@ -131,6 +131,12 @@ class Outcome:
     status: Status
 
 
+def requeue_status(prev_status: Status | None) -> Status:
+    """Where a run that ended without a result (rate limit, runner stop) puts its task back: the status it was
+    claimed from when that was Changes Requested (the reviewer's or merger's round is still open), else Ready."""
+    return Status.CHANGES_REQUESTED if prev_status is Status.CHANGES_REQUESTED else Status.READY
+
+
 class Runner:
     def __init__(self, cfg: Config, board: Board, host: str, ws: Workspace, *, ledger: Ledger,
                  adapter_factory=get_adapter, sleep: Callable[[float], None] = time.sleep, now=utcnow,
@@ -239,8 +245,8 @@ class Runner:
             self.board.upsert_agent(row)
 
     # ----- recovery -----
-    def _requeue(self, task: Task, why: str) -> None:
-        task.status, task.claim_nonce = Status.READY, ""
+    def _requeue(self, task: Task, why: str, *, prev_status: Status | None = None) -> None:
+        task.status, task.claim_nonce = requeue_status(prev_status), ""
         task.flags = list(dict.fromkeys(task.flags + ["resume"]))
         task.last_error = why[:1900]
         self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error"])
@@ -574,9 +580,9 @@ class Runner:
             self._save_carry(wt, task.id, attempt, final_report=result.ok and result.structured_output is not None,
                              result=result, agent_env=agent_cfg.env)
             if self._stopping:
-                return self._park(task, wt, result)
+                return self._park(task, wt, result, prev_status=prev_status)
             if result.rate_limited:
-                return self._rate_limited(task, result)
+                return self._rate_limited(task, result, prev_status=prev_status)
             return self._publish(task, wt, attempt, result)
         finally:
             if self._claim_moved(task, nonce):
@@ -801,16 +807,16 @@ class Runner:
         except OSError:
             return ""
 
-    def _park(self, task: Task, wt: Path, result: RunResult) -> Outcome:
+    def _park(self, task: Task, wt: Path, result: RunResult, *, prev_status: Status | None = None) -> Outcome:
         """Runner is stopping: keep whatever the model left, push it, and requeue for a resume."""
         if self.ws.changed_files(wt):
             self.ws.commit_all(wt, f"{task.id}: parked by runner stop")
             self.ws.push(wt, task.branch, force_with_lease=True)
-        self._requeue(task, "runner stopped mid-task; work parked on the branch")
-        self.log(f"[{task.id}] parked → Ready (resume)")
-        return Outcome(task, None, result, None, Status.READY)
+        self._requeue(task, "runner stopped mid-task; work parked on the branch", prev_status=prev_status)
+        self.log(f"[{task.id}] parked → {task.status.value} (resume)")
+        return Outcome(task, None, result, None, task.status)
 
-    def _rate_limited(self, task: Task, result: RunResult) -> Outcome:
+    def _rate_limited(self, task: Task, result: RunResult, *, prev_status: Status | None = None) -> Outcome:
         now = self.now()
         limited = task.agent
         row = self.board.get_agent(limited) or AgentRow(
@@ -828,19 +834,25 @@ class Runner:
         self.board.upsert_agent(row)
         # hand the task to someone else now; otherwise it bounces back to this agent at every cooldown end
         # (T-043 lost an hour that way on Oct 5 2026 while two agents idled)
+        # Only to an agent that can run it now: when every agent is cooling, moving it just swaps cooldowns (field
+        # note 85: T-095/T-102 went claude-a -> claude-a2, both limited, and lost their Changes Requested status).
         try:
-            from .router import context_from_board, route
-            agent, model, effort = route(task, self.cfg, context_from_board(self.board, self.cfg, now), exclude={limited})
-            if agent != limited:
+            from .router import context_from_board, is_available, route
+            ctx = context_from_board(self.board, self.cfg, now)
+            agent, model, effort = route(task, self.cfg, ctx, exclude={limited})
+            target = self.cfg.agents.get(agent)
+            if agent != limited and target and is_available(target, ctx.rows.get(agent),
+                                                            importance=task.importance, now=now):
                 task.agent, task.model, task.effort = agent, model, effort
         except Exception as e:  # noqa: BLE001 - routing must never block the requeue
             self.log(f"[{task.id}] reroute after rate limit failed: {e!r}")
-        task.status, task.claim_nonce = Status.READY, ""
+        # a merge-conflict or review round goes back as Changes Requested (feedback and PR intact), not Ready
+        task.status, task.claim_nonce = requeue_status(prev_status), ""
         task.last_error = f"{kind}: {result.error[:300]}"
         self.board.update_task(task, ["status", "claim_nonce", "last_error", "agent", "model", "effort"])
         self.log(f"[{task.id}] {kind}; {limited} cooling down until {row.cooldown_until}"
                  + (f"; task rerouted → {task.agent}" if task.agent != limited else ""))
-        return Outcome(task, None, result, None, Status.READY)
+        return Outcome(task, None, result, None, task.status)
 
     def _publish(self, task: Task, wt: Path, attempt: int, result: RunResult) -> Outcome:
         fresh = self.board.get_task(task.id)

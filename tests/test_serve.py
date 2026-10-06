@@ -502,3 +502,102 @@ def test_reap_warns_once_about_a_heartbeat_from_the_future(cfg, git_repo, tmp_pa
     board.upsert_agent(AgentRow(name="codex-b", last_heartbeat=now + timedelta(hours=4), current_task=""))
     srv.reap(); srv.reap()
     assert sum("ahead of this clock" in m for m in logs) == 1
+
+
+# ----- field note 85: routing only moves queued work (Oct 6 2026, T-095/T-102) -----
+
+def _both_cooling(board, now, minutes=40):
+    for name in ("claude-a", "codex-a"):
+        board.upsert_agent(AgentRow(name=name, status="cooldown", last_heartbeat=now,
+                                    cooldown_until=now + timedelta(minutes=minutes)))
+    board.upsert_agent(AgentRow(name="fake-b", status="offline", last_heartbeat=now - timedelta(hours=2)))
+
+
+def test_routing_never_reassigns_or_restatuses_reviewed_work(cfg, git_repo, tmp_path):
+    """T-095 (approved, PR #88) and T-102 (Review, PR #93) were moved between agents and ended Ready."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now))
+    board.upsert_agent(AgentRow(name="codex-a", status="offline", last_heartbeat=now - timedelta(hours=1)))
+    board.upsert_agent(AgentRow(name="fake-b", status="idle", last_heartbeat=now))
+    srv.redistribute_on_return()    # first sighting
+    frozen = {}
+    for st in (Status.REVIEW, Status.MERGE_READY, Status.BLOCKED, Status.DONE, Status.RUNNING):
+        t = board.create_task(Task(id="", title=st.value, status=st, agent="codex-a", type="backend",
+                                   pr_url="https://x/pull/88", claim_nonce="n" if st is Status.RUNNING else ""))
+        frozen[t.id] = (st, "codex-a")
+    # a Changes Requested row a run has claimed (nonce still set) is not routing's either
+    held = board.create_task(Task(id="", title="held", status=Status.CHANGES_REQUESTED, agent="codex-a",
+                                  type="backend", pr_url="https://x/pull/93", claim_nonce="live"))
+    frozen[held.id] = (Status.CHANGES_REQUESTED, "codex-a")
+    for _ in range(3):
+        srv.reroute()
+        srv.rebalance()
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now))
+    srv.redistribute_on_return()
+    for tid, (st, agent) in frozen.items():
+        got = board.get_task(tid)
+        assert (got.status, got.agent) == (st, agent), tid
+
+
+def test_reroute_moves_changes_requested_off_a_dead_agent_but_keeps_its_status(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    board.upsert_agent(AgentRow(name="codex-a", status="offline"))
+    t = board.create_task(Task(id="", title="cr", status=Status.CHANGES_REQUESTED, agent="codex-a", type="backend",
+                               pr_url="https://x/pull/88", feedback="merge conflict in scripts/demo_regress.py"))
+    assert srv.reroute() == 1
+    got = board.get_task(t.id)
+    assert got.agent == "claude-a" and got.status is Status.CHANGES_REQUESTED and got.feedback.startswith("merge")
+
+
+def test_routing_rereads_the_row_before_writing(cfg, git_repo, tmp_path):
+    """A listing can be minutes old: the reviewer or a runner may have moved the task since."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now))
+    board.upsert_agent(AgentRow(name="codex-a", status="offline", last_heartbeat=now - timedelta(hours=1)))
+    t = board.create_task(Task(id="", title="r", status=Status.READY, agent="codex-a", type="backend"))
+    stale = board.list_tasks()
+    real = board.list_tasks
+    board.list_tasks = lambda **kw: [x for x in stale if kw.get("status") is None or x.status in kw["status"]]
+    row = board.tasks[t.id]
+    row.status = Status.REVIEW            # moved to Review after the listing was taken
+    assert srv.reroute() == 0
+    board.list_tasks = real
+    assert board.get_task(t.id).status is Status.REVIEW and board.get_task(t.id).agent == "codex-a"
+
+
+def test_reroute_does_not_ping_pong_between_cooling_agents(cfg, git_repo, tmp_path):
+    """Oct 6 2026: with both Claude accounts limited, T-095/T-102 swapped claude-a <-> claude-a2 every tick."""
+    logs = []
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    srv.log = logs.append
+    now = clock["now"]
+    _both_cooling(board, now)
+    t = board.create_task(Task(id="", title="q", status=Status.READY, agent="claude-a", type="backend"))
+    cr = board.create_task(Task(id="", title="c", status=Status.CHANGES_REQUESTED, agent="codex-a", type="backend"))
+    for _ in range(4):
+        assert srv.reroute() == 0
+        assert srv.rebalance() == 0
+    assert board.get_task(t.id).agent == "claude-a" and board.get_task(cr.id).agent == "codex-a"
+    assert board.get_task(cr.id).status is Status.CHANGES_REQUESTED
+    waits = [m for m in logs if "all agents cooling" in m]
+    until = (now + timedelta(minutes=40)).strftime("%H:%M")
+    assert len(waits) == 2 and f"{t.id} waits on claude-a until {until} UTC" in waits[0]
+    # once an agent is free again the task moves at once
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now))
+    assert srv.reroute() == 1 and board.get_task(t.id).agent == "codex-a"
+
+
+def test_redistribute_on_return_never_moves_work_onto_a_cooling_agent(cfg, git_repo, tmp_path):
+    """Oct 6 2026: codex-b came back and redistribute sent T-095/T-102 to claude-a, which was usage-limited."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    _both_cooling(board, now)
+    srv.redistribute_on_return()
+    t = board.create_task(Task(id="", title="q", status=Status.READY, agent="claude-a", type="backend"))
+    board.upsert_agent(AgentRow(name="fake-b", status="cooldown", last_heartbeat=now,
+                                cooldown_until=now + timedelta(minutes=5)))    # back online, but limited
+    assert srv.redistribute_on_return() == 0
+    assert board.get_task(t.id).agent == "claude-a"

@@ -13,7 +13,7 @@ from .adapters.base import RunSpec
 from .board.base import Board
 from .config import Config
 from .failover import ReviewerState, reviewer_state
-from .feedback import verify_feedback
+from .feedback import clip_middle, failing_step_line, verify_feedback
 from .models import QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA
@@ -239,7 +239,9 @@ class Reviewer:
         second = self.ws.run_script(wt, self.cfg.verify.full, 1800)
         if second is not None and second.ok:
             self.log(f"[{task.id}] {script} failed, then passed on a rerun: flaky, not sent back")
-            ids = ", ".join(sorted(failing_tests(_text(first)))[:5]) or "no test id in the output"
+            step = failing_step_line(_text(first))
+            ids = (", ".join(sorted(failing_tests(_text(first)))[:5])
+                   or ("no test id; failing step: " + step.replace(": ", " - ") if step else "no test id in the output"))
             self._file_test_hygiene(task, f"{script} is flaky ({ids}): it failed on {task.id}'s branch and passed "
                                     "on an immediate rerun", first)
             return second, (f"Note from the harness: {script} failed once and passed on a rerun (flaky; filed for "
@@ -285,7 +287,10 @@ class Reviewer:
                 return
             self.board.create_question(Question(
                 id="", text=text[:QUESTION_TEXT_CAP], kind="harness",
-                context=verify_feedback(_text(result), code=result.code, intro="verify_full output:")[:1900],
+                # head and tail: the failing step of a script is usually its last line, and a flat [:1900] cut it
+                # off (Q-244: the note showed verify_fast's PASS and none of the step that failed)
+                context=clip_middle(verify_feedback(_text(result), code=result.code, intro="verify_full output:"),
+                                    1850),   # + the "[… cut …]" marker stays under Notion's 1900
                 options=["one task owns the fix", "mark the test slow/serial", "ignore"],
                 proceeding_with="the task was not sent back for it", impact="medium", task_id=task.id,
                 asked_by="reviewer"))
