@@ -29,7 +29,9 @@ def merge_conflict_instructions(conflicts: list[str], causes: list[str], main_re
               "marker, then `git add " + " ".join(conflicts) + "` and `git commit --no-edit` (that concludes the "
               "merge). Do not run `git rebase`, `git fetch`, `git pull`, `git merge`, `git merge --abort` or "
               "`git reset`: the merge is already in progress and the harness handles main. If your sandbox refuses "
-              "the commit, leave the resolved files in place; the harness commits them for you."]
+              "the commit, leave the resolved files in place; the harness commits them for you. Then run the "
+              "project's fast verify before anything else: main may have changed defaults or contracts that this "
+              "branch's tests relied on (not only the files above), and those failures are yours to fix too (Q-152)."]
     return "\n".join(lines)
 
 
