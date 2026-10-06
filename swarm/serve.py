@@ -73,6 +73,7 @@ class Server:
         self.retro_state = Path.home() / ".swarm" / cfg.project / "retro.json"
         self.retro = self._default_retro
         self._holds_lock = False
+        self._transport_failed_at = None  # last serve step that failed to reach the board at all
         self._slow_thread: threading.Thread | None = None
         self._slow_summary = {"reviewed": 0, "merged": 0}
 
@@ -117,10 +118,17 @@ class Server:
         stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
         orphan_after = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
         rows = {a.name: a for a in self.board.list_agents()}
+        # A stale heartbeat during a board outage says nothing about the worker: when serve itself could not reach
+        # Notion within the stale window, the workers on this network could not either (T-061 was reaped and
+        # rerouted to the wrong laptop over a DNS blip, Oct 6 2026). Heartbeats are trusted again once a full
+        # stale window has passed without a transport failure.
+        outage = (self._transport_failed_at is not None and (now - self._transport_failed_at) < stale)
         n = 0
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             row = rows.get(t.agent or "")
             alive = bool(row and row.last_heartbeat and (now - row.last_heartbeat) < stale)
+            if not alive and outage:
+                continue
             listed = bool(row and t.id in [x.strip() for x in row.current_task.split(",") if x.strip()])
             # orphan check on the worker's own clock: its heartbeat vs the claim it wrote, never serve's clock
             recent = (t.started is None or row is None or row.last_heartbeat is None
@@ -426,6 +434,8 @@ class Server:
         except Exception as e:  # noqa: BLE001 - one failing step must not stop the others
             summary[name] = 0
             summary["errors"] = summary.get("errors", 0) + 1
+            if "transport" in repr(e):
+                self._transport_failed_at = self.now()
             self.log(f"serve step {name} failed: {e!r}")
 
     def _slow_steps(self) -> None:

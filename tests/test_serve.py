@@ -450,3 +450,20 @@ def test_rebalance_never_moves_a_host_pinned_task_off_its_host(cfg, git_repo, tm
     board.create_task(Task(id="", title="busy", status=Status.RUNNING, agent="codex-a", type="ml_audio"))
     srv.rebalance()
     assert all(board.get_task(f"T-00{i}").agent != "fake-b" for i in (1, 2, 3))
+
+
+def test_reap_trusts_no_heartbeat_during_a_board_outage(cfg, git_repo, tmp_path):
+    """A stale heartbeat while serve itself cannot reach Notion is the network, not a dead worker (T-061, Oct 6)."""
+    from swarm.board.notion import NotionError
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="claude-a", last_heartbeat=now - timedelta(minutes=20), current_task="T-001"))
+    t1 = board.create_task(Task(id="", title="stale", status=Status.RUNNING, agent="claude-a"))
+
+    def boom() -> int:
+        raise NotionError(0, "transport", "nodename nor servname provided")
+    srv._step({}, "lock", boom)
+    assert srv.reap() == 0 and board.get_task(t1.id).status is Status.RUNNING
+    clock["now"] = now + timedelta(minutes=cfg.heartbeat_stale_minutes + 1)
+    board.upsert_agent(AgentRow(name="claude-a", last_heartbeat=now - timedelta(minutes=20), current_task="T-001"))
+    assert srv.reap() == 1 and board.get_task(t1.id).status is Status.READY
