@@ -25,6 +25,10 @@ verify:
   setup_worktree: scripts/setup_worktree.sh
   fast: scripts/verify_fast.sh      # ≤ 60 s; run after every task
   full: scripts/verify_full.sh      # run by the reviewer
+  # Lines a task adds to docs/text files are rejected (Changes Requested, lines named) when they hold a placeholder.
+  # Defaults below; [] turns the check off; add "**/*.py" to placeholder_files to check code too (off by default).
+  # placeholders: ['\bTBD\b', 'TODO\(fill\)', '\{\{', '<fill', '\bXXX\b', '(?i)\blorem\b']
+  # placeholder_files: ['**/*.md', '**/*.markdown', '**/*.rst', '**/*.txt', '**/*.adoc', 'docs/**']
 
 task_limits:   # worker turns never go below 60/100/150 for medium/high/xhigh effort (runner EFFORT_TURN_FLOOR); Codex has no turn limit
   S: { turns: 30,  minutes: 20, budget_usd: 3 }

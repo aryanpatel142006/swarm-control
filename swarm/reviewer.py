@@ -10,6 +10,7 @@ from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board
 from .config import Config
+from .feedback import verify_feedback
 from .models import QUESTION_TEXT_CAP, Question, Status, Task
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA
@@ -110,8 +111,10 @@ class Reviewer:
             full = self.ws.run_script(wt, self.cfg.verify.full, 1800)
             if full is not None and not full.ok:
                 return Verdict("request_changes", "verify_full.sh failed",
-                               [{"severity": "high", "file": self.cfg.verify.full or "", "issue": full.tail(1500),
-                                 "fix": "make the full verify pass (the tail above is the exact command output)"}])
+                               [{"severity": "high", "file": self.cfg.verify.full or "", "issue": verify_feedback(
+                                     full.out + ("\n" + full.err if full.err else ""), code=full.code,
+                                     intro=f"{self.cfg.verify.full} failed (exit {full.code})."),
+                                 "fix": "make the full verify pass (the output above is the failing step's own)"}])
             role = self.cfg.reviewer
             if role is None:
                 return Verdict("approve", "no reviewer configured; verify passed", [])

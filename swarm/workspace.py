@@ -15,6 +15,7 @@ from typing import Callable
 
 _MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)", re.M)
 _SEPARATOR_RE = re.compile(r"^={7}$", re.M)
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 def merge_conflict_instructions(conflicts: list[str], causes: list[str], main_ref: str) -> str:
@@ -146,6 +147,12 @@ class Workspace:
         except ValueError:
             return 0
 
+    def branch_mentions(self, task_id: str) -> bool:
+        """True when a commit on origin/task/<id> that main lacks names the task (the runner's own commits do)."""
+        ref = f"{self.remote}/task/{task_id}"
+        r = self.git(self.repo_root, "log", "--format=%s%n%b", f"{self._main_ref()}..{ref}", check=False)
+        return r.ok and re.search(rf"(?<![\w-]){re.escape(task_id)}(?![\w-])", r.out) is not None
+
     def _ensure_excluded(self, pattern: str) -> None:
         """Ignore runtime files even when the project's .gitignore does not (info/exclude is shared by worktrees)."""
         common = self.git(self.repo_root, "rev-parse", "--git-common-dir", check=False).out.strip()
@@ -184,6 +191,28 @@ class Workspace:
         status = self.git(path, "status", "--porcelain", "--untracked-files=all", check=False).out.splitlines()
         uncommitted = [line[3:].strip() for line in status if line.strip()]
         return sorted(set(committed) | set(uncommitted))
+
+    def added_lines(self, path: Path) -> dict[str, list[tuple[int, str]]]:
+        """Lines this branch adds relative to main, by file: {path: [(line number, text)]} (committed work only)."""
+        r = self.git(path, "diff", "-U0", "--no-color", "--no-ext-diff", f"{self._main_ref()}...HEAD", check=False)
+        out: dict[str, list[tuple[int, str]]] = {}
+        current, line_no, header = None, 0, False
+        for line in r.out.splitlines():
+            if line.startswith("diff --git "):
+                current, header = None, True
+                continue
+            if header and line.startswith("+++ "):
+                name = line[4:].strip()
+                current = None if name == "/dev/null" else (name[2:] if name.startswith("b/") else name)
+                continue
+            m = _HUNK_RE.match(line)
+            if m:
+                line_no, header = int(m.group(1)), False
+                continue
+            if current and not header and line.startswith("+"):
+                out.setdefault(current, []).append((line_no, line[1:]))
+                line_no += 1
+        return out
 
     def diff_stat(self, path: Path) -> str:
         return self.git(path, "diff", "--stat", self._main_ref(), check=False).out

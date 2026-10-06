@@ -100,3 +100,24 @@ def test_family_keys_cover_subtypes(project_dir, sample_config_dict):
     assert cfg.skills_for("frontend") == []
     from swarm.prompt import select_docs
     assert select_docs(cfg, "ml_audio") == ["PLAN.md#summary", "docs/ARCHITECTURE.md#ml"]
+
+
+def test_placeholder_check_is_configurable(project_dir, sample_config_dict):
+    path = project_dir / ".swarm" / "config.yaml"
+    cfg = load_config(path)
+    assert cfg.verify.placeholders is None and cfg.verify.placeholder_files is None    # defaults apply
+    sample_config_dict["verify"]["placeholders"] = [r"\bTBD\b"]
+    sample_config_dict["verify"]["placeholder_files"] = ["**/*.md", "**/*.py"]
+    path.write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(path)
+    assert cfg.verify.placeholders == [r"\bTBD\b"] and "**/*.py" in cfg.verify.placeholder_files
+    sample_config_dict["verify"]["placeholders"] = ["("]
+    path.write_text(yaml.safe_dump(sample_config_dict))
+    with pytest.raises(ConfigError, match="bad regex"):
+        load_config(path)
+
+
+def test_planner_rules_ask_docs_tasks_to_grep_cited_ui_controls():
+    from swarm.prompt import PROMPTS_DIR
+    text = (PROMPTS_DIR / "planner.md").read_text()
+    assert "every control the doc names exists in the UI source" in text

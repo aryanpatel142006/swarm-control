@@ -25,6 +25,10 @@ class VerifyConfig:
     setup_worktree: str | None = None
     fast: str | None = None
     full: str | None = None
+    # Placeholder tokens rejected in lines a task adds (Q-160: a cut-off attempt left them in a doc). Regexes; []
+    # turns the check off. Files are globs; code files are checked only if the project adds them (e.g. "**/*.py").
+    placeholders: list[str] | None = None
+    placeholder_files: list[str] | None = None
 
 
 @dataclass
@@ -172,6 +176,21 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _str_list(value, key: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{key} must be a list of strings")
+    if key == "verify.placeholders":
+        import re
+        for v in value:
+            try:
+                re.compile(v)
+            except re.error as e:
+                raise ConfigError(f"{key}: bad regex {v!r}: {e}") from e
+    return list(value)
+
+
 def load_config(path: Path | str) -> Config:
     path = Path(path).resolve()
     raw = yaml.safe_load(path.read_text()) or {}
@@ -257,7 +276,10 @@ def load_config(path: Path | str) -> Config:
         heartbeat_stale_minutes=int(raw.get("heartbeat_stale_minutes", 10)),
         max_queue_depth=int(raw.get("max_queue_depth", 4)),
         verify=VerifyConfig(setup_worktree=verify_raw.get("setup_worktree"), fast=verify_raw.get("fast"),
-                            full=verify_raw.get("full")),
+                            full=verify_raw.get("full"),
+                            placeholders=_str_list(verify_raw.get("placeholders"), "verify.placeholders"),
+                            placeholder_files=_str_list(verify_raw.get("placeholder_files"),
+                                                        "verify.placeholder_files")),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),

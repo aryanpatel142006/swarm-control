@@ -91,11 +91,15 @@ def tools_section(task: Task, mcp: list[str], skills: list[str], skill_tool: boo
 
 def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: dict[str, str],
                    structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = (),
-                   skill_tool: bool = True, conflicts_note: str = "") -> str:
+                   skill_tool: bool = True, conflicts_note: str = "", previous_notes: str = "",
+                   limits_line: str = "") -> str:
     import platform
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
-    parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", host_line, "", "## Task", "",
+    parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", host_line]
+    if limits_line.strip():
+        parts += ["", limits_line.strip()]
+    parts += ["", "## Task", "",
              f"- ID: {task.id}", f"- Title: {task.title}", f"- Type: {task.type}",
              f"- Importance: {task.importance}", f"- Size: {task.size}",
              f"- Milestone: {task.milestone or '-'}",
@@ -110,6 +114,12 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
         parts += ["", "## Merge conflicts: resolve these first", "", conflicts_note.strip()]
     if task.feedback.strip():
         parts += ["", "## Feedback and messages for this task (address every item)", "", task.feedback.strip()]
+    if previous_notes.strip():
+        # verbatim: measurements and half-done steps a cut-off attempt recorded (Q-160, Q-162)
+        parts += ["", "## Notes from the previous attempt", "",
+                  "Your earlier attempt on this branch left these. Trust its recorded measurements and commands "
+                  "unless the code changed since; do not re-derive them. Keep appending to `.swarm-run/notes.md`.",
+                  "", previous_notes.strip()]
     parts += tools_section(task, list(mcp), list(skills), skill_tool)
     parts += ["", "## Project context", ""]
     for ref in select_docs(cfg, task.type):

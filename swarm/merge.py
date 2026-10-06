@@ -6,6 +6,7 @@ from typing import Callable
 
 from .board.base import Board
 from .config import Config
+from .feedback import verify_feedback
 from .models import Question, Status, Task, utcnow
 from .workspace import CmdResult, Workspace
 
@@ -81,7 +82,7 @@ class Merger:
 
     def _back(self, task: Task, feedback: str) -> bool:
         task.status = Status.CHANGES_REQUESTED
-        task.feedback = feedback[:1900]
+        task.feedback = feedback[:6000]      # Notion rich text is chunked; a 1900 cut lost the failing step
         task.flags = list(dict.fromkeys(task.flags + ["resume"]))
         self.board.update_task(task, ["status", "feedback", "flags"])
         self.log(f"[{task.id}] merge → changes requested")
@@ -115,8 +116,9 @@ class Merger:
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
             verify = self.ws.run_script(wt, self.cfg.verify.fast, 900)
             if verify is not None and not verify.ok:
-                return self._back(task, "verify_fast.sh failed after merging current main into the branch:\n"
-                                  + verify.tail(1500))
+                return self._back(task, verify_feedback(
+                    verify.out + ("\n" + verify.err if verify.err else ""), code=verify.code,
+                    intro=f"{self.cfg.verify.fast} failed after merging current main into the branch. Fix it."))
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if not push.ok:
                 return self._merge_failed(task, "push failed: " + push.err.strip())

@@ -37,6 +37,28 @@ def check_and_update(repo: Path | None = None, *, run=run_cmd) -> str | None:
     return run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, timeout=15).out.strip() or "updated"
 
 
+def current_head(repo: Path | None = None, *, run=run_cmd) -> str:
+    """The harness checkout's HEAD on disk ("" when unknown). Compared with the HEAD a process started on, it tells
+    a long-running process that another one on this laptop already pulled newer code."""
+    repo = repo or harness_repo()
+    if repo is None:
+        return ""
+    r = run(["git", "rev-parse", "HEAD"], cwd=repo, timeout=15)
+    return r.out.strip() if r.ok else ""
+
+
+def upstream_ahead(repo: Path | None = None, *, run=run_cmd) -> bool:
+    """Fetch only (the checkout is left alone): True when the upstream branch has commits HEAD lacks."""
+    repo = repo or harness_repo()
+    if repo is None or not run(["git", "fetch", "-q"], cwd=repo, timeout=60).ok:
+        return False
+    r = run(["git", "rev-list", "--count", "HEAD..@{u}"], cwd=repo, timeout=15)
+    try:
+        return r.ok and int(r.out.strip() or 0) > 0
+    except ValueError:
+        return False
+
+
 def restart_self() -> None:
     """Replace this process with a fresh one on the same argv (editable install: new code is already on disk)."""
     os.execv(sys.executable, [sys.executable] + sys.argv)

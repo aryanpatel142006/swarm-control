@@ -630,6 +630,7 @@ def test_request_restart_drains_then_restarts(cfg, git_repo, tmp_path, monkeypat
     from swarm.usage import Ledger
     board = InMemoryBoard()
     r = Runner(cfg, board, "host-a", Workspace(git_repo, tmp_path / "wt"), ledger=Ledger(tmp_path / "u.jsonl"), log=lambda *a: None)
+    r.auto_update = False     # never pull the real harness checkout from a test
     restarted = []
     monkeypatch.setattr("swarm.selfupdate.restart_self", lambda: restarted.append(True))
     r.active["claude-a"].add("T-001")           # one run in flight
@@ -823,3 +824,185 @@ def test_worker_questions_keep_their_full_text(cfg, git_repo, tmp_path):
     q = board.list_questions()[0]
     assert q.text == text
     assert text in render_status(cfg, board.list_tasks(), [], board.list_questions(), utcnow())
+
+
+def _push_from_other_clone(git_repo, tmp_path, branch, files, message):
+    """Another laptop's attempt: clone origin, commit on `branch`, push."""
+    other = tmp_path / f"other-{abs(hash(message)) % 10_000}"
+    remote = _git(git_repo, "remote", "get-url", "origin").strip()
+    subprocess.run(["git", "clone", "-q", remote, str(other)], check=True)
+    if branch in _git(other, "branch", "-r"):
+        _git(other, "checkout", "-q", "-B", branch, f"origin/{branch}")
+    else:
+        _git(other, "checkout", "-q", "-b", branch)
+    for rel, text in files.items():
+        (other / rel).parent.mkdir(parents=True, exist_ok=True)
+        (other / rel).write_text(text)
+    _git(other, "add", "-A")
+    _git(other, "-c", "user.email=o@x", "-c", "user.name=o", "commit", "-qm", message)
+    _git(other, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+
+
+def test_retry_worktree_contains_every_commit_on_the_remote_task_branch(cfg, git_repo, tmp_path):
+    """Q-167 (T-074): the retry got an empty branch fresh from main although origin/task/T-074 held the earlier
+    commits. Here the local task branch is left behind origin (a later attempt pushed from another laptop), the
+    worktree is gone, and the task comes back Ready without the resume flag, as serve's retry_failed leaves it."""
+    adapter = FakeAdapter(files={"src/a.py": "first attempt\n"}, structured={"status": "failed", "summary": "half"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.FAILED
+    assert not r.ws.worktree_path(t.id).exists()
+    local_tip = _git(git_repo, "rev-parse", f"task/{t.id}").strip()        # the local branch stays at attempt 1
+    _push_from_other_clone(git_repo, tmp_path, f"task/{t.id}", {"src/b.py": "second attempt\n"}, "T-001: attempt 2")
+    stored = board.get_task(t.id)
+    stored.status, stored.flags = Status.READY, [f for f in stored.flags if f != "resume"]
+    board.update_task(stored, ["status", "flags"])
+    seen = {}
+
+    def run(spec):
+        seen["log"] = _git(spec.cwd, "log", "--format=%s", "HEAD")
+        seen["files"] = sorted(p.name for p in (spec.cwd / "src").iterdir())
+        seen["prompt"] = spec.prompt_file.read_text()
+        return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"status": "done", "summary": "ok"})
+    adapter.run = run
+    r.run_task(board.get_task(t.id))
+    assert seen["files"] == ["a.py", "b.py"] and "T-001: attempt 2" in seen["log"]
+    assert local_tip != _git(git_repo, "rev-parse", f"origin/task/{t.id}").strip()
+    assert "previous attempt's commits" in seen["prompt"]
+
+
+def test_requeued_first_attempt_with_a_pr_resumes_from_the_remote_branch(cfg, git_repo, tmp_path):
+    """attempts == 0 and no resume flag (a reaped or hand-requeued run), but the branch has a PR: it is this
+    task's work and must not be replaced by main and force-pushed over."""
+    adapter = FakeAdapter(files={"src/c.py": "x\n"}, structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, pr_url="https://gh/pr/9")
+    _push_from_other_clone(git_repo, tmp_path, f"task/{t.id}", {"src/b.py": "earlier\n"}, "earlier work")
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        seen["b"] = (spec.cwd / "src" / "b.py").exists()
+        return orig(spec)
+    adapter.run = run
+    r.run_task(t)
+    assert seen["b"] is True
+    assert _git(git_repo, "show", f"origin/task/{t.id}:src/b.py") == "earlier\n"
+
+
+def test_stale_rebase_and_conflict_feedback_never_reaches_a_clean_run(cfg, git_repo, tmp_path):
+    """Q-164/Q-166 (T-070): a merger's "markers will be left" plus an older runner's "First run `git fetch origin &&
+    git rebase origin/main`" reached a worker whose worktree was clean; it followed the rebase."""
+    adapter = FakeAdapter(files={"src/a.py": "half\n"}, ok=False, structured=None)
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)                                    # parks work on the branch (resume)
+    stored = board.get_task(t.id)
+    stored.status = Status.CHANGES_REQUESTED
+    stored.feedback = ("Main moved and now conflicts with this branch in: src/a.py. Before your next run the harness "
+                       "merges origin/main into your branch and leaves conflict markers in those files. Resolve them, "
+                       "`git add` them and `git commit`. Do not run `git rebase`, `git fetch` or `git merge` yourself."
+                       "\n\nRebase onto main conflicted in: src/a.py (main changed them in: abc T-9). First run "
+                       "`git fetch origin && git rebase origin/main`, resolve every conflict keeping main's intent, "
+                       "`git rebase --continue`, then do the task.\n\nReviewer: keep the empty-input test.")
+    board.update_task(stored, ["status", "feedback"])
+    seen = {}
+
+    def run(spec):
+        seen["prompt"] = spec.prompt_file.read_text()
+        return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"status": "done", "summary": "ok"})
+    adapter.run = run
+    r.run_task(board.get_task(t.id))
+    p = seen["prompt"]
+    assert "git rebase origin/main" not in p and "git fetch origin &&" not in p and "rebase --continue" not in p
+    assert "Main moved and now conflicts" not in p and "## Merge conflicts" not in p
+    assert "without conflicts; there are no conflict markers" in p and "Reviewer: keep the empty-input test." in p
+
+
+def test_verify_feedback_leads_with_the_failing_lint_output(cfg, git_repo, tmp_path):
+    """Q-168 (T-074): ruff failed the run, but the feedback was the pytest tail ("834 passed") only."""
+    progress = "\n".join("." * 72 + " [%3d%%]" % p for p in range(4, 101, 4))
+    _break_verify(git_repo, "#!/bin/sh\necho 'ruff: FAIL'\n"
+                  "echo 'src/a.py:1:1: F401 [*] `os` imported but unused'\necho 'Found 1 error.'\n"
+                  f"cat <<'EOF'\n{progress}\n834 passed, 34 deselected in 50.08s\nEOF\nexit 1\n")
+    adapter = FakeAdapter(files={"src/a.py": "import os\n"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    fb = board.get_task(t.id).feedback
+    assert "F401 [*] `os` imported but unused" in fb and "The tests passed" in fb
+    assert fb.index("F401") < fb.index("834 passed")
+
+
+def test_notes_and_draft_report_reach_the_next_attempt_verbatim(cfg, git_repo, tmp_path):
+    """Q-160/Q-162: a max-turns attempt left no notes; the retry re-derived measurements it had taken."""
+    adapter = FakeAdapter(files={"src/a.py": "half\n", ".swarm-run/notes.md": "- replay p50 = 812 ms (eval.replay --clip demo)\n"},
+                          ok=False, structured=None, report_file={"status": "done", "summary": "DRAFT: replay measured"})
+    orig = adapter.run
+
+    def run(spec):
+        res = orig(spec)
+        res.error = "error_max_turns: "
+        return res
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="sonnet", effort="medium")
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    assert "replay p50 = 812 ms" in board.reports[t.id][0][1]          # on the board for another laptop too
+    stored = board.get_task(t.id)
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    adapter.files = {"src/a.py": "done\n"}
+    adapter.report_file = None
+    r.run_task(board.get_task(t.id))
+    p = adapter.prompts[1]
+    assert "## Notes from the previous attempt" in p
+    assert "- replay p50 = 812 ms (eval.replay --clip demo)" in p and "DRAFT: replay measured" in p
+    assert "Limits for this run: 20 minutes wall-clock, 100 turns." in p      # resumed one tier up: opus/high
+
+
+def test_placeholder_tokens_in_changed_docs_send_the_task_back(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"docs/BENCHMARKS.md": "# Bench\n\n| feed | p50 |\n| natural | TBD |\n",
+                                 "src/a.py": "# TODO: tidy\nx = 1\n"},
+                          structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, scope=["src/**", "docs/**"])
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    fb = board.get_task(t.id).feedback
+    assert "- docs/BENCHMARKS.md:4: | natural | TBD |" in fb and "src/a.py" not in fb
+    # code comments are not checked, and a project can switch the check off
+    adapter.files = {"src/b.py": "# TODO: later\n"}
+    r2, board2 = make_runner(cfg, git_repo, tmp_path / "two", adapter)
+    t2 = ready_task(board2, id="T-002")
+    assert r2.run_task(t2).status is Status.MERGE_READY
+    cfg.verify.placeholders = []
+    adapter.files = {"docs/X.md": "TBD\n"}
+    r3, board3 = make_runner(cfg, git_repo, tmp_path / "three", adapter)
+    t3 = ready_task(board3, id="T-003", scope=["docs/**"])
+    assert r3.run_task(t3).status is Status.MERGE_READY
+
+
+def test_busy_runner_drains_once_its_code_is_stale(cfg, git_repo, tmp_path, monkeypatch):
+    """laptop-a's claude-a always had work, so it never self-updated and ran pre-6d5d2b3 code for a day."""
+    import swarm.selfupdate as su
+    adapter = FakeAdapter()
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    r.auto_update, r._loaded_head = True, "old"
+    calls = {"ff": 0, "restart": 0}
+    monkeypatch.setattr(su, "current_head", lambda *a, **k: "new")
+    monkeypatch.setattr(su, "upstream_ahead", lambda *a, **k: False)
+    monkeypatch.setattr(su, "check_and_update", lambda *a, **k: calls.__setitem__("ff", calls["ff"] + 1))
+    monkeypatch.setattr(su, "restart_self", lambda: calls.__setitem__("restart", calls["restart"] + 1))
+    now = utcnow()
+    r.active["codex-a"].add("T-001")
+    r.maybe_self_update(now)
+    assert not r.draining and calls == {"ff": 0, "restart": 0}       # busy: never touch the checkout yet
+    r.maybe_self_update(now + timedelta(minutes=31))
+    assert r.draining and calls["restart"] == 0                      # stale for 30+ min: stop claiming
+    r.active["codex-a"].clear()
+    assert r.finish_drain_if_idle() and calls == {"ff": 1, "restart": 1}
+    # idle and another process already pulled newer code: restart right away
+    r2, _ = make_runner(cfg, git_repo, tmp_path / "two", adapter)
+    r2.auto_update, r2._loaded_head = True, "old"
+    r2.maybe_self_update(now)
+    assert calls["restart"] == 2
