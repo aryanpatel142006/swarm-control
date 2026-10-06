@@ -10,24 +10,75 @@ import signal
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..config import AgentConfig
 from ..models import RunResult
 
 RATE_LIMIT_RE = re.compile(
-    r"rate.?limit|too many requests|\b429\b|usage limit|hit your .{0,40}limit|quota exceeded|"
-    r"resource.?exhausted|overloaded|capacity", re.I)
+    r"rate.?limit|too many requests|\b429\b|usage limit|hit your .{0,40}limit|quota exceeded|plan limit|"
+    r"(?:hour|daily|weekly|session) limit reached|credit balance is too low|resource.?exhausted|overloaded|capacity",
+    re.I)
+# A plan that is used up (ChatGPT/Codex "You've hit your usage limit. Upgrade to Pro ... try again at 5:03 AM",
+# Claude "usage limit reached", "5-hour limit reached · resets 3am") is not a short rate limit: retrying in 15 minutes
+# fails the same way. codex-b got two more tasks that way on Oct 6 2026.
+USAGE_LIMIT_RE = re.compile(
+    r"usage limit|hit your .{0,40}limit|quota exceeded|plan limit|(?:hour|daily|weekly|session) limit reached|"
+    r"upgrade to (?:pro|plus|max)|purchase more credits|credit balance is too low", re.I)
 _RESET_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))")
+_EPOCH_RE = re.compile(r"limit reached\|(\d{10})\b")
+_CLOCK_RE = re.compile(
+    r"(?:try again at|tries? again at|resets?(?: at)?|reset at|available again at|until)\s+"
+    r"(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m\.?\b)?(?:\s*\(([A-Za-z_]+(?:/[A-Za-z_+-]+)+)\))?", re.I)
+_IN_RE = re.compile(
+    r"(?:try again|retry|resets?|available again)(?: in| after)\s+(?:(\d+)\s*(?:h|hours?|hrs?)\b)?\s*,?\s*(?:and\s+)?"
+    r"(?:(\d+)\s*(?:m|min|mins|minutes?)\b)?", re.I)
 
 
-def parse_reset_at(text: str) -> datetime | None:
-    m = _RESET_RE.search(text or "")
-    if not m:
-        return None
-    dt = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+def parse_reset_at(text: str, now: datetime | None = None) -> datetime | None:
+    """When a limit resets, from the CLI's message: an ISO timestamp, an epoch (`limit reached|1759999999`), a
+    wall-clock time (`try again at 5:03 AM`, `resets 3am (America/New_York)`: the runner's local time, which is
+    the CLI's, unless a zone is named) or a duration (`try again in 2 hours 13 minutes`). Always UTC, in the future."""
+    text = text or ""
+    m = _RESET_RE.search(text)
+    if m:
+        dt = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    m = _EPOCH_RE.search(text)
+    if m:
+        return datetime.fromtimestamp(int(m.group(1)), tz=timezone.utc)
+    for m in _CLOCK_RE.finditer(text):
+        hour, minute, ampm, zone = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower(), m.group(4)
+        if not ampm and m.group(2) is None:
+            continue   # a bare number ("until 3") is not a time
+        if ampm:
+            if not 1 <= hour <= 12:
+                continue
+            hour = hour % 12 + (12 if ampm == "p" else 0)
+        if hour > 23 or minute > 59:
+            continue
+        tz = None
+        if zone:
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(zone)
+            except Exception:   # noqa: BLE001 - unknown zone name: fall back to local time
+                tz = None
+        local_now = now.astimezone(tz) if tz else now.astimezone()
+        at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if at <= local_now:
+            at += timedelta(days=1)
+        return at.astimezone(timezone.utc)
+    m = _IN_RE.search(text)
+    if m and (m.group(1) or m.group(2)):
+        return now + timedelta(hours=int(m.group(1) or 0), minutes=int(m.group(2) or 0))
+    return None
+
+
+def is_usage_limit(text: str) -> bool:
+    return bool(USAGE_LIMIT_RE.search(text or ""))
 
 
 def last_json_object(text: str) -> dict | None:
@@ -166,6 +217,9 @@ class Adapter:
         result = self.parse_output(proc.returncode, out, err)
         if not result.ok and not result.rate_limited and RATE_LIMIT_RE.search(err[-4000:] + "\n" + result.error):
             result.rate_limited = True
-        if result.rate_limited and result.reset_at is None:
-            result.reset_at = parse_reset_at(err + "\n" + result.error + "\n" + out[-2000:])
+        if result.rate_limited:
+            text = result.error + "\n" + err[-4000:] + "\n" + out[-2000:]
+            result.usage_limited = result.usage_limited or is_usage_limit(text)
+            if result.reset_at is None:
+                result.reset_at = parse_reset_at(text)
         return result

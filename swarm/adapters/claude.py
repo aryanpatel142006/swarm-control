@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from ..models import RunResult, Usage
-from .base import RATE_LIMIT_RE, Adapter, RunSpec, last_json_object, parse_reset_at
+from .base import RATE_LIMIT_RE, Adapter, RunSpec, is_usage_limit, last_json_object, parse_reset_at
 
 READ_ONLY_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(ls:*),Bash(cat:*)"
 
@@ -75,5 +75,6 @@ class ClaudeAdapter(Adapter):
         return RunResult(ok=not is_error, exit_code=code, stdout=out, stderr=err,
                          structured_output=data.get("structured_output"), usage=usage,
                          session_id=data.get("session_id"), rate_limited=rate_limited,
-                         reset_at=parse_reset_at(text) if rate_limited else None,
+                         usage_limited=rate_limited and is_usage_limit(text + "\n" + err),
+                         reset_at=parse_reset_at(text + "\n" + err) if rate_limited else None,
                          error="" if not is_error else f"{subtype}: {text[:300]}")

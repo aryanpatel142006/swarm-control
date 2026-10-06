@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .config import Config
-from .models import AgentRow, Question, Status, Task
+from .models import AgentRow, Question, Status, Task, usage_limited
 
 EST_HOURS_PER_TASK = 0.6
 
@@ -18,14 +18,20 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         if a.name == "serve":
             continue
         never_seen = a.last_heartbeat is None and a.status == "offline"
-        bit = f"{a.name} no heartbeat yet" if never_seen else f"{a.name} {a.status}"
+        exhausted = a.status != "offline" and usage_limited(a, now)
+        if never_seen:
+            bit = f"{a.name} no heartbeat yet"
+        elif exhausted:   # a used-up plan, not an idle agent: nothing will be routed to it until then
+            bit = f"{a.name} usage-limit until {a.cooldown_until.strftime('%H:%M')}"
+        else:
+            bit = f"{a.name} {a.status}"
         if a.current_task:
             bit += f"({a.current_task})"
         if a.last_heartbeat and a.status != "offline":
             silent = (now - a.last_heartbeat).total_seconds()
             if silent > 2 * cfg.heartbeat_seconds:   # alive on paper, silent in practice (sleeping laptop)
                 bit += f" (no heartbeat for {silent / 60:.0f} min)"
-        if a.status == "cooldown" and a.cooldown_until:
+        if a.status == "cooldown" and a.cooldown_until and not exhausted:
             bit += f" until {a.cooldown_until.strftime('%H:%M')}"
         bit += f" ${a.cost_5h_usd:.1f}/5h"
         parts.append(bit)
@@ -67,7 +73,7 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     # must fix first (Oct 4 2026: codex-b sat idle for an hour behind a dependency chain)
     open_tasks = [t for t in tasks if t.status not in (Status.DONE, Status.CUT)]
     for a in agents:
-        if a.name == "serve" or a.status != "idle" or a.last_heartbeat is None:
+        if a.name == "serve" or a.status != "idle" or a.last_heartbeat is None or usage_limited(a, now):
             continue
         ready_for_it = [t for t in tasks if t.status is Status.READY and t.agent == a.name]
         if not ready_for_it and open_tasks:

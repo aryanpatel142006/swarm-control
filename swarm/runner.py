@@ -14,7 +14,7 @@ from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board, claim_task
 from .config import Config
-from .models import TIERS, AgentRow, Question, Report, RunResult, Status, Task, utcnow
+from .models import TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
@@ -27,6 +27,7 @@ STRUCTURED_PROVIDERS = {"claude", "codex"}
 ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
 HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itself, never by the model
 RATE_LIMIT_COOLDOWN_MIN = 15
+USAGE_LIMIT_COOLDOWN_H = 3       # an exhausted plan with no reset time in the message (Oct 6 2026, codex-b)
 IDLE_AFTER_S = 300
 TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
 SELF_UPDATE_EVERY_S = 600
@@ -181,7 +182,8 @@ class Runner:
         for name, a in self.agents.items():
             row = self.board.get_agent(name) or AgentRow(name=name)
             row.provider, row.host, row.last_heartbeat = a.provider, self.host, now
-            if first and not row.note.startswith("models ok:"):   # keep a `doctor --models` probe result if present
+            limited = bool(row.cooldown_until and row.cooldown_until > now)
+            if first and not row.note.startswith("models ok:") and not limited:   # keep a probe result / limit note
                 from .doctor import cli_version, models_note
                 row.note = models_note(a, cli_version(a, cwd=self.cfg.repo_root))
             with self.lock:
@@ -492,9 +494,16 @@ class Runner:
         limited = task.agent
         row = self.board.get_agent(limited) or AgentRow(
             name=limited, provider=self.agents[limited].provider, host=self.host)
+        usage = result.usage_limited
+        kind = USAGE_LIMIT_NOTE if usage else "rate limited"
+        default = timedelta(hours=USAGE_LIMIT_COOLDOWN_H) if usage else timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN)
+        reset = result.reset_at if result.reset_at and result.reset_at > now else None
+        # Before Oct 6 a "try again at 5:03 AM" reset was not parsed, codex-b cooled down for 15 minutes, came back
+        # and was handed two more tasks that failed the same way.
         row.status = "cooldown"
-        row.cooldown_until = result.reset_at or (now + timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN))
-        row.note = f"rate limited at {now.isoformat(timespec='minutes')}"
+        row.cooldown_until = reset or (now + default)
+        row.note = (f"{kind} until {row.cooldown_until.strftime('%H:%M')} UTC "
+                    f"(hit at {now.strftime('%H:%M')}{'' if reset else ', no reset time given'})")
         self.board.upsert_agent(row)
         # hand the task to someone else now; otherwise it bounces back to this agent at every cooldown end
         # (T-043 lost an hour that way on Oct 5 2026 while two agents idled)
@@ -506,9 +515,9 @@ class Runner:
         except Exception as e:  # noqa: BLE001 - routing must never block the requeue
             self.log(f"[{task.id}] reroute after rate limit failed: {e!r}")
         task.status, task.claim_nonce = Status.READY, ""
-        task.last_error = f"rate limited: {result.error[:300]}"
+        task.last_error = f"{kind}: {result.error[:300]}"
         self.board.update_task(task, ["status", "claim_nonce", "last_error", "agent", "model", "effort"])
-        self.log(f"[{task.id}] rate limited; {limited} cooling down until {row.cooldown_until}"
+        self.log(f"[{task.id}] {kind}; {limited} cooling down until {row.cooldown_until}"
                  + (f"; task rerouted → {task.agent}" if task.agent != limited else ""))
         return Outcome(task, None, result, None, Status.READY)
 

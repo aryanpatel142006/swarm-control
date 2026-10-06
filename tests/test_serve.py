@@ -467,3 +467,28 @@ def test_reap_trusts_no_heartbeat_during_a_board_outage(cfg, git_repo, tmp_path)
     clock["now"] = now + timedelta(minutes=cfg.heartbeat_stale_minutes + 1)
     board.upsert_agent(AgentRow(name="claude-a", last_heartbeat=now - timedelta(minutes=20), current_task="T-001"))
     assert srv.reap() == 1 and board.get_task(t1.id).status is Status.READY
+
+
+def test_an_agent_back_with_an_exhausted_plan_gets_no_tasks(cfg, git_repo, tmp_path):
+    """Oct 6 2026: codex-b's heartbeat returned while its plan was used up; redistribute_on_return and reroute sent
+    two Ready tasks back to it and both failed the same way."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now))
+    board.upsert_agent(AgentRow(name="codex-a", status="offline", last_heartbeat=now - timedelta(minutes=30)))
+    srv.redistribute_on_return()
+    for i in range(3):
+        board.create_task(Task(id="", title=f"b{i}", status=Status.READY, agent="claude-a", type="backend"))
+    crit = board.create_task(Task(id="", title="c", status=Status.READY, agent="codex-a", type="backend",
+                                  importance="critical"))
+    board.upsert_agent(AgentRow(name="codex-a", status="cooldown", last_heartbeat=now,
+                                cooldown_until=now + timedelta(hours=3), note="usage limit until 10:03 UTC"))
+    srv.redistribute_on_return()
+    assert all(board.get_task(f"T-00{i}").agent == "claude-a" for i in (1, 2, 3))
+    assert board.get_task(crit.id).agent == "claude-a"     # critical work does not wait on an exhausted plan
+    # reroute: critical work normally waits for a briefly rate-limited strongest agent when nobody is idle,
+    # but never for a used-up plan
+    c = board.get_task(crit.id); c.agent = "codex-a"; board.update_task(c, ["agent"])
+    board.upsert_agent(AgentRow(name="claude-a", status="running", last_heartbeat=now))
+    board.create_task(Task(id="", title="busy", status=Status.RUNNING, agent="claude-a", type="backend"))
+    assert srv.reroute() >= 1 and board.get_task(crit.id).agent == "claude-a"

@@ -1,5 +1,6 @@
 import json
 import stat
+from datetime import datetime, timedelta, timezone
 
 from swarm.adapters import get_adapter
 from swarm.adapters.antigravity import AntigravityAdapter
@@ -348,3 +349,42 @@ def test_antigravity_skips_effort_when_the_model_id_carries_it(cfg, tmp_path):
     argv, _ = AntigravityAdapter(a).build_command(RunSpec(prompt_file=pf, model="gemini-3.1-pro", effort="medium",
                                                            max_turns=3, budget_usd=1.0, timeout_s=60, cwd=tmp_path))
     assert "--effort" in argv
+
+
+CODEX_PLAN_MSG = ("You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+                  "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:03 AM.")
+
+
+def test_codex_usage_limit_is_a_long_cooldown_with_the_wall_clock_reset():
+    """Oct 6 2026: codex-b's plan ran out; "try again at 5:03 AM" was not parsed, so it cooled down for 15 minutes
+    and was handed two more tasks that failed the same way."""
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h"))
+    out = "\n".join(json.dumps(e) for e in ({"type": "error", "message": CODEX_PLAN_MSG},
+                                            {"type": "turn.failed", "error": {"message": CODEX_PLAN_MSG}}))
+    r = a.parse_output(1, out, "")
+    assert r.rate_limited and r.usage_limited
+    local = r.reset_at.astimezone()
+    assert (local.hour, local.minute) == (5, 3) and r.reset_at > datetime.now(timezone.utc)
+    plain = a.parse_output(1, json.dumps({"type": "error", "message": "Rate limit reached for gpt-6-sol"}), "")
+    assert plain.rate_limited and not plain.usage_limited
+
+
+def test_claude_usage_limit_phrases():
+    a = ClaudeAdapter(AgentConfig(name="c", provider="claude", host="h"), mcp_lookup=lambda: {})
+    for text in ("Claude AI usage limit reached|1760000000", "You've hit your usage limit", "Quota exceeded for plan",
+                 "5-hour limit reached · resets 3am (America/New_York)", "plan limit reached"):
+        r = a.parse_output(1, json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                                          "result": text}), "")
+        assert r.rate_limited and r.usage_limited, text
+    epoch = a.parse_output(1, json.dumps({"type": "result", "subtype": "x", "is_error": True,
+                                          "result": "Claude AI usage limit reached|1760000000"}), "")
+    assert epoch.reset_at == datetime.fromtimestamp(1760000000, tz=timezone.utc)
+
+
+def test_parse_reset_at_wall_clock_zone_and_duration():
+    now = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)                     # 08:00 in New York
+    assert parse_reset_at("resets 3am (America/New_York)", now) == datetime(2026, 10, 7, 7, 0, tzinfo=timezone.utc)
+    assert parse_reset_at("resets 11:30 AM (America/New_York)", now) == datetime(2026, 10, 6, 15, 30, tzinfo=timezone.utc)
+    assert parse_reset_at("try again in 2 hours 15 minutes", now) == now + timedelta(hours=2, minutes=15)
+    assert parse_reset_at("try again at 5:03 AM", now) > now
+    assert parse_reset_at("wait until 3 then go", now) is None

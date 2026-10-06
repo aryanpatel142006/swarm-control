@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..models import RunResult, Usage
 from ..workspace import run_cmd
-from .base import RATE_LIMIT_RE, Adapter, RunSpec, parse_reset_at
+from .base import RATE_LIMIT_RE, Adapter, RunSpec, is_usage_limit, parse_reset_at
 
 
 def registered_mcp_servers(run=run_cmd) -> set[str]:
@@ -103,4 +103,5 @@ class CodexAdapter(Adapter):
         rate_limited = (not ok) and bool(RATE_LIMIT_RE.search(error + "\n" + err))
         return RunResult(ok=ok, exit_code=code, stdout=out, stderr=err, structured_output=structured,
                          usage=usage, session_id=session, rate_limited=rate_limited,
-                         reset_at=parse_reset_at(error + err) if rate_limited else None, error=error)
+                         usage_limited=rate_limited and is_usage_limit(error + "\n" + err),
+                         reset_at=parse_reset_at(error + "\n" + err) if rate_limited else None, error=error)

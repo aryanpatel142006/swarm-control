@@ -109,6 +109,14 @@ class Question:
     page_id: str = ""
 
 
+USAGE_LIMIT_NOTE = "usage limit"   # AgentRow.note prefix for an exhausted plan (router, status and runner agree on it)
+
+
+def usage_limited(row: "AgentRow | None", now: datetime) -> bool:
+    """The agent's plan is used up until cooldown_until: nothing is routed to it, critical work included."""
+    return bool(row and row.cooldown_until and row.cooldown_until > now and row.note.startswith(USAGE_LIMIT_NOTE))
+
+
 @dataclass
 class AgentRow:
     name: str
@@ -146,6 +154,7 @@ class RunResult:
     usage: Usage = field(default_factory=Usage)
     session_id: str | None = None
     rate_limited: bool = False
+    usage_limited: bool = False   # the plan is used up (hours, not minutes): "You've hit your usage limit"
     reset_at: datetime | None = None
     timed_out: bool = False
     error: str = ""

@@ -748,3 +748,31 @@ def test_cut_off_run_with_a_draft_report_resumes_and_keeps_the_draft(cfg, git_re
     stored = board.get_task(t.id)
     assert "resume" in stored.flags and "report_missing" not in stored.flags
     assert "DRAFT" in board.reports[t.id][0][1]
+
+
+def test_usage_limit_cools_down_until_the_reset_or_three_hours(cfg, git_repo, tmp_path):
+    """codex-b's exhausted plan (Oct 6 2026) cooled down 15 minutes and came back to fail two more tasks."""
+    board = InMemoryBoard()
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    r = Runner(cfg, board, "host-a", Workspace(git_repo, tmp_path / "wt"), ledger=Ledger(tmp_path / "u.jsonl"),
+               log=lambda *a: None)
+    t = board.create_task(Task(id="", title="x", status=Status.RUNNING, agent="codex-a", type="backend", claim_nonce="n"))
+    r._rate_limited(t, RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True, usage_limited=True,
+                                 error="You've hit your usage limit. Upgrade to Pro"))
+    row = board.get_agent("codex-a")
+    assert row.note.startswith("usage limit until") and "no reset time given" in row.note
+    assert row.cooldown_until > utcnow() + timedelta(hours=2, minutes=55)
+    assert board.get_task(t.id).last_error.startswith("usage limit:") and board.get_task(t.id).agent == "claude-a"
+    reset = utcnow() + timedelta(hours=5)
+    t2 = board.create_task(Task(id="", title="y", status=Status.RUNNING, agent="codex-a", type="backend", claim_nonce="m"))
+    r._rate_limited(t2, RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True, usage_limited=True,
+                                  reset_at=reset, error="usage limit"))
+    assert board.get_agent("codex-a").cooldown_until == reset
+    # a plain rate limit keeps the short cooldown
+    t3 = board.create_task(Task(id="", title="z", status=Status.RUNNING, agent="claude-a", type="backend", claim_nonce="o"))
+    r._rate_limited(t3, RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True, error="429"))
+    row = board.get_agent("claude-a")
+    assert row.note.startswith("rate limited") and row.cooldown_until < utcnow() + timedelta(minutes=20)
+    # the runner's first heartbeat after a restart keeps the limit note (status and routing read it)
+    r.heartbeat(force=True)
+    assert board.get_agent("codex-a").note.startswith("usage limit") and board.get_agent("codex-a").status == "cooldown"

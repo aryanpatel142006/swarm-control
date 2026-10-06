@@ -138,3 +138,23 @@ def test_host_pin_keeps_a_task_on_that_hosts_agents(cfg):
     assert route(Task(id="T", title="", type="frontend", importance="normal"), cfg, ctx())[0] == "claude-a"
     # a pin to a host with no configured agent falls back to normal routing instead of failing
     assert route(Task(id="T", title="", type="frontend", flags=["host:nowhere"]), cfg, ctx())[0] == "claude-a"
+
+
+def test_an_exhausted_plan_gets_nothing_not_even_critical_work(cfg):
+    """codex-b (Oct 6 2026): a used-up plan fails every task until it resets; critical work must not wait on it."""
+    now = utcnow()
+    limited = AgentRow(name="codex-a", status="cooldown", last_heartbeat=now, cooldown_until=now + timedelta(hours=3),
+                       note="usage limit until 10:03 UTC")
+    alive = AgentRow(name="claude-a", status="idle", last_heartbeat=now)
+    rows = {"codex-a": limited, "claude-a": alive, "fake-b": AgentRow(name="fake-b", status="offline")}
+    t = Task(id="T-9", title="", type="backend", importance="critical")
+    assert not is_available(cfg.agents["codex-a"], limited, importance="critical", now=now)
+    assert route(t, cfg, ctx(rows=rows, now=now))[0] == "claude-a"
+    # an ordinary rate limit still lets critical work wait for the strongest agent
+    cooling = AgentRow(name="codex-a", status="cooldown", last_heartbeat=now, cooldown_until=now + timedelta(minutes=10),
+                       note="rate limited until 08:10 UTC")
+    assert is_available(cfg.agents["codex-a"], cooling, importance="critical", now=now)
+    # fallback when nobody is fully available: alive-but-capped agents before the exhausted one
+    capped = AgentRow(name="claude-a", status="idle", last_heartbeat=now, cost_5h_usd=39)
+    rows2 = {"codex-a": limited, "claude-a": capped, "fake-b": AgentRow(name="fake-b", status="offline")}
+    assert route(Task(id="T-10", title="", type="backend"), cfg, ctx(rows=rows2, now=now))[0] == "claude-a"

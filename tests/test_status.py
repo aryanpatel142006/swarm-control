@@ -91,3 +91,13 @@ def test_idle_agent_with_nothing_ready_is_a_risk(cfg):
     tasks.append(Task(id="T-4", title="d", status=Status.READY, agent="codex-a", milestone="M0"))
     text = render_status(cfg, tasks, agents, [], now)
     assert "codex-a is idle" not in text
+
+
+def test_an_exhausted_plan_reads_as_usage_limit_not_idle(cfg):
+    now = cfg.event_end - timedelta(hours=8)
+    agents = [AgentRow(name="codex-b", status="idle", last_heartbeat=now, cooldown_until=now + timedelta(hours=3),
+                       note="usage limit until 10:03 UTC")]
+    text = render_status(cfg, [Task(id="T-1", title="a", status=Status.BACKLOG)], agents, [], now)
+    until = (now + timedelta(hours=3)).strftime("%H:%M")
+    assert f"codex-b usage-limit until {until}" in text and "codex-b idle" not in text
+    assert "is idle with nothing Ready" not in text

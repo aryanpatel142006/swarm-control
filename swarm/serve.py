@@ -11,7 +11,7 @@ from typing import Callable
 
 from .board.base import Board
 from .config import Config
-from .models import AgentRow, Question, Status, Task, utcnow
+from .models import AgentRow, Question, Status, Task, usage_limited, utcnow
 from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
 from .status import render_headline, render_status
 from .workspace import Workspace
@@ -349,7 +349,7 @@ class Server:
             offline = bool(row and row.status == "offline")
             if not unknown and not offline and not cooling:
                 continue
-            if cooling and t.importance == "critical":
+            if cooling and t.importance == "critical" and not usage_limited(row, now):
                 # critical work waits for the strongest agent only while someone capable is NOT idle
                 others_idle = any(a.name != t.agent and ctx.queue_depth.get(a.name, 0) == 0
                                   and is_available(a, ctx.rows.get(a.name), importance="critical", now=now)

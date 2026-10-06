@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .config import AgentConfig, Config
-from .models import IMPORTANCES, AgentRow, Status, Task, utcnow
+from .models import IMPORTANCES, AgentRow, Status, Task, usage_limited, utcnow
 
 PROVIDER_COST_RANK = {"generic": 0, "gemini": 1, "antigravity": 1, "grok": 2, "codex": 3, "claude": 4}
 
@@ -58,6 +58,8 @@ def is_available(agent: AgentConfig, row: AgentRow | None, *, importance: str, n
     critical = importance == "critical"
     if row.status == "offline":
         return False  # nobody is there to run it, whatever the importance (night cycle 3 stalled on this)
+    if usage_limited(row, now):
+        return False  # an exhausted plan fails every task until it resets, critical ones too (codex-b, Oct 6 2026)
     if row.cooldown_until and row.cooldown_until > now and not critical:
         return False
     if (agent.soft_cap_5h_usd and importance in ("normal", "low")
@@ -74,8 +76,9 @@ def route(task: Task, cfg: Config, ctx: RouteContext, *, exclude: set[str] | Non
     candidates = [a for a in agents
                   if is_available(a, ctx.rows.get(a.name), importance=task.importance, now=ctx.now)]
     if not candidates:   # nobody fully available: prefer agents that are alive (capped or cooling) over dead ones
-        candidates = [a for a in agents if (r := ctx.rows.get(a.name)) is None
-                      or (r.status != "offline" and r.last_heartbeat is not None)] or agents
+        alive = [a for a in agents if (r := ctx.rows.get(a.name)) is None
+                 or (r.status != "offline" and r.last_heartbeat is not None)]
+        candidates = [a for a in alive if not usage_limited(ctx.rows.get(a.name), ctx.now)] or alive or agents
 
     def score(a: AgentConfig) -> int:
         return a.strengths.get(task.type, 3)
