@@ -233,3 +233,22 @@ def test_handoff_writes_a_resume_file(project_dir, monkeypatch, tmp_path):
     assert r.exit_code == 0, r.output
     text = out.read_text()
     assert "Orchestrator handoff" in text and "which headphones?" in text and "dfn stage" in text and "swarm status" in text
+
+
+def test_assign_refuses_a_running_task_unless_forced(project_dir):
+    from swarm import cli as cli_mod
+    from swarm.board.memory import InMemoryBoard
+    from swarm.config import load_config
+    from swarm.models import Status, Task
+    board = InMemoryBoard()
+    board.create_task(Task(id="T-001", title="hi", status=Status.RUNNING, importance="high", type="backend",
+                           agent="claude-a", claim_nonce="abc"))
+    cli_mod.state.cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    cli_mod.make_board = lambda cfg, memory=False: board
+    base = ["--config", str(project_dir / ".swarm" / "config.yaml"), "--memory", "assign", "T-001", "--agent", "codex-a"]
+    r = runner.invoke(app, base)
+    t = board.get_task("T-001")
+    assert r.exit_code != 0 and "--force" in r.output and t.agent == "claude-a" and t.status is Status.RUNNING
+    r = runner.invoke(app, base + ["--force"])
+    t = board.get_task("T-001")
+    assert r.exit_code == 0 and t.agent == "codex-a" and t.status is Status.READY and t.claim_nonce == ""

@@ -105,3 +105,5 @@ Orchestrator session on laptop-a (Opus, then Fable). Project repo: github.com/ar
 - Spend: Max ≈ $110, Pro ≈ $40, Codex/Antigravity on the teammate's plans; the planner ran ~$15.
 - Harness: 30+ commits during the run, 35 field-note rows, every one turned into code, a rule or a planner instruction.
 - Still open for the humans: iLab Kerberos ticket (GPU bake-off at 2 s windows), ElevenLabs key, wired-headphone latency rehearsal (Thu Oct 9).
+
+44. **`assign` did not move a Running task** (Oct 5, T-062/T-064): status showed Ready, the runner claimed them before the assign landed, and `assign` only rewrote agent/model — claude-a kept running while claude-a2 sat idle. Fix: `assign` refuses a Running task owned by another agent unless `--force`, which clears status/claim so the old runner's claim watch stops its CLI and the new agent picks it up.

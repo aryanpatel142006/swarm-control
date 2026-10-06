@@ -102,7 +102,7 @@ Change a tier in `.swarm/config.yaml` → `agents.<name>.models`; running tasks 
 | `swarm status` | status page; RISK lines |
 | `swarm plan PLAN.md --milestone Mx [--apply]` / `swarm apply-proposals` | decompose a milestone |
 | `swarm add "title" --type T --importance I --size S --scope "glob" --depends T-003 --acceptance "..."` | one task |
-| `swarm assign T-x --agent A [--model M --effort E]` | override routing |
+| `swarm assign T-x --agent A [--model M --effort E] [--force]` | override routing; a task already Running on another agent is refused unless `--force` (which stops that run within 30 s and re-queues it) |
 | `swarm cut T-x` / `swarm split T-x [--apply]` | remove / break up |
 | `swarm answer Q-x "text" [--follow-up]` | answer a question |
 | `swarm reroute` | move Ready tasks off offline/cooling agents |
@@ -128,6 +128,7 @@ Learned from real runs; newest last. Each is one line: rule (evidence).
 - `swarm` loads `~/.swarm/env` itself when `NOTION_TOKEN`/`SWARM_HOST` are missing (Oct 4); the shell's values win, so `source` it only when you want to override.
 - An idle agent now steals a Ready task from a saturated agent even when weaker (strength ≥ 3); before Oct 4 claude-a idled while T-002 waited behind codex-b's single slot. If you still see an idle agent next to a Ready task, check `swarm status` for `cooldown`/`offline` and `swarm reroute`.
 - Workers' `harness_feedback` arrives as `[harness]` fyi questions; `swarm doctor --models <agent>` records which model ids a laptop accepts in its Agents row; the first heartbeat writes the CLI version + tier map there too (Oct 4).
+- `swarm status` is a snapshot: a task shown Ready may be claimed by the time you `assign` it. Assigning a Running task to another agent is refused by default (the old runner would keep working, as T-062 did on Oct 5); decide whether the lost minutes are worth it and use `--force`, or assign only tasks still Ready/Backlog.
 - Changing `agents.<name>.models` in config does not touch already-routed tasks: re-point them with `swarm assign T-x --agent A --model M` (Oct 4: eight critical tasks moved to Fable by hand).
 - Never commit to `main` inside an open task's Scope, and never delete tracked files a live branch still carries: T-002's approved PR hit a rebase conflict because the orchestrator edited `scripts/setup_worktree.sh` (in its scope) and removed `hearing.egg-info` on main (Oct 4). Fix shared infra by `swarm tell` to the owning task, or wait for its merge, or cut it and re-add.
 - A project `.gitignore` must list `.venv` **without** a slash as well as `.venv/`: the slash form does not match the symlink `setup_worktree.sh` creates, `git add -A` committed one, and the next `git pull` turned the main checkout's venv into a link to itself (Oct 4, two review rounds lost). The harness now also writes `.venv` / `node_modules` to `info/exclude` for every worktree, strips its own venv from `PATH` when running project scripts, and fails a task fast when `setup_worktree.sh` exits non-zero.

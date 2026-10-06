@@ -363,7 +363,9 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
 
 @app.command()
 def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str = typer.Option(None),
-           effort: str = typer.Option(None)):
+           effort: str = typer.Option(None),
+           force: bool = typer.Option(False, "--force", help="If another agent is already running the task, stop "
+                                                             "that run and re-queue it for the new agent.")):
     """Override routing for one task."""
     board = make_board(_cfg(), state.memory)
     t = board.get_task(task_id)
@@ -371,12 +373,23 @@ def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str =
         raise typer.Exit(code=_fail(f"{task_id} not found"))
     if agent not in _cfg().agents:
         raise typer.Exit(code=_fail(f"unknown agent {agent}"))
+    fields = ["agent", "model", "effort"]
+    # A Running task is held by a claim nonce the runner re-reads every 30 s; changing only the agent field
+    # leaves the old runner working (T-062 kept running on claude-a after `assign claude-a2`, Oct 5 2026).
+    if t.status is Status.RUNNING and t.agent != agent:
+        if not force:
+            raise typer.Exit(code=_fail(
+                f"{t.id} is Running on {t.agent} (attempt {t.attempts}); its runner would keep the work. "
+                f"Re-run with --force to stop that run and hand the task to {agent}, or leave it."))
+        t.status, t.claim_nonce = Status.READY, ""
+        fields += ["status", "claim_nonce"]
+        console.print(f"[yellow]{t.id}: stopping {t.agent}'s run (it notices within 30 s) and re-queueing[/yellow]")
     from .router import model_for, tier_for
     t.agent = agent
     default_model, default_effort = model_for(_cfg().agents[agent], tier_for(t, _cfg()), t.type, _cfg())
     t.model = model or default_model
     t.effort = effort or default_effort
-    board.update_task(t, ["agent", "model", "effort"])
+    board.update_task(t, fields)
     console.print(f"{t.id} → {t.agent} / {t.model} / {t.effort}")
 
 
