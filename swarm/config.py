@@ -71,6 +71,9 @@ class RoleConfig:
     agent: str
     model: str
     effort: str | None = None
+    # reviewer only: who reviews while `agent` is rate/usage limited (swarm/failover.py). None = every other agent
+    # of the same provider on the same host; [] = no failover (reviews wait for the reset)
+    fallback_agents: list[str] | None = None
 
 
 @dataclass
@@ -173,7 +176,16 @@ def _role(raw, agents: dict[str, AgentConfig], key: str) -> RoleConfig | None:
         return None
     if raw.get("agent") not in agents:
         raise ConfigError(f"{key}.agent '{raw.get('agent')}' is not a configured agent")
-    return RoleConfig(agent=raw["agent"], model=str(raw.get("model", "")), effort=raw.get("effort"))
+    fallback = raw.get("fallback_agents")
+    if fallback is not None:
+        if isinstance(fallback, str):
+            fallback = [fallback]
+        unknown = [str(a) for a in fallback if a not in agents]
+        if unknown:
+            raise ConfigError(f"{key}.fallback_agents names {', '.join(unknown)}, not configured agents")
+        fallback = [str(a) for a in fallback]
+    return RoleConfig(agent=raw["agent"], model=str(raw.get("model", "")), effort=raw.get("effort"),
+                      fallback_agents=fallback)
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:

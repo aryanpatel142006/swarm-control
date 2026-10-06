@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .config import Config
+from .failover import reviewer_status_line
 from .models import AgentRow, Question, Status, Task, usage_limited
 
 EST_HOURS_PER_TASK = 0.6
@@ -36,6 +37,12 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         bit += f" ${a.cost_5h_usd:.1f}/5h"
         parts.append(bit)
     lines.append("Agents: " + (" · ".join(parts) or "(none yet)"))
+    # which account reviews now: a failover is visible, and an exhausted reviewer is a RISK (Oct 6 2026: nine
+    # finished tasks waited two hours in Review behind claude-a2's session limit while every worker idled)
+    review_line, review_risk = reviewer_status_line(cfg, agents, now,
+                                                    sum(1 for t in tasks if t.status is Status.REVIEW))
+    if review_line:
+        lines.append(review_line)
     lines.append("")
     lines.append("Milestones:")
     by_ms: dict[str, list[Task]] = {}
@@ -44,7 +51,7 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
             continue
         by_ms.setdefault(t.milestone or "(no milestone)", []).append(t)
     active_agents = max(1, len([a for a in agents if a.name != "serve" and a.status != "offline"]))
-    risks = []
+    risks = [review_risk] if review_risk else []
     for ms in sorted(by_ms):
         group = by_ms[ms]
         done = sum(1 for t in group if t.status is Status.DONE)

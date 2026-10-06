@@ -162,6 +162,9 @@ reviewer:                          # a different model family than most authors
   agent: codex-a
   model: gpt-6-sol
   effort: medium
+  # while the reviewer's account is rate/usage limited, these review instead (their `mid` model), back to the
+  # primary after its reset; default: every other agent of the same provider on the same host; [] = wait instead
+  # fallback_agents: [codex-b]
 planner:
   agent: claude-a
   model: opus

@@ -5,17 +5,19 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board
 from .config import Config
+from .failover import ReviewerState, reviewer_state
 from .feedback import verify_feedback
-from .models import QUESTION_TEXT_CAP, Question, Status, Task
+from .models import QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA
-from .runner import STRUCTURED_PROVIDERS
+from .runner import RATE_LIMIT_COOLDOWN_MIN, STRUCTURED_PROVIDERS, USAGE_LIMIT_COOLDOWN_H
 from .workspace import CmdResult, Workspace
 
 DIFF_CAP = 60000
@@ -108,12 +110,63 @@ def _text(r: CmdResult | None) -> str:
 
 class Reviewer:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, adapter_factory=get_adapter, log=print,
-                 prompt_text: str | None = None, ledger=None):
+                 prompt_text: str | None = None, ledger=None, now=utcnow):
         self.cfg, self.board, self.ws, self.adapter_factory, self.log = cfg, board, ws, adapter_factory, log
         self.prompt_text = prompt_text if prompt_text is not None else (PROMPTS_DIR / "reviewer.md").read_text()
         self.ledger = ledger
+        self.now = now
+        self.limits: dict[str, datetime] = {}   # reviewer candidates out of quota, until (UTC)
+        self._active: str | None = None         # the reviewer used last, to log the return to the primary
+        self.last_agent: str | None = None
+        self._defer_logged: dict[str, datetime] = {}
+
+    # ----- which account reviews (swarm/failover.py) -----
+    def state(self) -> ReviewerState:
+        """The active reviewer now; logs the return to the primary once its limit has reset."""
+        try:
+            rows = self.board.list_agents()
+        except Exception as e:   # noqa: BLE001 - the board being slow must not stop a review
+            self.log(f"reviewer: agent rows unavailable ({e!r}); using the in-memory limits only")
+            rows = []
+        st = reviewer_state(self.cfg, rows, self.now(), self.limits)
+        if st.active and self._active and st.active != self._active and st.active == st.primary:
+            self.log(f"reviewer back to {st.primary} (its limit reset; {self._active} stands down)")
+        if st.active:
+            self._active = st.active
+        return st
+
+    def _exhausted(self, st: ReviewerState) -> Verdict:
+        parts = ", ".join(f"{n} until {u:%H:%M} UTC" for n, u in st.limited.items())
+        fallback = "no fallback configured" if len(st.limited) <= 1 else "every fallback is limited too"
+        return Verdict("defer", f"reviewer rate limited: {parts}; {fallback}", [])
+
+    def _record_limit(self, agent: str, result) -> datetime:
+        """Remember until when `agent` cannot review. A used-up plan also goes on its board row (the same cooldown
+        the runner writes), so routing stops sending it work and `swarm status` shows the failover."""
+        now = self.now()
+        usage = bool(getattr(result, "usage_limited", False))
+        reset = result.reset_at if result.reset_at and result.reset_at > now else None
+        until = reset or now + (timedelta(hours=USAGE_LIMIT_COOLDOWN_H) if usage
+                                else timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN))
+        self.limits[agent] = until
+        if usage:
+            try:
+                a = self.cfg.agents[agent]
+                row = self.board.get_agent(agent) or AgentRow(name=agent, provider=a.provider, host=a.host)
+                if not (row.cooldown_until and row.cooldown_until >= until):
+                    row.status, row.cooldown_until = "cooldown", until
+                    row.note = (f"{USAGE_LIMIT_NOTE} until {until:%H:%M} UTC (hit by the reviewer at {now:%H:%M}"
+                                f"{'' if reset else ', no reset time given'})")
+                    self.board.upsert_agent(row)
+            except Exception as e:   # noqa: BLE001 - the in-memory record is enough for the failover itself
+                self.log(f"reviewer: could not mark {agent} limited on the board: {e!r}")
+        return until
 
     def review(self, task: Task) -> Verdict:
+        if self.cfg.reviewer is not None:
+            st = self.state()
+            if st.active is None:   # nobody can review: do not spend a verify_full on a review that cannot happen
+                return self._exhausted(st)
         wt = self.ws.provision(task.id, reuse_branch=True)
         try:
             setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
@@ -130,30 +183,50 @@ class Reviewer:
             role = self.cfg.reviewer
             if role is None:
                 return Verdict("approve", "no reviewer configured; verify passed", [])
-            agent_cfg = self.cfg.agents[role.agent]
             diff = self.ws.git(wt, "diff", f"{self.ws.remote}/{self.cfg.main_branch}...HEAD", check=False).out
             tail = full.tail(1500) if full else ""
             prompt = build_review_prompt(task, diff, (verify_note + "\n\n" + tail).strip() if verify_note else tail,
                                          self.prompt_text)
             pf = wt / ".swarm-run" / "review_prompt.md"
             pf.write_text(prompt)
-            structured = agent_cfg.provider in STRUCTURED_PROVIDERS
-            spec = RunSpec(prompt_file=pf, model=role.model or agent_cfg.models["mid"], effort=role.effort,
-                           max_turns=REVIEW_TURNS, budget_usd=None, timeout_s=REVIEW_TIMEOUT_S, cwd=wt,
-                           schema=REVIEW_SCHEMA if structured else None, read_only=True,
-                           sandbox="read-only", extra_args=list(agent_cfg.extra_args))
-            started = time.time()
-            result = self.adapter_factory(agent_cfg).run(spec)
-            if self.ledger is not None:
-                self.ledger.append(agent=role.agent, model=spec.model, task_id=task.id, usage=result.usage, role="reviewer",
-                                   duration_s=time.time() - started, ok=result.ok)
-            if not result.ok and result.structured_output is None:
-                if result.rate_limited:   # the reviewer's provider is out of quota, not the code: try again later
-                    return Verdict("defer", f"reviewer rate limited: {result.error[:200]}", [])
-                return Verdict("escalate", f"reviewer run failed: {result.error[:300]}", [])
-            return parse_verdict(result.structured_output, wt)
+            tried: set[str] = set()
+            while True:
+                st = self.state()
+                agent = st.active
+                if agent is None or agent in tried:
+                    return self._exhausted(st)
+                tried.add(agent)
+                result = self._run_model(task, agent, st.model, pf, wt)
+                if not result.ok and result.structured_output is None:
+                    if result.rate_limited:   # the account is out of quota, not the code: hand the review over
+                        until = self._record_limit(agent, result)
+                        nxt = self.state().active
+                        if nxt and nxt not in tried:
+                            self.log(f"reviewer failover {agent} → {nxt} until {until:%H:%M} UTC")
+                            continue
+                        self.log(f"[{task.id}] reviewer {agent} limited until {until:%H:%M} UTC and no fallback "
+                                 "is free: review deferred")
+                        return self._exhausted(self.state())
+                    return Verdict("escalate", f"reviewer run failed ({agent}): {result.error[:300]}", [])
+                self.last_agent = agent
+                return parse_verdict(result.structured_output, wt)
         finally:
             self.ws.dispose(wt)
+
+    def _run_model(self, task: Task, agent: str, model: str, pf: Path, wt: Path):
+        role = self.cfg.reviewer
+        agent_cfg = self.cfg.agents[agent]
+        structured = agent_cfg.provider in STRUCTURED_PROVIDERS
+        spec = RunSpec(prompt_file=pf, model=model or agent_cfg.models["mid"], effort=role.effort,
+                       max_turns=REVIEW_TURNS, budget_usd=None, timeout_s=REVIEW_TIMEOUT_S, cwd=wt,
+                       schema=REVIEW_SCHEMA if structured else None, read_only=True,
+                       sandbox="read-only", extra_args=list(agent_cfg.extra_args))
+        started = time.time()
+        result = self.adapter_factory(agent_cfg).run(spec)
+        if self.ledger is not None:
+            self.ledger.append(agent=agent, model=spec.model, task_id=task.id, usage=result.usage, role="reviewer",
+                               duration_s=time.time() - started, ok=result.ok)
+        return result
 
     # ----- verify_full failures that are not the task's (Q-189, Q-190, Q-191, Q-196) -----
     def _triage_full_failure(self, task: Task, wt: Path, first: CmdResult):
@@ -222,7 +295,10 @@ class Reviewer:
     def apply(self, task: Task, v: Verdict) -> Task:
         round_no = task.review_rounds + 1
         if v.verdict == "defer":          # leave it in Review; serve picks it up on a later tick
-            self.log(f"[{task.id}] review deferred: {v.summary[:120]}")
+            now, last = self.now(), self._defer_logged.get(task.id + v.summary)
+            if last is None or now - last > timedelta(minutes=10):   # not two lines per task every 30 s for hours
+                self._defer_logged[task.id + v.summary] = now
+                self.log(f"[{task.id}] review deferred: {v.summary[:160]}")
             return task
         md = f"**Verdict:** `{v.verdict}`\n\n{v.summary}\n\n" + "\n".join(
             f"- [{f.get('severity', '?')}] {f.get('file', '')}:{f.get('line', '')} {f.get('issue', '')} → {f.get('fix', '')}"
@@ -242,7 +318,7 @@ class Reviewer:
                 id="", text=f"Reviewer escalated {task.id}: {v.summary}"[:QUESTION_TEXT_CAP], kind="blocking",
                 context=findings_to_feedback(v), options=["cut", "split", "accept as is", "human fix"],
                 impact="high", task_id=task.id,
-                asked_by=self.cfg.reviewer.agent if self.cfg.reviewer else "reviewer"))
+                asked_by=self.last_agent or (self.cfg.reviewer.agent if self.cfg.reviewer else "reviewer")))
         self.board.update_task(task, ["status", "feedback", "review_rounds", "flags"])
         self.log(f"[{task.id}] review → {v.verdict}")
         return task
