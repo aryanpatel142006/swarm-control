@@ -201,12 +201,15 @@ def TASKS_SCHEMA(agent_names: list[str]) -> dict:  # noqa: N802 - schema factory
 # ---------- questions ----------
 QUESTION_FIELD_NAMES = {"status": "Status", "answer": "Answer", "needs_follow_up": "Needs Follow-up",
                         "text": "Question", "context": "Context"}
+# A Notion title shows ~200 chars; the full question lives in Details (Q-129, Q-151, Q-153 were cut mid-word).
+QUESTION_TITLE_CHARS = 200
 
 
 def question_to_props(q: Question, *, task_page_id: str | None = None,
                       fields: Iterable[str] | None = None) -> dict:
     all_props = {
-        "Question": p_title(f"{q.id} · {q.text}"[:200]), "ID": p_rich(q.id), "Kind": p_select(q.kind),
+        "Question": p_title(_question_title(q)), "Details": p_rich(q.text),
+        "ID": p_rich(q.id), "Kind": p_select(q.kind),
         "Context": p_rich(q.context), "Options": p_rich("\n".join(q.options)),
         "Proceeding With": p_rich(q.proceeding_with), "Impact": p_select(q.impact),
         "Task ID": p_rich(q.task_id), "Asked By": p_rich(q.asked_by), "Status": p_select(q.status),
@@ -216,7 +219,15 @@ def question_to_props(q: Question, *, task_page_id: str | None = None,
         all_props["Task"] = p_relation([task_page_id])
     if fields is None:
         return all_props
-    return {QUESTION_FIELD_NAMES[f]: all_props[QUESTION_FIELD_NAMES[f]] for f in fields}
+    out = {QUESTION_FIELD_NAMES[f]: all_props[QUESTION_FIELD_NAMES[f]] for f in fields}
+    if "text" in fields:
+        out["Details"] = all_props["Details"]
+    return out
+
+
+def _question_title(q: Question) -> str:
+    title = f"{q.id} · {q.text}"
+    return title if len(title) <= QUESTION_TITLE_CHARS else title[:QUESTION_TITLE_CHARS - 1].rstrip() + "…"
 
 
 def page_to_question(page: dict) -> Question:
@@ -227,9 +238,12 @@ def page_to_question(page: dict) -> Question:
 
     title = r_title(g("Question"))
     qid = r_rich(g("ID")) or title.split(" · ")[0]
-    text = title.split(" · ", 1)[1] if " · " in title else title
+    text = r_rich(g("Details")) or (title.split(" · ", 1)[1] if " · " in title else title)
+    context = r_rich(g("Context"))
+    if not r_rich(g("Details")) and context.startswith("Full question: "):   # board without a Details column
+        text, _, context = context[len("Full question: "):].partition("\n\n")
     return Question(
-        id=qid, text=text, kind=r_select(g("Kind")) or "blocking", context=r_rich(g("Context")),
+        id=qid, text=text, kind=r_select(g("Kind")) or "blocking", context=context,
         options=[o for o in r_rich(g("Options")).split("\n") if o],
         proceeding_with=r_rich(g("Proceeding With")), impact=r_select(g("Impact")) or "medium",
         task_id=r_rich(g("Task ID")), asked_by=r_rich(g("Asked By")), status=r_select(g("Status")) or "Open",
@@ -246,7 +260,8 @@ def QUESTIONS_SCHEMA(tasks_ds_id: str | None = None) -> dict:  # noqa: N802
     """The Task relation is optional so the Questions table can be created before the Tasks table exists;
     init adds it afterwards with TASK_RELATION (it is cosmetic: the harness links by Task ID)."""
     schema = {
-        "Question": {"title": {}}, "Status": _sel(["Open", "Applied"], QSTATUS_COLORS), "ID": {"rich_text": {}},
+        "Question": {"title": {}}, "Details": {"rich_text": {}},
+        "Status": _sel(["Open", "Applied"], QSTATUS_COLORS), "ID": {"rich_text": {}},
         "Kind": _sel(["blocking", "fyi", "harness", "relay"], KIND_COLORS),
         "Context": {"rich_text": {}}, "Options": {"rich_text": {}}, "Proceeding With": {"rich_text": {}},
         "Impact": _sel(["high", "medium", "low"], IMPACT_COLORS),

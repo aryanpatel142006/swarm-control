@@ -202,7 +202,7 @@ class Server:
         for t in self.board.list_tasks(status=[Status.FAILED]):
             if t.attempts >= self.cfg.max_attempts:
                 self.board.create_question(Question(
-                    id="", text=f"{t.id} failed {t.attempts} times: {t.last_error[:120]}"[:190], kind="blocking",
+                    id="", text=f"{t.id} failed {t.attempts} times: {t.last_error[:600]}", kind="blocking",
                     context=t.last_error[:1900], options=["retry once more", "split", "cut", "human fix"],
                     impact="high", task_id=t.id, asked_by="serve"))
                 t.status = Status.BLOCKED

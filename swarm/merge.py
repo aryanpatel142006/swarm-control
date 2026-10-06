@@ -95,7 +95,7 @@ class Merger:
             task.status = Status.BLOCKED
             self.board.update_task(task, ["last_error", "flags", "status"])
             self.board.create_question(Question(
-                id="", text=f"{task.id} could not be merged {n} times: {error[:100]}"[:190], kind="blocking",
+                id="", text=f"{task.id} could not be merged {n} times: {error[:600]}", kind="blocking",
                 context=error[:1900], options=["merge by hand then answer 'merged'", "cut", "human fix"],
                 impact="high", task_id=task.id, asked_by="serve"))
             self.log(f"[{task.id}] merge failed {n} times → blocked")

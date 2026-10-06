@@ -7,7 +7,7 @@ board so the orchestrator sees the conversation. `swarm tell T-012 "..."` does t
 """
 from __future__ import annotations
 
-from .models import Question, Report, Status, Task
+from .models import QUESTION_TEXT_CAP, Question, Report, Status, Task
 
 CLOSED = {Status.DONE, Status.CUT}
 
@@ -41,7 +41,7 @@ _append_feedback = append_feedback
 
 
 def _note(board, *, text: str, context: str, task_id: str, asked_by: str) -> Question:
-    q = Question(id="", text=text[:190], kind="relay", context=context[:1900], impact="low",
+    q = Question(id="", text=text[:QUESTION_TEXT_CAP], kind="relay", context=context[:1900], impact="low",
                  task_id=task_id, asked_by=asked_by, status="Applied")
     return board.create_question(q)
 

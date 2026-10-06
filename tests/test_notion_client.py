@@ -100,9 +100,10 @@ def test_markdown_to_blocks():
     assert blocks[2]["type"] == "code" and blocks[2]["code"]["language"] == "json"
 
 
-def _board_with_fake_notion():
-    """A fake Notion that stores pages by data source and supports the calls NotionBoard makes."""
-    store = {"ds-tasks": {}, "ds-q": {}, "ds-agents": {}, "blocks": {}}
+def _board_with_fake_notion(q_schema=None):
+    """A fake Notion that stores pages by data source and supports the calls NotionBoard makes. q_schema: the
+    Questions data source's properties (None: data source calls fail, as on an integration without schema rights)."""
+    store = {"ds-tasks": {}, "ds-q": {}, "ds-agents": {}, "blocks": {}, "q_schema": q_schema}
     counter = {"n": 0}
 
     def match(page, f):
@@ -134,6 +135,10 @@ def _board_with_fake_notion():
     def handler(req: httpx.Request):
         path = req.url.path
         body = json.loads(req.content) if req.content else {}
+        if path == "/v1/data_sources/ds-q" and store["q_schema"] is not None:
+            if req.method == "PATCH":
+                store["q_schema"].update(body["properties"])
+            return httpx.Response(200, json={"id": "ds-q", "properties": store["q_schema"]})
         if req.method == "POST" and path.endswith("/query"):
             ds = path.split("/")[3]
             results = list(store[ds].values())
@@ -434,3 +439,26 @@ def test_decorate_keeps_the_icon_when_covers_are_refused(tmp_path):
     out = decorate_object(client, "databases", "db1", "agents", __import__("swarm.board.notion", fromlist=["ASSETS_DIR"]).ASSETS_DIR, assets_url="https://x/")
     assert out == "external"
     assert "cover" in calls[0] and "cover" not in calls[-1] and calls[-1]["icon"]["type"] == "external"
+
+
+LONG_QUESTION = ("Reviewer escalated T-071: the change edits docs/DEMO.md and docs/CONTRACTS.md although only the "
+                 "demo script is in scope; " + "the details matter here. " * 60)[:1500]
+
+
+def test_a_1500_char_question_survives_the_board_with_a_details_column_added_on_first_use():
+    """Q-129/Q-151/Q-153 ended mid-word ("DEMO.md and CONTRAC"): the title held the only copy of the text."""
+    board, store = _board_with_fake_notion(q_schema={"Question": {"title": {}}, "Context": {"rich_text": {}}})
+    q = board.create_question(Question(id="", text=LONG_QUESTION, context="ctx"))
+    assert "Details" in store["q_schema"]                                  # old board migrated once
+    page = store["ds-q"][q.page_id]
+    title = "".join(x["text"]["content"] for x in page["properties"]["Question"]["title"])
+    assert len(title) <= 200 and title.endswith("…")
+    back = board.list_questions()[0]
+    assert back.text == LONG_QUESTION and back.context == "ctx"
+
+
+def test_a_long_question_falls_back_to_context_when_the_schema_cannot_change():
+    board, store = _board_with_fake_notion(q_schema=None)
+    board.create_question(Question(id="", text=LONG_QUESTION, context="ctx"))
+    back = board.list_questions()[0]
+    assert back.text == LONG_QUESTION and back.context == "ctx"

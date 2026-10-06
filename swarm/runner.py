@@ -14,7 +14,7 @@ from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board, claim_task
 from .config import Config
-from .models import TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
+from .models import QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
@@ -606,7 +606,7 @@ class Runner:
         self.board.append_task_report(task, f"Report — attempt {attempt}", md)
         if report.status == "blocked" and not report.question:
             report.question = {"kind": "blocking", "options": [], "proceeding_with": "",
-                               "text": (report.summary or f"{task.id} reported blocked without saying why")[:190]}
+                               "text": report.summary or f"{task.id} reported blocked without saying why"}
         if report.question:
             self._file_question(task, report, report.question)
         hf = harness_feedback_question(task, report)
@@ -655,7 +655,7 @@ class Runner:
             task.review_rounds += 1
             if task.review_rounds > self.cfg.max_review_rounds:
                 self._file_question(task, report, {
-                    "kind": "blocking", "text": f"{task.id} still has conflict markers in {', '.join(markers)}"[:190],
+                    "kind": "blocking", "text": f"{task.id} still has conflict markers in {', '.join(markers)}",
                     "options": ["resolve by hand", "cut", "split"], "proceeding_with": ""})
                 return Status.BLOCKED
             task.feedback = ("Conflict markers are still in: " + ", ".join(markers) + ". Edit each file so it keeps "
@@ -700,7 +700,7 @@ class Runner:
 
     def _file_question(self, task: Task, report: Report, q: dict, *, context: str = "") -> Question:
         question = Question(
-            id="", text=q["text"][:190], kind=q.get("kind", "blocking"),
+            id="", text=q["text"][:QUESTION_TEXT_CAP], kind=q.get("kind", "blocking"),
             context=(context or report.summary)[:1900], options=list(q.get("options") or []),
             proceeding_with=q.get("proceeding_with", ""),
             impact="high" if q.get("kind") == "blocking" else "medium",

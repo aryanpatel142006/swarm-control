@@ -116,7 +116,7 @@ def harness_feedback_question(task: Task, r: Report) -> dict | None:
     n = len(r.harness_feedback)
     lines = [f"- {f['what']}" + (f" → {f['suggestion']}" if f.get("suggestion") else "") for f in r.harness_feedback]
     return {"kind": "harness", "text": f"[harness] {task.id}: {n} note{'s' if n != 1 else ''} from {task.agent or 'worker'}"
-            f" — {r.harness_feedback[0]['what']}"[:190],
+            f" — {r.harness_feedback[0]['what']}",
             "options": [], "proceeding_with": "orchestrator triages: fix harness / tune project / update skill",
             "context": "\n".join(lines)}
 

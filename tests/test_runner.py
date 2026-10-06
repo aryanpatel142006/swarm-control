@@ -55,6 +55,7 @@ def make_runner(cfg, git_repo, tmp_path, adapter, host="host-a"):
     r = Runner(cfg, board, host, ws, ledger=ledger, adapter_factory=lambda a: adapter,
                sleep=lambda s: None, executor=SyncExecutor(), rules_text="RULES", log=lambda *a: None,
                log_dir=tmp_path / "logs")
+    r.auto_update = False     # never fetch/re-exec the real harness checkout from a test
     return r, board
 
 
@@ -806,3 +807,19 @@ def test_after_max_turns_the_next_prompt_says_finish_do_not_start_over(cfg, git_
     board.update_task(stored, ["status"])
     r.run_task(board.get_task(t.id))
     assert "do not start over" in adapter.prompts[1]
+
+
+
+def test_worker_questions_keep_their_full_text(cfg, git_repo, tmp_path):
+    """Q-153 was cut at 190 chars by the runner before it ever reached the board."""
+    from swarm.status import render_status
+    text = ("Should DEMO.md and CONTRACTS.md both change? " * 40)[:1500].strip()
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "blocked", "summary": "stuck",
+                                                              "question": {"kind": "blocking", "text": text,
+                                                                           "options": [], "proceeding_with": ""}})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    ready_task(board)
+    r.run_task(board.list_tasks()[0])
+    q = board.list_questions()[0]
+    assert q.text == text
+    assert text in render_status(cfg, board.list_tasks(), [], board.list_questions(), utcnow())

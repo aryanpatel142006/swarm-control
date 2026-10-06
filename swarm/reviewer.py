@@ -10,7 +10,7 @@ from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board
 from .config import Config
-from .models import Question, Status, Task
+from .models import QUESTION_TEXT_CAP, Question, Status, Task
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA
 from .runner import STRUCTURED_PROVIDERS
@@ -158,7 +158,7 @@ class Reviewer:
         else:
             task.status = Status.BLOCKED
             self.board.create_question(Question(
-                id="", text=f"Reviewer escalated {task.id}: {v.summary}"[:190], kind="blocking",
+                id="", text=f"Reviewer escalated {task.id}: {v.summary}"[:QUESTION_TEXT_CAP], kind="blocking",
                 context=findings_to_feedback(v), options=["cut", "split", "accept as is", "human fix"],
                 impact="high", task_id=task.id,
                 asked_by=self.cfg.reviewer.agent if self.cfg.reviewer else "reviewer"))

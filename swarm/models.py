@@ -92,6 +92,9 @@ class Task:
         return ""
 
 
+QUESTION_TEXT_CAP = 6000   # a question's full text (Notion keeps it in the Details rich text; the title is a prefix)
+
+
 @dataclass
 class Question:
     id: str

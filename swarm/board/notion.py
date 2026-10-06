@@ -385,6 +385,7 @@ class NotionBoard:
     def __init__(self, client: NotionClient, ids: NotionIds):
         self.c = client
         self.ids = ids
+        self._details_ok: bool | None = None   # Questions has a Details column (checked once per process)
 
     # ----- tasks -----
     def next_task_id(self) -> str:
@@ -430,6 +431,28 @@ class NotionBoard:
         rows = self.c.query(self.ids.questions_ds)
         return next_id("Q", (np.r_rich(r["properties"].get("ID", {})) for r in rows))
 
+    def _questions_have_details(self) -> bool:
+        """Boards made before Oct 6 2026 have no Details column: add it once (the integration owns the schema).
+        If that fails, the full text goes into Context instead, so it is never lost to the title's length."""
+        if self._details_ok is None:
+            try:
+                props = (self.c.get_data_source(self.ids.questions_ds) or {}).get("properties") or {}
+                if "Details" not in props:
+                    self.c.request("PATCH", f"/data_sources/{self.ids.questions_ds}",
+                                   json={"properties": {"Details": {"rich_text": {}}}})
+                self._details_ok = True
+            except NotionError:
+                self._details_ok = False
+        return self._details_ok
+
+    def _question_props(self, q: Question, **kw) -> dict:
+        props = np.question_to_props(q, **kw)
+        if "Details" in props and not self._questions_have_details():
+            props.pop("Details")
+            if len(q.text) > np.QUESTION_TITLE_CHARS - len(q.id) - 3 and "Context" in props:
+                props["Context"] = np.p_rich(f"Full question: {q.text}\n\n{q.context}".strip())
+        return props
+
     def create_question(self, q: Question) -> Question:
         if not q.id:
             q.id = self.next_question_id()
@@ -437,7 +460,7 @@ class NotionBoard:
         if q.task_id:
             t = self.get_task(q.task_id)
             task_page = t.page_id if t else None
-        page = self.c.create_page(self.ids.questions_ds, np.question_to_props(q, task_page_id=task_page),
+        page = self.c.create_page(self.ids.questions_ds, self._question_props(q, task_page_id=task_page),
                                   icon=row_icon("question", q.kind))
         q.page_id = page["id"]
         return q
@@ -449,7 +472,7 @@ class NotionBoard:
         return qs
 
     def update_question(self, q: Question, fields: Iterable[str]) -> Question:
-        self.c.update_page(q.page_id, np.question_to_props(q, fields=fields))
+        self.c.update_page(q.page_id, self._question_props(q, fields=fields))
         return q
 
     # ----- agents -----
