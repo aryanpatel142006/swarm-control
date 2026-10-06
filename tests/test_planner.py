@@ -122,3 +122,27 @@ def test_scope_completion_and_missing_path_notes(cfg, git_repo, tmp_path):
                      "scope": ["hearing/server/session.py"], "host": "host-a"}])
     assert "config/tiers.yaml" in t.scope and "Not on main" in t.description and t.pinned_host == "host-a"
     assert parse_proposals({"tasks": [{"title": "x", "host": "host-a"}]}, tmp_path)[0]["host"] == "host-a"
+
+
+def test_gitignored_files_in_the_main_checkout_are_not_reported_missing(tmp_path):
+    """Q-227: eval/results/demo_regress_<stamp>.json sat in the shared results dir of the main checkout (gitignored);
+    the note 'Not on main' sent the worker looking for a file that existed."""
+    from swarm.policy import complete_scope, main_exists
+    main_wt, checkout = tmp_path / "mainwt", tmp_path / "repo"
+    (main_wt / "hearing").mkdir(parents=True)
+    (main_wt / "hearing" / "x.py").write_text("")
+    (checkout / "eval" / "results").mkdir(parents=True)
+    (checkout / "eval" / "results" / "demo_regress_1.json").write_text("{}")
+
+    class WS:
+        repo_root = checkout
+
+        def main_worktree(self):
+            return main_wt
+    exists = main_exists(WS())
+    _, notes = complete_scope(["hearing/x.py"], "compare with eval/results/demo_regress_1.json and eval/new.py", "",
+                              exists)
+    text = "\n".join(notes)
+    assert "Not tracked in git" in text and str(checkout / "eval/results/demo_regress_1.json") in text
+    assert "Not on main when this task was written: `eval/new.py`" in text
+    assert "demo_regress_1.json`. Create" not in text

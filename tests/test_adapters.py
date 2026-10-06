@@ -388,3 +388,41 @@ def test_parse_reset_at_wall_clock_zone_and_duration():
     assert parse_reset_at("try again in 2 hours 15 minutes", now) == now + timedelta(hours=2, minutes=15)
     assert parse_reset_at("try again at 5:03 AM", now) > now
     assert parse_reset_at("wait until 3 then go", now) is None
+
+
+def test_swarm_lock_waits_extend_the_run_deadline(tmp_path):
+    """Q-238/Q-241: a measurement task lost 5 of its 20 minutes waiting for the exclusive lock; the runner credits
+    the worker's swarm-lock waits back to the deadline (capped by the runner)."""
+    from swarm.adapters.generic import GenericAdapter
+    from swarm.config import AgentConfig
+    script = tmp_path / "slow.sh"
+    script.write_text("#!/bin/sh\nsleep 1.5\necho done\n")
+    script.chmod(0o755)
+    a = GenericAdapter(AgentConfig(name="g", provider="generic", host="h", command_template=f"{script} {{prompt_file}}"))
+    late = a.run(spec(tmp_path, schema=None, timeout_s=1, should_stop=lambda: False, stop_poll_s=0.05))
+    assert late.timed_out
+    ok = a.run(spec(tmp_path, schema=None, timeout_s=1, should_stop=lambda: False, stop_poll_s=0.05,
+                    extra_time_s=lambda: 3.0))
+    assert ok.ok and not ok.timed_out
+
+
+def test_runner_credit_reads_this_tasks_lock_waits(cfg, tmp_path, monkeypatch):
+    from swarm import hostlock
+    from swarm.runner import lock_wait_cap
+    monkeypatch.setattr(hostlock, "lock_dir", lambda project: tmp_path / "locks")
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import Task
+    from swarm.runner import Runner
+    r = Runner.__new__(Runner)
+    r.cfg = cfg
+    stale = tmp_path / "locks" / hostlock.WAITS_DIR / "T-5"
+    stale.mkdir(parents=True)
+    (stale / "old.json").write_text('{"pid": 1, "waited_s": 999}')    # from an earlier attempt: cleared
+    credit = r._lock_wait_credit(Task(id="T-5", title="x"), 1200)
+    assert credit() == 0
+    stale.mkdir(parents=True, exist_ok=True)
+    (stale / "w.json").write_text('{"pid": 1, "waited_s": 324}')
+    assert credit() == 324
+    (stale / "w2.json").write_text('{"pid": 1, "waited_s": 900}')
+    assert credit() == lock_wait_cap(1200) == 600
+    assert InMemoryBoard  # imported for parity with other runner tests

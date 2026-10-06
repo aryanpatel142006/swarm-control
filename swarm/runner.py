@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -90,6 +91,11 @@ def worker_env(wt: Path, task: Task, cfg: Config | None = None, host: str | None
     env.update({"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
                 "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)})
     return env
+
+
+def lock_wait_cap(timeout_s: int) -> int:
+    """At most this much wall-clock is added back for swarm-lock waits: half the size's limit."""
+    return int(timeout_s) // 2
 
 
 def _append_log(path: Path, section: str) -> None:
@@ -373,6 +379,54 @@ class Runner:
             self.request_restart()
 
     # ----- one task -----
+    def _semantic_merge_note(self, wt: Path, before: str) -> str:
+        """verify failed right after the harness merged main into the branch without a textual conflict. The usual
+        cause is semantic: main changed something this branch's code reads, or the reverse (Q-228: one task changed a
+        constant another task's code read implicitly; neither branch was wrong alone)."""
+        commits = [c for c in self.ws.git(wt, "log", "--no-merges", "--format=%h %s", f"{before}..HEAD",
+                                          check=False).out.splitlines() if c.strip()]
+        main_files = self.ws.git(wt, "diff", "--name-only", before, "HEAD", check=False).out.split()
+        lines = [f"Note from the harness: this verify ran right after the harness merged current main into the branch "
+                 f"({len(commits)} commit(s) from main, no textual conflict). If the failure is in code this task did "
+                 "not change, or in a test of it, it is probably a semantic merge conflict: main changed a constant, "
+                 "default, signature or file this branch relies on (or the reverse). Fix it on this branch; both "
+                 "sides are right on their own."]
+        if commits:
+            lines.append("Main commits merged: " + "; ".join(commits[:8]) + (" …" if len(commits) > 8 else ""))
+        if main_files:
+            lines.append("Files main changed: " + ", ".join(main_files[:15]) + (" …" if len(main_files) > 15 else ""))
+        return "\n".join(lines)
+
+    def _unmerged_references(self, task: Task) -> str:
+        """Tasks the text cites ("the mixer floor from T-096", "target agreement from T-100") that are not Done: their
+        work is not on main, so whatever the text attributes to them is not in this worktree (Q-236, Q-238)."""
+        ids = dict.fromkeys(re.findall(r"\bT-\d{2,}\b", f"{task.description}\n{task.acceptance}\n{task.feedback}"))
+        lines = []
+        for tid in ids:
+            if tid == task.id:
+                continue
+            try:
+                ref = self.board.get_task(tid)
+            except Exception:   # noqa: BLE001 - advice only
+                continue
+            if ref is None or ref.status in (Status.DONE, Status.CUT):
+                continue
+            dep = " (a dependency of this task)" if tid in task.depends_on else ""
+            lines.append(f"- {tid} \"{ref.title}\" is {ref.status.value}{dep}: its changes are NOT on main or in this "
+                         "worktree. Do not build on what the text says it provides; if the task needs it, say so in "
+                         "the report (blocked or a stub), and never copy its branch.")
+        return "\n".join(lines)
+
+    def _lock_wait_credit(self, task: Task, timeout_s: int):
+        """Seconds the worker's processes have waited in `swarm-lock` this run, capped: the adapter extends the
+        run's deadline by that much, so a queue behind other worktrees' verify_full does not eat the budget
+        (Q-238, Q-241: 5 of 20 minutes lost waiting for the exclusive measurement lock)."""
+        from .hostlock import clear_task_waits, lock_dir, task_wait_seconds
+        directory = lock_dir(self.cfg.project)
+        clear_task_waits(directory, task.id)
+        cap = lock_wait_cap(timeout_s)
+        return lambda: min(cap, task_wait_seconds(directory, task.id))
+
     def _claim_watch(self, task: Task):
         """A callable the adapter polls: True once the board no longer shows this run's claim, so a run that was
         reaped and handed to another agent stops burning tokens (Roomcast T-008 ran twice for that reason)."""
@@ -476,6 +530,7 @@ class Runner:
             for d in task.depends_on:
                 dep = self.board.get_task(d)
                 deps[d] = dep.title if dep else ""
+            references_note = self._unmerged_references(task)
             structured = agent_cfg.provider in STRUCTURED_PROVIDERS
             mcp = self.cfg.mcp_for(task.type, agent_cfg, task.importance)
             skills = self.cfg.skills_for(task.type, task.importance)
@@ -490,6 +545,8 @@ class Runner:
             turns = worker_turns(limit.turns, effort)
             limits_line = (f"Limits for this run: {limit.minutes} minutes wall-clock"
                            + (f", {turns} turns" if agent_cfg.provider == "claude" else "")
+                           + f" (time you spend waiting in `swarm-lock` for a verify slot or the exclusive measurement "
+                           f"lock is added back, up to {lock_wait_cap(limit.minutes * 60) // 60} more minutes)"
                            + ". A background job still running when you stop is lost: bound long evaluations to fit, "
                            "start them early, and record their command, PID and output path in `.swarm-run/notes.md`.")
             self._restore_carry(task.id, attempt, wt)
@@ -497,7 +554,8 @@ class Runner:
                                     structured_output_supported=structured, mcp=mcp, skills=skills,
                                     skill_tool=agent_cfg.provider == "claude", conflicts_note=conflicts_note,
                                     previous_notes=self._previous_carry(task.id, attempt, wt), limits_line=limits_line,
-                                    doc_root=wt, branch_log=self._branch_log(wt) if reuse else "")
+                                    doc_root=wt, branch_log=self._branch_log(wt) if reuse else "",
+                                    references_note=references_note)
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=turns,
@@ -505,7 +563,9 @@ class Runner:
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
                            extra_args=list(agent_cfg.extra_args), mcp=mcp, plugin_dirs=dirs,
                            mcp_servers=inline, settings=settings, should_stop=self._claim_watch(task),
-                           claim_nonce=task.claim_nonce, env=worker_env(wt, task, self.cfg, self.host))
+                           claim_nonce=task.claim_nonce, env=worker_env(wt, task, self.cfg, self.host),
+                           extra_time_s=self._lock_wait_credit(task, limit.minutes * 60))
+            self._mark_started(task.id, attempt)
             result = self.adapter_factory(agent_cfg).run(spec)
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
@@ -658,11 +718,16 @@ class Runner:
                 if text:
                     texts.append(text)
                     parts.append(f"From attempt {k}, {label}:\n\n```\n{text[:CARRY_CAP]}\n```")
-            if parts:
-                status = self._notes_files(d, "\n".join(texts), wt)
+            shared = self._new_shared_files(d)
+            if parts or shared:
+                status = self._notes_files(d, "\n".join(texts), wt) if texts else ""
                 if status:
                     parts.append(f"Files named above, as they are now (attempt {k} ended at the time shown for its "
                                  "logs; a file written later was finished by a background job):\n\n" + status)
+                if shared:
+                    parts.append(f"Files written to the project's shared data dirs since attempt {k} started (results "
+                                 "its background jobs produced, whether or not its notes mention them; Q-241):\n\n"
+                                 + shared)
                 return "\n\n".join(parts)
         return ""
 
@@ -687,6 +752,40 @@ class Runner:
             except OSError as e:
                 self.log(f"[{task_id}] could not restore the previous attempt's notes: {e}")
             return
+
+    def _mark_started(self, task_id: str, attempt: int) -> None:
+        try:
+            d = self.log_dir / task_id / f"attempt-{attempt}"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "started").write_text(str(time.time()))
+        except OSError:
+            pass
+
+    def _new_shared_files(self, attempt_dir: Path, cap: int = 20) -> str:
+        """Files in the config `env:` dirs (HEARING_RESULTS_DIR …) modified after that attempt started: Q-241's
+        attempt noted one finished run while its background job had written two result files."""
+        try:
+            since = float((attempt_dir / "started").read_text().strip())
+        except (OSError, ValueError):
+            return ""
+        found = []
+        for var, value in self.cfg.project_env().items():
+            root = Path(os.path.expanduser(value))
+            if not value.startswith(("/", "~")) or not root.is_dir():
+                continue
+            try:
+                for f in list(root.iterdir()) + [g for sub in root.iterdir() if sub.is_dir() for g in sub.iterdir()]:
+                    st = f.stat()
+                    if f.is_file() and st.st_mtime > since:
+                        found.append((st.st_mtime, var, f, st.st_size))
+            except OSError:
+                continue
+        found.sort(reverse=True)
+        lines = [f"- `{f}` (${var}) {size} bytes, written {datetime.fromtimestamp(mt, timezone.utc):%H:%M:%S} UTC"
+                 for mt, var, f, size in found[:cap]]
+        if len(found) > cap:
+            lines.append(f"- … {len(found) - cap} more")
+        return "\n".join(lines)
 
     def _notes_files(self, attempt_dir: Path, text: str, wt: Path | None) -> str:
         from .feedback import notes_files_status
@@ -772,6 +871,7 @@ class Runner:
             changed = self.ws.changed_files(wt)
 
         markers: list[str] = []
+        merged_from = ""   # branch HEAD before the pre-verify merge brought main in (for Q-228's note)
         if changed:
             # main often moves while a worker runs; verify and review the branch on top of current main (Q-097,
             # Q-121). Merged, not rebased (see Workspace.merge_main). A conflict here is aborted and left to the
@@ -781,9 +881,12 @@ class Runner:
             markers = self.ws.conflict_marker_files(wt)
             try:
                 if not markers and not self.ws.rebase_in_progress(wt):
+                    before = self.ws.git(wt, "rev-parse", "HEAD", check=False).out.strip()
                     ok, conflicts, _ = self.ws.merge_main(wt, keep_conflicts=False)
                     if ok:
                         changed = self.ws.changed_files(wt)
+                        after = self.ws.git(wt, "rev-parse", "HEAD", check=False).out.strip()
+                        merged_from = before if before and after and before != after else ""
                     else:
                         self.log(f"[{task.id}] pre-verify merge of main conflicted ({', '.join(conflicts)}); the merger will ask")
             except RuntimeError as e:   # a failed fetch must not lose the run's result
@@ -795,6 +898,8 @@ class Runner:
             # the failing step first, each section capped on its own (Q-168: the ruff errors were cut off)
             verify_tail = verify_feedback(verify.out + ("\n" + verify.err if verify.err else ""),
                                           script=self.cfg.verify.fast or "verify", code=verify.code)
+            if merged_from:
+                verify_tail = self._semantic_merge_note(wt, merged_from) + "\n\n" + verify_tail
         else:
             verify_tail = verify.tail(1500) if verify is not None else ""
         placeholders = self._placeholder_hits(wt) if changed and verify_ok is not False and not markers else []

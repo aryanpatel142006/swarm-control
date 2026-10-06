@@ -123,6 +123,7 @@ class RunSpec:
     stop_poll_s: float = 5.0
     claim_nonce: str = ""                              # the claim this run holds on the board (for logs and tests)
     env: dict = field(default_factory=dict)            # extra environment for this run (PYTHONPATH, SWARM_TASK_ID)
+    extra_time_s: Callable[[], float] | None = None    # seconds added to timeout_s (the worker's swarm-lock waits)
 
 
 class Adapter:
@@ -166,8 +167,13 @@ class Adapter:
         for th in readers:
             th.start()
         stopped = False
+        def extra() -> float:
+            try:
+                return max(0.0, float(spec.extra_time_s())) if spec.extra_time_s else 0.0
+            except Exception:   # noqa: BLE001 - a broken credit never kills a run early
+                return 0.0
         while proc.poll() is None:
-            if time.monotonic() > deadline:
+            if time.monotonic() > deadline and time.monotonic() > deadline + extra():
                 stop(signal.SIGKILL)
                 proc.wait()
                 for th in readers:

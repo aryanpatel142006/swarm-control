@@ -92,7 +92,8 @@ def tools_section(task: Task, mcp: list[str], skills: list[str], skill_tool: boo
 def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: dict[str, str],
                    structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = (),
                    skill_tool: bool = True, conflicts_note: str = "", previous_notes: str = "",
-                   limits_line: str = "", doc_root: Path | None = None, branch_log: str = "") -> str:
+                   limits_line: str = "", doc_root: Path | None = None, branch_log: str = "",
+                   references_note: str = "") -> str:
     import platform
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
@@ -110,6 +111,8 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
                                                    for d in task.depends_on))
     parts += ["", "### Description", "", task.description.strip() or "(none)", "", "### Acceptance criteria", "",
               task.acceptance.strip() or "(none given; make it work and test it)"]
+    if references_note.strip():
+        parts += ["", "### Tasks this text cites that are not merged yet", "", references_note.strip()]
     if conflicts_note.strip():
         parts += ["", "## Merge conflicts: resolve these first", "", conflicts_note.strip()]
     if task.feedback.strip():

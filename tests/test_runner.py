@@ -958,7 +958,7 @@ def test_notes_and_draft_report_reach_the_next_attempt_verbatim(cfg, git_repo, t
     p = adapter.prompts[1]
     assert "## Notes from the previous attempt" in p
     assert "- replay p50 = 812 ms (eval.replay --clip demo)" in p and "DRAFT: replay measured" in p
-    assert "Limits for this run: 20 minutes wall-clock, 100 turns." in p      # resumed one tier up: opus/high
+    assert "Limits for this run: 20 minutes wall-clock, 100 turns (time you spend waiting in `swarm-lock`" in p and "up to 10 more minutes)." in p      # resumed one tier up: opus/high
 
 
 def test_placeholder_tokens_in_changed_docs_send_the_task_back(cfg, git_repo, tmp_path):
@@ -1153,3 +1153,61 @@ def test_finished_attempt_sent_back_gets_its_report_and_notes_restored(cfg, git_
     r.run_task(board.get_task(t.id))
     assert "eval pair1 F1 0.91" in seen["notes"] and "association evals done" in seen["report"]
     assert "association evals done" in adapter.prompts[1] and "update this report instead of rebuilding" in adapter.prompts[1]
+
+
+def test_prompt_flags_cited_tasks_that_are_not_merged(cfg, git_repo, tmp_path):
+    """Q-236/Q-238: 'with the mixer floor from T-096' and 'target agreement from T-100' named work not on main."""
+    adapter = FakeAdapter(files={"src/a.py": "x\n"},
+                          structured={"status": "done", "summary": "ok", "files_changed": ["src/a.py"]})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    floor = ready_task(board, title="Mixer floor", status=Status.REVIEW)
+    merged = ready_task(board, title="Old work", status=Status.DONE)
+    t = ready_task(board, description=f"Use the mixer floor from {floor.id}; build on {merged.id}.")
+    r.run_task(board.get_task(t.id))
+    p = adapter.prompts[0]
+    assert "### Tasks this text cites that are not merged yet" in p
+    assert f'- {floor.id} "Mixer floor" is Review' in p and f"- {merged.id}" not in p
+
+
+def test_verify_failing_right_after_a_clean_merge_of_main_says_it_may_be_semantic(cfg, git_repo, tmp_path):
+    """Q-228: verify failed after the harness merged main (T-088) into T-092: a constant one task changed and the
+    other task's code read. No textual conflict, so the worker saw a bare failure."""
+    adapter = FakeAdapter(files={"src/a.py": "x\n"}, structured={"status": "done", "summary": "ok"})
+    orig = adapter.run
+
+    def run(spec):
+        out = orig(spec)
+        _git(git_repo, "checkout", "-q", "main")
+        (git_repo / "src").mkdir(exist_ok=True)
+        (git_repo / "src" / "const.py").write_text("LIMIT = 2\n")
+        (git_repo / "scripts" / "verify_fast.sh").write_text(
+            "#!/bin/sh\nif [ -f src/a.py ] && [ -f src/const.py ]; then echo 'tests: FAIL a.py reads LIMIT'; exit 1; fi\n")
+        _git(git_repo, "add", "-A"); _git(git_repo, "commit", "-qm", "T-088 changes LIMIT")
+        _git(git_repo, "push", "-q", "origin", "main")
+        return out
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    fb = board.get_task(t.id).feedback
+    assert "semantic merge conflict" in fb and "T-088 changes LIMIT" in fb and "src/const.py" in fb
+
+
+def test_resume_lists_results_written_to_shared_dirs_since_the_last_attempt(cfg, git_repo, tmp_path):
+    """Q-241: attempt 1's notes said one run had finished; its background job had written two result files to
+    $HEARING_RESULTS_DIR, which the retry never looked at."""
+    import time as _t
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "old.json").write_text("{}")
+    cfg.env = {"HEARING_RESULTS_DIR": str(results), "NOT_A_DIR": "fast"}
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    d = r.log_dir / "T-9" / "attempt-1"
+    d.mkdir(parents=True)
+    (d / "started").write_text(str(_t.time() + 0.5))
+    _t.sleep(0.6)
+    (results / "demo_regress_132522.json").write_text("{}")
+    (results / "demo_regress_132736.json").write_text("{}")
+    carry = r._previous_carry("T-9", 2)
+    assert "shared data dirs since attempt 1 started" in carry
+    assert "demo_regress_132522.json" in carry and "demo_regress_132736.json" in carry and "old.json" not in carry

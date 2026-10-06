@@ -18,13 +18,23 @@ became coin flips (Q-136, Q-175, Q-177, Q-185, Q-189, Q-190, Q-191, Q-193, Q-195
 flock works on a read-only descriptor on macOS and Linux, so a sandboxed CLI that may not write outside its
 worktree can still take a slot: the runner creates the files beforehand.
 
-CLI: `python -m swarm.hostlock [--exclusive] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's).
+Waiting is visible and accounted for (Q-229, Q-232, Q-238, Q-241: measurements waited 5-7 min behind other
+worktrees' verify_full without knowing why, inside 20-40 minute runs):
+- a holder writes `verify-<i>.holder` (pid, task, label, start), and a waiter's log names who holds the slots;
+- an exclusive waiter drops `exclusive-pending-<pid>`, and new verifies queue behind it instead of taking the slots
+  it is waiting for (writer preference: it waits for running verifies only, never for ones that start later);
+- a worker's wait is written to `waits/<task>/<pid>-<ns>.json`; the runner adds that time back to the run's
+  wall-clock limit (capped), so a queue does not eat the task's budget.
+
+CLI: `python -m swarm.hostlock [--exclusive] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's);
+`swarm-lock --snippet` prints the re-exec lines a project's verify script needs to take part (Q-224).
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -38,6 +48,14 @@ HELD_ENV = "SWARM_VERIFY_SLOT_HELD"
 CMD_ENV = "SWARM_VERIFY_LOCK"          # absolute path of the `swarm-lock` wrapper script
 DEFAULT_SLOTS = 2
 DEFAULT_WAIT_S = 1800                  # after this a verify runs without a slot (logged) rather than never
+PENDING_PREFIX = "exclusive-pending-"
+WAITS_DIR = "waits"
+REPORT_EVERY_S = 300                   # a long wait repeats who holds the slots this often
+SNIPPET = """# Under a swarm runner: wait for one of this machine's verify slots (swarm-control hostlock)
+if [ -n "${SWARM_VERIFY_LOCK:-}" ] && [ -z "${SWARM_VERIFY_SLOT_HELD:-}" ] && [ -x "${SWARM_VERIFY_LOCK}" ]; then
+  exec "${SWARM_VERIFY_LOCK}" -- bash "$0" "$@"
+fi
+"""
 
 
 def lock_dir(project: str) -> Path:
@@ -59,12 +77,102 @@ def _open(path: Path) -> int:
         return os.open(str(path), os.O_RDONLY)   # sandboxed: the file exists, flock still works read-only
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError, ValueError):
+        return False
+
+
+def _write_json(path: Path, data: dict) -> None:
+    try:
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except OSError:
+        pass   # a read-only sandbox cannot write it; the lock itself still works
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _me(label: str, exclusive: bool) -> dict:
+    return {"pid": os.getpid(), "task": os.environ.get("SWARM_TASK_ID", ""), "label": label,
+            "exclusive": exclusive, "started": time.time()}
+
+
+def _unlink_if_mine(path: Path) -> None:
+    data = _read_json(path)
+    if data is not None and data.get("pid") == os.getpid():
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def holders(directory: Path | str, slots: int) -> list[dict]:
+    """Who holds the slots now (live processes only; a crashed holder's file is ignored)."""
+    out, seen = [], set()
+    for i in range(max(1, slots)):
+        h = _read_json(Path(directory) / f"verify-{i}.holder")
+        if h and isinstance(h.get("pid"), int) and _alive(h["pid"]) and h["pid"] not in seen:
+            seen.add(h["pid"])
+            out.append(h)
+    return out
+
+
+def pending_exclusive(directory: Path | str) -> list[dict]:
+    out = []
+    for f in sorted(Path(directory).glob(PENDING_PREFIX + "*")):
+        h = _read_json(f)
+        if h and isinstance(h.get("pid"), int) and h["pid"] != os.getpid() and _alive(h["pid"]):
+            out.append(h)
+    return out
+
+
+def describe(entries: list[dict], now: float | None = None) -> str:
+    now = now or time.time()
+    bits = []
+    for h in entries:
+        mins = max(0.0, (now - float(h.get("started") or now)) / 60)
+        who = h.get("task") or "harness"
+        bits.append(f"{who} {h.get('label') or 'verify'}{' (exclusive)' if h.get('exclusive') else ''} "
+                    f"(pid {h.get('pid')}, {mins:.0f} min)")
+    return ", ".join(bits) or "unknown holders"
+
+
+def task_wait_seconds(directory: Path | str, task_id: str, now: float | None = None) -> float:
+    """Seconds this task's processes have spent waiting for slots (finished waits plus ones still waiting)."""
+    now = now or time.time()
+    total = 0.0
+    for f in (Path(directory) / WAITS_DIR / task_id).glob("*.json"):
+        d = _read_json(f) or {}
+        total += float(d.get("waited_s") or 0)
+        since = d.get("waiting_since")
+        if since and isinstance(d.get("pid"), int) and _alive(d["pid"]):
+            total += max(0.0, now - float(since))
+    return total
+
+
+def clear_task_waits(directory: Path | str, task_id: str) -> None:
+    import shutil
+    shutil.rmtree(Path(directory) / WAITS_DIR / task_id, ignore_errors=True)
+
+
 @contextlib.contextmanager
 def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive: bool = False,
                 wait_s: float = DEFAULT_WAIT_S, poll_s: float = 1.0, log: Callable[[str], None] | None = None,
-                sleep: Callable[[float], None] = time.sleep, label: str = "verify") -> Iterator[bool]:
+                sleep: Callable[[float], None] = time.sleep, label: str = "verify",
+                record: Path | None = None) -> Iterator[bool]:
     """Hold one slot (or all of them with exclusive=True). Yields True when held, False when the wait ran out and
-    the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once."""
+    the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once. `record` is a file
+    the wait is written to (the runner adds a worker's waits back to its wall-clock limit)."""
     if os.environ.get(HELD_ENV):
         yield True
         return
@@ -75,52 +183,96 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
     except OSError:
         pass   # read-only sandbox: the runner created the files; _open falls back to O_RDONLY
     fds: list[int] = []
+    held_idx: list[int] = []
     deadline = time.monotonic() + wait_s
-    announced = False
+    started = time.monotonic()
+    me = _me(label, exclusive)
+    pending = directory / f"{PENDING_PREFIX}{os.getpid()}"
+    state = {"announced": False, "last_report": 0.0, "waiting": False}
+
+    def waiting(reason: str) -> None:
+        nowm = time.monotonic()
+        if not state["waiting"]:
+            state["waiting"] = True
+            if record is not None:
+                _write_json(record, {"pid": os.getpid(), "waiting_since": time.time(), "label": label})
+        if log and (not state["announced"] or nowm - state["last_report"] >= REPORT_EVERY_S):
+            prefix = reason if not state["announced"] else f"still waiting after {nowm - started:.0f} s; {reason}"
+            log(f"{label}: {prefix}")
+            state["announced"], state["last_report"] = True, nowm
+
+    def own_task_note(entries: list[dict]) -> str:
+        mine = [h for h in entries if me["task"] and h.get("task") == me["task"] and h.get("exclusive")]
+        return (" Your own task holds the exclusive measurement lock: this waits until that measurement ends; do not "
+                "run verify while your measurement runs (rule 18)." if mine else "")
+
     try:
         if exclusive:
+            _write_json(pending, me)
             for i in range(slots):
                 fd = _open(directory / f"verify-{i}.lock")
                 fds.append(fd)
                 while True:
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        held_idx.append(i)
                         break
                     except BlockingIOError:
                         if time.monotonic() > deadline:
                             raise TimeoutError
-                        if not announced and log:
-                            log(f"{label}: waiting for the machine to be free of verify runs (exclusive, {slots} slots)")
-                            announced = True
+                        busy = [h for h in holders(directory, slots) if h.get("pid") != os.getpid()]
+                        waiting(f"waiting for the machine to be free of verify runs (exclusive, {slots} slots); "
+                                f"running now: {describe(busy)}; new verifies queue behind this measurement")
                         sleep(poll_s)
-            yield True
-            return
-        while True:
-            for i in range(slots):
-                fd = _open(directory / f"verify-{i}.lock")
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fds.append(fd)
-                    break
-                except BlockingIOError:
-                    os.close(fd)
-            if fds:
-                break
-            if time.monotonic() > deadline:
-                raise TimeoutError
-            if not announced and log:
-                log(f"{label}: all {slots} verify slots on this machine are busy; waiting")
-                announced = True
-            sleep(poll_s)
+            with contextlib.suppress(OSError):
+                pending.unlink()
+        else:
+            while True:
+                queued = pending_exclusive(directory)
+                if not queued:
+                    for i in range(slots):
+                        fd = _open(directory / f"verify-{i}.lock")
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fds.append(fd)
+                            held_idx.append(i)
+                            break
+                        except BlockingIOError:
+                            os.close(fd)
+                    if fds:
+                        break
+                if time.monotonic() > deadline:
+                    raise TimeoutError
+                if queued:
+                    waiting(f"a measurement is waiting for the machine ({describe(queued)}); this verify runs after "
+                            f"it.{own_task_note(queued)}")
+                else:
+                    busy = holders(directory, slots)
+                    waiting(f"all {slots} verify slots on this machine are busy ({describe(busy)}); waiting."
+                            f"{own_task_note(busy)}")
+                sleep(poll_s)
+        for i in held_idx:
+            _write_json(directory / f"verify-{i}.holder", me)
+        if record is not None and state["waiting"]:
+            _write_json(record, {"pid": os.getpid(), "waited_s": time.monotonic() - started, "label": label})
         yield True
     except TimeoutError:
         if log:
             log(f"{label}: no verify slot after {int(wait_s)} s; running without one")
         for fd in fds:
             os.close(fd)
-        fds = []
+        fds, held_idx = [], []
+        with contextlib.suppress(OSError):
+            pending.unlink()
+        if record is not None:
+            _write_json(record, {"pid": os.getpid(), "waited_s": time.monotonic() - started, "label": label})
         yield False
     finally:
+        if exclusive:
+            with contextlib.suppress(OSError):
+                pending.unlink()
+        for i in held_idx:
+            _unlink_if_mine(directory / f"verify-{i}.holder")
         for fd in fds:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -165,8 +317,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dir", default=os.environ.get(DIR_ENV, ""))
     ap.add_argument("--slots", type=int, default=int(os.environ.get(SLOTS_ENV) or DEFAULT_SLOTS))
     ap.add_argument("--wait", type=float, default=DEFAULT_WAIT_S, help="seconds to wait before running anyway")
+    ap.add_argument("--snippet", action="store_true",
+                    help="print the lines that make a project's verify script take a slot, and exit")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
+    if a.snippet:
+        print(SNIPPET, end="")
+        return 0
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd:
         ap.error("no command given (swarm-lock [--exclusive] -- <cmd> …)")
@@ -174,11 +331,22 @@ def main(argv: list[str] | None = None) -> int:
         return subprocess.call(cmd)
     log = lambda m: print(f"[swarm-lock] {m}", file=sys.stderr, flush=True)   # noqa: E731
     started = time.monotonic()
-    with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log,
-                     label="measurement" if a.exclusive else "verify") as held:
+    task = os.environ.get("SWARM_TASK_ID", "")
+    record = None
+    if task:
+        try:
+            wdir = Path(a.dir) / WAITS_DIR / task
+            wdir.mkdir(parents=True, exist_ok=True)
+            record = wdir / f"{os.getpid()}-{time.time_ns()}.json"
+        except OSError:
+            record = None
+    label = ("measurement" if a.exclusive else "verify") + f": {' '.join(cmd)[:80]}"
+    with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
+                     record=record) as held:
         waited = time.monotonic() - started
         if waited >= 5:
-            log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}")
+            log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"
+                + (" (the runner adds this back to the run's time limit)" if record else ""))
         env = {**os.environ, HELD_ENV: "1"} if held else dict(os.environ)
         try:
             return subprocess.call(cmd, env=env)

@@ -131,3 +131,66 @@ def test_template_verify_fast_takes_a_slot_and_ends_with_its_verdict(tmp_path):
                          timeout=60)
     assert out.returncode == 0 and out.stdout.strip().splitlines()[-1] == "verify_fast: OK"
     assert (d / "verify-0.lock").exists()            # it went through swarm-lock
+
+
+# ----- visible, prioritised, accounted waits (Q-229, Q-232, Q-238, Q-241) -----
+def test_new_verifies_queue_behind_a_waiting_measurement(tmp_path):
+    d = tmp_path / "locks"
+    hostlock.ensure_lock_files(d, 2)
+    other = subprocess.Popen(["sleep", "30"])      # stands in for another worktree's `swarm-lock --exclusive`
+    try:
+        (d / f"{hostlock.PENDING_PREFIX}{other.pid}").write_text(
+            '{"pid": %d, "task": "T-102", "label": "measurement: demo_regress", "exclusive": true, "started": %f}'
+            % (other.pid, time.time()))
+        logs = []
+        with verify_slot(d, 2, wait_s=0.2, poll_s=0.05, log=logs.append) as v:
+            assert v is False                      # both slots are free, but the measurement goes first
+        assert any("measurement is waiting" in m and "T-102" in m for m in logs)
+    finally:
+        other.kill()
+        other.wait()
+    with verify_slot(d, 2, wait_s=0.5, poll_s=0.05) as v:
+        assert v is True                           # a dead waiter's marker is ignored
+
+
+def test_waiters_are_told_who_holds_the_slots_and_their_own_measurement(tmp_path, monkeypatch):
+    d = tmp_path / "locks"
+    monkeypatch.setenv("SWARM_TASK_ID", "T-102")
+    with verify_slot(d, 1, exclusive=True, label="measurement: replay"):
+        assert (d / "verify-0.holder").exists()
+        logs = []
+        with verify_slot(d, 1, wait_s=0.2, poll_s=0.05, log=logs.append):
+            pass
+    assert any("T-102 measurement: replay (exclusive)" in m and "pid" in m for m in logs)
+    assert any("Your own task holds the exclusive measurement lock" in m for m in logs)
+    assert not (d / "verify-0.holder").exists()    # released holders clean up
+
+
+def test_a_tasks_wait_is_recorded_for_the_runner(tmp_path):
+    d = tmp_path / "locks"
+    rec_dir = d / hostlock.WAITS_DIR / "T-7"
+    rec_dir.mkdir(parents=True)
+
+    def waiter():
+        with verify_slot(d, 1, wait_s=5, poll_s=0.02, record=rec_dir / "w.json"):
+            pass
+
+    with verify_slot(d, 1):
+        th = threading.Thread(target=waiter)
+        th.start()
+        time.sleep(0.3)
+        assert hostlock.task_wait_seconds(d, "T-7") >= 0.2   # counted while still waiting
+    th.join(5)
+    assert hostlock.task_wait_seconds(d, "T-7") >= 0.25
+    hostlock.clear_task_waits(d, "T-7")
+    assert hostlock.task_wait_seconds(d, "T-7") == 0
+
+
+def test_snippet_matches_the_template(capsys):
+    from pathlib import Path
+    assert hostlock.main(["--snippet"]) == 0
+    out = capsys.readouterr().out
+    assert "SWARM_VERIFY_LOCK" in out and 'exec "${SWARM_VERIFY_LOCK}" -- bash "$0" "$@"' in out
+    template = (Path(hostlock.__file__).parent / "template" / "scripts" / "verify_fast.sh").read_text()
+    for line in out.splitlines()[1:]:
+        assert line in template

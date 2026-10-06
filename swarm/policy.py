@@ -70,8 +70,17 @@ def complete_scope(scope: list[str], description: str, acceptance: str,
                 scope.append(p)
     if exists is not None:
         literal = [g for g in scope if "*" not in g and "?" not in g]
-        missing = [p for p in dict.fromkeys(literal + mentioned_paths(description) + mentioned_paths(acceptance))
-                   if not exists(p)]
+        missing, local = [], []
+        for p in dict.fromkeys(literal + mentioned_paths(description) + mentioned_paths(acceptance)):
+            found = exists(p)
+            if isinstance(found, str):     # not in git, but in the main checkout: gitignored shared data (Q-227)
+                local.append((p, found))
+            elif not found:
+                missing.append(p)
+        if local:
+            notes.append("Not tracked in git (gitignored shared data in the main checkout, absent from worktrees): "
+                         + ", ".join(f"`{p}` at `{a}`" for p, a in local)
+                         + ". Read them at those absolute paths (or through the project's env dirs).")
         if missing:
             notes.append("Not on main when this task was written: " + ", ".join(f"`{p}`" for p in missing)
                          + ". Create them if this task produces them; if another task does, check it merged first.")
@@ -87,12 +96,22 @@ def apply_task_lint(task: Task, exists=None) -> list[str]:
 
 
 def main_exists(ws):
-    """`exists` callback against a fresh worktree of main, or None when main cannot be checked out."""
+    """`exists` callback against a fresh worktree of main, or None when main cannot be checked out. A path that is
+    not on main but exists in the main checkout (a gitignored results file or fixture) returns its absolute path:
+    the old "Not on main" note sent a worker hunting for a file that sat in HEARING_RESULTS_DIR (Q-227)."""
     try:
         wt = ws.main_worktree()
     except Exception:  # noqa: BLE001 - the lint is advice; never block task creation on it
         return None
-    return lambda p: (wt / p).exists()
+    root = Path(getattr(ws, "repo_root", "") or "")
+
+    def exists(p: str):
+        if (wt / p).exists():
+            return True
+        if str(root) and (root / p).exists():
+            return str(root / p)
+        return False
+    return exists
 
 
 _ROOT_PATH = re.compile(r"(?:^|(?<=[\s'\"(`=]))(/[\w.<>{}@+-]+)((?:/[\w.<>{}@+-]+)*\.[A-Za-z0-9]{1,6})?(?=$|[\s'\"),`;:]|\.(?:\s|$))",
