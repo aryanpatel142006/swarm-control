@@ -68,6 +68,9 @@ def is_available(agent: AgentConfig, row: AgentRow | None, *, importance: str, n
 
 def route(task: Task, cfg: Config, ctx: RouteContext, *, exclude: set[str] | None = None) -> tuple[str, str, str | None]:
     agents = [a for a in cfg.agents.values() if not exclude or a.name not in exclude] or list(cfg.agents.values())
+    if task.pinned_host:   # a pinned task only ever goes to that host's agents (unless none is configured)
+        agents = [a for a in agents if a.host == task.pinned_host] \
+            or [a for a in cfg.agents.values() if a.host == task.pinned_host] or agents
     candidates = [a for a in agents
                   if is_available(a, ctx.rows.get(a.name), importance=task.importance, now=ctx.now)]
     if not candidates:   # nobody fully available: prefer agents that are alive (capped or cooling) over dead ones

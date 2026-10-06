@@ -98,3 +98,27 @@ def test_propose_records_its_run_in_the_ledger(cfg, git_repo, tmp_path):
     rows = ledger._rows()
     assert len(rows) == 1 and rows[0]["task"] == "plan:M1" and rows[0]["cost"] == 0.42 and rows[0]["model"] == "opus"
     assert (cfg.repo_root / ".swarm" / "tasks.proposed.json").exists()
+
+
+def test_scope_completion_and_missing_path_notes(cfg, git_repo, tmp_path):
+    """Q-096/Q-118/Q-122/Q-123/Q-127: Scope left out files the acceptance needed, or named files not on main."""
+    from swarm.policy import complete_scope, mentioned_paths
+    acc = ("- `scripts/demo.sh --simple` opens it; hearing/server/protocol.py carries the field; "
+           "see ~/.npm/x/y.js, /tmp/a.py, https://h.io/a/b.html, tests/test_tiers*.py, docs/CONTRACTS.md, v1.2/3.4")
+    assert mentioned_paths(acc) == ["scripts/demo.sh", "hearing/server/protocol.py", "docs/CONTRACTS.md"]
+    scope, notes = complete_scope(["hearing/server/session.py"], "wire hearing/server/tap.py", acc,
+                                  exists=lambda p: p != "hearing/server/tap.py")
+    assert scope == ["hearing/server/session.py", "scripts/demo.sh", "hearing/server/protocol.py"]
+    assert any("docs/CONTRACTS.md" in n and "shared doc" in n for n in notes)
+    assert any("`hearing/server/tap.py`" in n and "Not on main" in n for n in notes)
+    # whole-repo scope stays whole-repo
+    assert complete_scope([], "", acc)[0] == []
+    # Planner.apply runs the lint against main and carries a host pin
+    board = InMemoryBoard()
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    pl = Planner(cfg, board, ws, log=lambda *a: None, prompt_text="R")
+    [t] = pl.apply([{"title": "Tiers default", "description": "d", "acceptance": "config/tiers.yaml default is 2 s",
+                     "type": "backend", "importance": "normal", "size": "S", "milestone": "M1",
+                     "scope": ["hearing/server/session.py"], "host": "host-a"}])
+    assert "config/tiers.yaml" in t.scope and "Not on main" in t.description and t.pinned_host == "host-a"
+    assert parse_proposals({"tasks": [{"title": "x", "host": "host-a"}]}, tmp_path)[0]["host"] == "host-a"

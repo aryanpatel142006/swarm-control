@@ -439,3 +439,14 @@ def test_accept_as_is_answer_to_a_reviewer_escalation_merges(cfg, git_repo, tmp_
                                    answer="accept as is"))
     assert srv.relay() == 1
     assert board.get_task(t.id).status is Status.MERGE_READY
+
+
+def test_rebalance_never_moves_a_host_pinned_task_off_its_host(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.upsert_agent(AgentRow(name="fake-b", status="idle", last_heartbeat=utcnow()))
+    for i in range(3):
+        board.create_task(Task(id="", title=f"q{i}", status=Status.READY, agent="codex-a", type="ml_audio",
+                               flags=["host:host-a"]))
+    board.create_task(Task(id="", title="busy", status=Status.RUNNING, agent="codex-a", type="ml_audio"))
+    srv.rebalance()
+    assert all(board.get_task(f"T-00{i}").agent != "fake-b" for i in (1, 2, 3))

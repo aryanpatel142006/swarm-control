@@ -378,7 +378,8 @@ class Server:
                 saturated = running.get(t.agent, 0) >= donor.parallel
                 return (mine >= theirs and ctx.queue_depth.get(t.agent, 0) >= 2) or (mine >= 3 and saturated)
             candidates = [t for t in ready if t.agent and t.agent != idle_agent.name and t.importance != "critical"
-                          and t.agent in self.cfg.agents and may_take(t)]
+                          and t.agent in self.cfg.agents and may_take(t)
+                          and (not t.pinned_host or idle_agent.host == t.pinned_host)]
             if not candidates:
                 continue
             # smallest strength gap first, then the one furthest back in the donor's queue

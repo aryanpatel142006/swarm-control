@@ -61,3 +61,15 @@ def test_tools_section_asks_for_tools_used_in_the_report(cfg):
     p = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
                        mcp=["playwright"], skills=[])
     assert "tools_used" in p
+
+
+def test_small_tasks_get_skills_as_optional(cfg):
+    """Q-123/Q-127: an S wiring change was told to invoke large frontend guides it did not need."""
+    t = Task(id="T-064", title="Toggle", type="frontend", importance="normal", size="S")
+    p = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                       skills=["frontend-design"])
+    assert "Skills available for this task" in p and "small task" in p
+    t.size = "M"
+    p2 = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                        skills=["frontend-design"])
+    assert "Skills to invoke before you start" in p2

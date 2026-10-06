@@ -66,7 +66,11 @@ def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
     if mcp:
         parts.append("- MCP servers enabled for this run: " + ", ".join(mcp)
                      + ". Use them (docs lookup, browser checks, component search) instead of guessing.")
-    if skills:
+    if skills and task.size == "S":   # a small wiring change paid ~6k tokens of general guides it never used (Q-123, Q-127)
+        parts.append("- Skills available for this task: " + ", ".join(f"`{s}`" for s in skills)
+                     + ". This is a small task: invoke only the ones whose area your change actually touches, and "
+                       "read only the sections you need.")
+    elif skills:
         parts.append("- Skills to invoke before you start the relevant work: "
                      + ", ".join(f"`{s}`" for s in skills)
                      + ". Invoke them with the Skill tool (or `/<name>`) and follow them.")

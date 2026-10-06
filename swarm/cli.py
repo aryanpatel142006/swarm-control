@@ -346,7 +346,8 @@ def apply_proposals(file: Path = typer.Argument(Path(".swarm/tasks.proposed.json
 def add(title: str, type: str = typer.Option("backend", "--type"), importance: str = typer.Option("normal"),
         size: str = typer.Option("M"), milestone: str = typer.Option(""), description: str = typer.Option(""),
         acceptance: str = typer.Option(""), depends: list[str] = typer.Option([], "--depends"),
-        scope: list[str] = typer.Option([], "--scope"), priority: int = typer.Option(100)):
+        scope: list[str] = typer.Option([], "--scope"), priority: int = typer.Option(100),
+        host: str = typer.Option("", "--host", help="pin to agents on this host (its GPU/MPS, weights, results)")):
     """Add one task, routed."""
     from .router import context_from_board, route
     if type not in TASK_TYPES or importance not in IMPORTANCES or size not in SIZES:
@@ -354,7 +355,11 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
     board = make_board(_cfg(), state.memory)
     done = {t.id for t in board.list_tasks(status=[Status.DONE])}
     t = Task(id="", title=title, description=description, acceptance=acceptance, type=type, importance=importance,
-             size=size, milestone=milestone, depends_on=list(depends), scope=list(scope), priority=priority)
+             size=size, milestone=milestone, depends_on=list(depends), scope=list(scope), priority=priority,
+             flags=[f"host:{host}"] if host else [])
+    from .policy import apply_task_lint, main_exists
+    for n in apply_task_lint(t, None if state.memory else main_exists(_workspace(_cfg()))):
+        console.print(f"lint: {n}")
     t.status = Status.READY if all(d in done for d in t.depends_on) else Status.BACKLOG
     t.agent, t.model, t.effort = route(t, _cfg(), context_from_board(board, _cfg()))
     t = board.create_task(t)

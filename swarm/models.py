@@ -82,6 +82,15 @@ class Task:
     def title_with_id(self) -> str:
         return f"{self.id} · {self.title}"
 
+    @property
+    def pinned_host(self) -> str:
+        """`host:<name>` in flags pins the task to agents on that host (its weights, results, GPU or MPS live
+        there). T-040 and T-053 needed laptop-a and ran on a CPU-only laptop instead (Q-080, Q-110)."""
+        for f in self.flags:
+            if f.startswith("host:") and f[5:].strip():
+                return f[5:].strip()
+        return ""
+
 
 @dataclass
 class Question:

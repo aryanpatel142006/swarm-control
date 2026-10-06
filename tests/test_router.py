@@ -128,3 +128,13 @@ def test_critical_work_never_goes_to_an_offline_agent(cfg):
             "claude-a": AgentRow(name="claude-a", status="idle", last_heartbeat=now)}
     t = Task(id="T-9", title="", type="backend", importance="critical")
     assert route(t, cfg, ctx(rows=rows, now=now))[0] == "claude-a"
+
+
+def test_host_pin_keeps_a_task_on_that_hosts_agents(cfg):
+    """Q-080/Q-110: tasks needing laptop-a's MPS, weights or results ran on a CPU-only laptop."""
+    t = Task(id="T", title="", type="frontend", importance="normal", flags=["host:host-b"])
+    assert t.pinned_host == "host-b"
+    assert route(t, cfg, ctx())[0] == "fake-b"          # claude-a (host-a) is the frontend favourite
+    assert route(Task(id="T", title="", type="frontend", importance="normal"), cfg, ctx())[0] == "claude-a"
+    # a pin to a host with no configured agent falls back to normal routing instead of failing
+    assert route(Task(id="T", title="", type="frontend", flags=["host:nowhere"]), cfg, ctx())[0] == "claude-a"

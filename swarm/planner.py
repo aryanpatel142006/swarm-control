@@ -11,6 +11,7 @@ from .board.base import Board
 from .config import Config
 from .models import IMPORTANCES, SIZES, TASK_TYPES, Status, Task
 from .prompt import PROMPTS_DIR, read_doc
+from .policy import apply_task_lint, main_exists
 from .router import context_from_board, route, scopes_overlap
 from .runner import STRUCTURED_PROVIDERS
 from .workspace import Workspace
@@ -27,6 +28,7 @@ TASKS_SCHEMA = {
             "size": {"type": "string", "enum": SIZES}, "milestone": {"type": "string"},
             "priority": {"type": "integer"}, "depends_on": {"type": "array", "items": {"type": "string"}},
             "scope": {"type": "array", "items": {"type": "string"}},
+            "host": {"type": "string"},
         }}}},
 }
 PLAN_DOCS = ["docs/ARCHITECTURE.md", "docs/DESIGN.md", "docs/CONTRACTS.md", "docs/LESSONS.md"]
@@ -80,6 +82,7 @@ def parse_proposals(structured: dict | None, worktree: Path) -> list[dict]:
             "milestone": str(raw.get("milestone") or ""), "priority": int(raw.get("priority") or 100),
             "depends_on": [str(d) for d in (raw.get("depends_on") or [])],
             "scope": [str(s) for s in (raw.get("scope") or [])],
+            "host": str(raw.get("host") or "").strip(),
         })
     return out
 
@@ -144,13 +147,17 @@ class Planner:
         by_title = {p["title"]: tid for p, tid in zip(proposals, ids)}
         done = {t.id for t in self.board.list_tasks(status=[Status.DONE])}
         ctx = context_from_board(self.board, self.cfg)
+        exists = main_exists(self.ws)
         created = []
         for p, tid in zip(proposals, ids):
             deps = [by_title.get(d, d) for d in p.get("depends_on", [])]
             deps = [d for d in deps if d != tid]
             task = Task(id=tid, title=p["title"], description=p["description"], acceptance=p["acceptance"],
                         type=p["type"], importance=p["importance"], size=p["size"], milestone=p["milestone"],
-                        priority=p.get("priority", 100), depends_on=deps, scope=p.get("scope", []))
+                        priority=p.get("priority", 100), depends_on=deps, scope=p.get("scope", []),
+                        flags=[f"host:{p['host']}"] if p.get("host") else [])
+            for n in apply_task_lint(task, exists):
+                self.log(f"[{tid}] lint: {n}")
             ready = all(d in done for d in deps)
             task.status = Status.READY if ready else Status.BACKLOG
             task.agent, task.model, task.effort = route(task, self.cfg, ctx)
