@@ -30,6 +30,8 @@ def check_and_update(repo: Path | None = None, *, run=run_cmd) -> str | None:
     upstream = run(["git", "rev-parse", "@{u}"], cwd=repo, timeout=15)
     if not upstream.ok or upstream.out.strip() in ("", local):
         return None
+    if run(["git", "merge-base", "--is-ancestor", "@{u}", "HEAD"], cwd=repo, timeout=15).ok:
+        return None   # local commits not pushed yet: nothing to pull (a no-op ff "succeeded" and the process re-exec'd forever)
     if not run(["git", "merge", "--ff-only", "-q", "@{u}"], cwd=repo, timeout=60).ok:
         return None
     return run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, timeout=15).out.strip() or "updated"
