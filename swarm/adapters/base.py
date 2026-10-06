@@ -71,6 +71,7 @@ class RunSpec:
     should_stop: Callable[[], bool] | None = None     # polled while the CLI runs; True kills it (claim lost)
     stop_poll_s: float = 5.0
     claim_nonce: str = ""                              # the claim this run holds on the board (for logs and tests)
+    env: dict = field(default_factory=dict)            # extra environment for this run (PYTHONPATH, SWARM_TASK_ID)
 
 
 class Adapter:
@@ -141,7 +142,7 @@ class Adapter:
         (spec.cwd / ".swarm-run").mkdir(exist_ok=True)
         for attempt in (1, 2):
             try:
-                env = {**os.environ, **(getattr(self.cfg, "env", None) or {})}
+                env = {**os.environ, **(getattr(self.cfg, "env", None) or {}), **(spec.env or {})}
                 if spec.should_stop is not None:
                     proc = self._run_watched(argv, spec, stdin, env=env)
                 else:

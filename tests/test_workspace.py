@@ -234,3 +234,31 @@ def test_rebase_feedback_names_the_main_commits_that_conflicted(git_repo, tmp_pa
     ok, conflicts, causes = ws.rebase_onto_main(wt)
     assert not ok and conflicts == ["shared.txt"]
     assert any("rewrite shared.txt" in c for c in causes)
+
+
+def test_worktree_add_retries_on_a_config_lock(git_repo, tmp_path):
+    """Q-082: a `git worktree add` that hit .git/config.lock crashed T-010's attempt."""
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    real, calls = ws.git, []
+
+    def flaky(path, *args, **kw):
+        if args[:2] == ("worktree", "add"):
+            calls.append(args)
+            if len(calls) == 1:
+                return CmdResult(255, "", "error: could not lock config file .git/config: File exists")
+        return real(path, *args, **kw)
+    ws.git = flaky
+    ws.sleep = lambda s: None
+    assert ws.provision("T-001").exists() and len(calls) == 2
+
+
+def test_unmerged_commits_counts_branch_work_main_lacks(git_repo, tmp_path):
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    assert ws.unmerged_commits("T-001") == 0
+    wt = ws.provision("T-001")
+    (wt / "f.txt").write_text("x")
+    ws.commit_all(wt, "work")
+    ws.push(wt, "task/T-001")
+    ws.dispose(wt)
+    ws.fetch()
+    assert ws.unmerged_commits("T-001") == 1

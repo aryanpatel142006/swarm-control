@@ -1,6 +1,7 @@
 """Worker loop: claim → worktree → prompt → run CLI → verify → push/PR → publish. One process per laptop."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +49,15 @@ def next_tier_model(agent_cfg, current: str) -> tuple[str, str | None]:
         if agent_cfg.models[t] != current:
             return agent_cfg.models[t], agent_cfg.effort.get(t)
     return current, agent_cfg.effort.get(tiers[idx])
+
+
+def worker_env(wt: Path, task: Task) -> dict:
+    """Environment for the worker CLI. PYTHONPATH puts the worktree first, so a script run from /tmp imports the
+    worktree's package and not the main checkout's editable install (six notes: Q-086 … Q-126)."""
+    paths = [str(wt)] + ([str(wt / "src")] if (wt / "src").is_dir() else [])
+    old = os.environ.get("PYTHONPATH", "")
+    return {"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
+            "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)}
 
 
 def _append_log(path: Path, section: str) -> None:
@@ -361,10 +371,25 @@ class Runner:
             return Outcome(task, None, None, None, task.status)
         attempt = task.attempts + 1
         reuse = prev_status is Status.CHANGES_REQUESTED or "resume" in task.flags
+        carried = False
+        if not reuse and task.attempts > 0:
+            # a retry after a crash or failure: the earlier attempt's pushed commits are work, not litter. Before
+            # Oct 5 the retry started at main and T-010's commits had to be cherry-picked by hand (Q-082).
+            try:
+                self.ws.fetch()
+                carried = reuse = self.ws.unmerged_commits(task.id) > 0
+            except RuntimeError as e:
+                self.log(f"[{task.id}] could not check the old branch: {e}")
         self.log(f"[{task.id}] {task.agent} attempt {attempt} model={task.model} reuse={reuse}")
         started = self.now()
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
+            if carried:
+                note = (f"This worktree continues from the previous attempt's commits on "
+                        f"{self.ws.remote}/{task.branch} (rebased onto current main below). Read "
+                        f"`git log {self.ws.remote}/{self.cfg.main_branch}..HEAD` before you continue; do not redo them.")
+                if note not in task.feedback:
+                    task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
             if reuse:   # a parked branch drifts from main; start the resume from current main, or say why not
                 ok, conflicts, causes = self.ws.rebase_onto_main(wt)
                 if not ok:
@@ -407,7 +432,7 @@ class Runner:
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
                            extra_args=list(agent_cfg.extra_args), mcp=mcp, plugin_dirs=dirs,
                            mcp_servers=inline, settings=settings, should_stop=self._claim_watch(task),
-                           claim_nonce=task.claim_nonce)
+                           claim_nonce=task.claim_nonce, env=worker_env(wt, task))
             result = self.adapter_factory(agent_cfg).run(spec)
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
@@ -508,6 +533,20 @@ class Runner:
         if dec or debt:
             changed = self.ws.changed_files(wt)
 
+        if changed:
+            # main often moves while a worker runs; verify and review the branch on top of current main (Q-097,
+            # Q-121: workers rebased on a main that was already stale). A conflict is left to the merger.
+            self.ws.commit_all(wt, f"{task.id}: {(report.summary or 'work in progress')[:60]}")
+            try:
+                if not self.ws.rebase_in_progress(wt):
+                    ok, conflicts, _ = self.ws.rebase_onto_main(wt)
+                    if ok:
+                        changed = self.ws.changed_files(wt)
+                    else:
+                        self.log(f"[{task.id}] pre-verify rebase conflicted ({', '.join(conflicts)}); the merger will ask")
+            except RuntimeError as e:   # a failed fetch must not lose the run's result
+                self.log(f"[{task.id}] pre-verify rebase skipped: {e}")
+
         verify = self.ws.run_script(wt, self.cfg.verify.fast, 900) if changed else None
         verify_ok = verify.ok if verify is not None else None
         verify_tail = verify.tail(1500) if verify is not None else ""
@@ -578,8 +617,9 @@ class Runner:
         if push_error:
             task.last_error = f"push failed: {push_error}"[:1900]
             return Status.FAILED
-        if not result.ok and report.synthesized:
-            # the CLI ended abnormally (max turns, timeout, crash) but left work behind: continue on the branch
+        if not result.ok and (report.synthesized or result.structured_output is None):
+            # the CLI ended abnormally (max turns, timeout, crash) but left work behind: continue on the branch.
+            # A draft .swarm-run/report.json written early counts as left-behind work too (Q-096, Q-103, Q-126).
             if task.attempts >= self.cfg.max_attempts:
                 task.last_error = result.error[:1900] or "abnormal end"
                 return Status.FAILED

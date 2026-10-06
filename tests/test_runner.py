@@ -602,3 +602,87 @@ def test_tick_backoff_never_exceeds_a_minute():
     reaped a healthy worker's task."""
     from swarm.runner import backoff_seconds
     assert [backoff_seconds(n) for n in (1, 2, 3, 4, 8)] == [15, 30, 60, 60, 60]
+
+
+def test_retry_after_a_failure_continues_from_the_pushed_branch(cfg, git_repo, tmp_path):
+    """Q-082: after a crash the retry started at main; the earlier commits had to be cherry-picked by hand."""
+    adapter = FakeAdapter(files={"src/a.py": "first attempt\n"}, structured={"status": "failed", "summary": "half"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.FAILED      # pushed, but no resume flag
+    stored = board.get_task(t.id)
+    assert "resume" not in stored.flags and stored.attempts == 1
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        seen["a"] = (spec.cwd / "src" / "a.py").read_text() if (spec.cwd / "src" / "a.py").exists() else None
+        seen["prompt"] = spec.prompt_file.read_text()
+        return orig(spec)
+    adapter.run = run
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    r.run_task(board.get_task(t.id))
+    assert seen["a"] == "first attempt\n" and "previous attempt's commits" in seen["prompt"]
+
+
+def test_branch_is_rebased_onto_main_that_moved_during_the_run(cfg, git_repo, tmp_path):
+    """Q-097/Q-121: main moved while the worker ran; verify and review now see the branch on current main."""
+    adapter = FakeAdapter(files={"src/a.py": "x\n"}, structured={"status": "done", "summary": "ok"})
+    orig = adapter.run
+
+    def run(spec):
+        out = orig(spec)
+        _git(git_repo, "checkout", "-q", "main")
+        (git_repo / "merged_meanwhile.py").write_text("y\n")
+        _git(git_repo, "add", "merged_meanwhile.py"); _git(git_repo, "commit", "-qm", "T-099 merged")
+        _git(git_repo, "push", "-q", "origin", "main")
+        return out
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.MERGE_READY
+    log = _git(git_repo, "log", "--format=%s", "origin/task/" + t.id)
+    assert "T-099 merged" in log
+
+
+def test_worker_env_puts_the_worktree_first_on_pythonpath(cfg, git_repo, tmp_path, monkeypatch):
+    """Six notes (Q-086 … Q-126): scripts run from /tmp imported the main checkout's editable install."""
+    monkeypatch.setenv("PYTHONPATH", "/elsewhere")
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)
+    env = adapter.specs[0].env
+    wt = str(adapter.specs[0].cwd)
+    assert env["PYTHONPATH"].split(":")[0] == wt and env["PYTHONPATH"].endswith("/elsewhere")
+    assert env["SWARM_TASK_ID"] == t.id and env["SWARM_WORKTREE"] == wt
+
+
+def test_adapter_passes_the_run_env_to_the_cli(tmp_path):
+    from swarm.adapters.base import Adapter, RunSpec
+
+    class Echo(Adapter):
+        def build_command(self, spec):
+            return ["sh", "-c", "echo $SWARM_TASK_ID"], None
+
+        def parse_output(self, code, out, err):
+            return RunResult(ok=code == 0, exit_code=code, stdout=out, stderr=err)
+    pf = tmp_path / "p.md"
+    pf.write_text("x")
+    res = Echo().run(RunSpec(prompt_file=pf, model="m", effort=None, max_turns=1, budget_usd=None, timeout_s=30,
+                             cwd=tmp_path, env={"SWARM_TASK_ID": "T-777"}))
+    assert res.stdout.strip() == "T-777"
+
+
+def test_cut_off_run_with_a_draft_report_resumes_and_keeps_the_draft(cfg, git_repo, tmp_path):
+    """Q-096/Q-103/Q-126: a run that hit max turns lost its report. A draft written early is kept and the task
+    resumes instead of going to review as if it were finished."""
+    adapter = FakeAdapter(files={"src/a.py": "half"}, ok=False, structured=None,
+                          report_file={"status": "done", "summary": "DRAFT: adapter written, bench pending"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    stored = board.get_task(t.id)
+    assert "resume" in stored.flags and "report_missing" not in stored.flags
+    assert "DRAFT" in board.reports[t.id][0][1]

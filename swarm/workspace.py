@@ -92,11 +92,37 @@ class Workspace:
         remote_branch = f"{self.remote}/{branch}"
         has_remote = self.git(self.repo_root, "rev-parse", "--verify", "--quiet", remote_branch, check=False).ok
         start = remote_branch if (reuse_branch and has_remote) else self._main_ref()
-        self.git(self.repo_root, "worktree", "add", "-q", "-B", branch, str(path), start)
+        self._worktree_add(branch, path, start)
         (path / ".swarm-run").mkdir(exist_ok=True)
         for pattern in (".swarm-run/", ".venv", "node_modules", "frontend/node_modules", "web/node_modules"):
             self._ensure_excluded(pattern)   # links made by setup_worktree.sh must never reach a commit (Oct 4 2026)
         return path
+
+    def _worktree_add(self, branch: str, path: Path, start: str) -> None:
+        """`git worktree add`, retried when a parallel git process holds .git/config.lock or a ref lock: a crash
+        there left T-010's retry to start from main without its earlier commits (Q-082, Oct 5 2026)."""
+        sleep = getattr(self, "sleep", time.sleep)
+        for attempt in range(4):
+            r = self.git(self.repo_root, "worktree", "add", "-q", "-B", branch, str(path), start, check=False)
+            if r.ok:
+                return
+            if "lock" not in (r.err + r.out).lower() or attempt == 3:
+                raise RuntimeError(f"git worktree add {path.name} failed: {r.err.strip() or r.out.strip()}")
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+            self.git(self.repo_root, "worktree", "prune", check=False)
+            sleep(2 * (attempt + 1))
+
+    def unmerged_commits(self, task_id: str) -> int:
+        """Commits on origin/task/<id> that main does not have (uses the refs of the last fetch)."""
+        ref = f"{self.remote}/task/{task_id}"
+        if not self.git(self.repo_root, "rev-parse", "--verify", "--quiet", ref, check=False).ok:
+            return 0
+        r = self.git(self.repo_root, "rev-list", "--count", f"{self._main_ref()}..{ref}", check=False)
+        try:
+            return int(r.out.strip() or 0) if r.ok else 0
+        except ValueError:
+            return 0
 
     def _ensure_excluded(self, pattern: str) -> None:
         """Ignore runtime files even when the project's .gitignore does not (info/exclude is shared by worktrees)."""
@@ -153,6 +179,13 @@ class Workspace:
         causes = self.git(path, "log", "--format=%h %s", "-5", self._main_ref(), "--not", "HEAD", "--",
                           *conflicts, check=False).out.splitlines() if conflicts else []
         return False, conflicts, [c.strip() for c in causes if c.strip()]
+
+    def rebase_in_progress(self, path: Path) -> bool:
+        for name in ("rebase-merge", "rebase-apply"):
+            rel = self.git(path, "rev-parse", "--git-path", name, check=False).out.strip()
+            if rel and (Path(rel) if Path(rel).is_absolute() else Path(path) / rel).exists():
+                return True
+        return False
 
     def run_script(self, path: Path, script_rel: str | None, timeout: int) -> CmdResult | None:
         if not script_rel:
