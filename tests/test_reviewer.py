@@ -141,3 +141,65 @@ def test_long_reviews_keep_every_finding_with_its_text():
     assert "hearing/tse/av_mossformer.py:1: MODELS.md row missing → add the row" in fb
     assert "only a summary key" in fb and "d.py: (the reviewer gave no text" in fb
     assert "…" in fb   # the long items were shortened instead
+
+
+def _setup_full(cfg, git_repo, tmp_path, branch_script, main_script=None):
+    import subprocess
+    if main_script is not None:
+        (git_repo / "scripts" / "verify_full.sh").write_text(main_script)
+        subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "main verify_full"], check=True)
+        subprocess.run(["git", "-C", str(git_repo), "push", "-q", "origin", "main"], check=True)
+    rev, board, t, adapter = setup(cfg, git_repo, tmp_path, {"verdict": "approve", "summary": "ok", "findings": []})
+    wt = rev.ws.provision(t.id, reuse_branch=True)
+    (wt / "scripts" / "verify_full.sh").write_text(branch_script)
+    rev.ws.commit_all(wt, "branch verify_full")
+    rev.ws.push(wt, t.branch, force_with_lease=True)
+    rev.ws.dispose(wt)
+    return rev, board, t, adapter
+
+
+def test_flaky_verify_full_is_rerun_and_not_sent_back(cfg, git_repo, tmp_path):
+    """Q-191/Q-189: a timing test in an untouched area failed under load and sent a docs-only task back."""
+    counter = tmp_path / "runs.txt"
+    script = (f'#!/bin/sh\necho x >> "{counter}"\n[ "$(wc -l < "{counter}")" -ge 2 ] && exit 0\n'
+              'echo "FAILED tests/test_tts.py::test_cold_kokoro - wait_idle(2.0) timed out"; exit 1\n')
+    rev, board, t, adapter = _setup_full(cfg, git_repo, tmp_path, script)
+    out = rev.process(t)
+    assert out.status is Status.MERGE_READY and len(adapter.prompts) == 1
+    assert "failed once and passed on a rerun" in adapter.prompts[0]
+    qs = [q for q in board.list_questions() if q.kind == "harness"]
+    assert len(qs) == 1 and qs[0].text.startswith("[test-hygiene]") and "test_cold_kokoro" in qs[0].context
+
+
+def test_verify_full_failing_on_main_too_is_not_the_tasks(cfg, git_repo, tmp_path):
+    bad = '#!/bin/sh\necho "FAILED tests/test_tts.py::test_cold_kokoro - timeout"; exit 1\n'
+    rev, board, t, adapter = _setup_full(cfg, git_repo, tmp_path, bad, main_script=bad)
+    out = rev.process(t)
+    assert out.status is Status.MERGE_READY
+    assert "fails on current main as well" in adapter.prompts[0]
+    qs = [q for q in board.list_questions() if q.kind == "harness"]
+    assert len(qs) == 1 and "fails on main too" in qs[0].text and "test_cold_kokoro" in qs[0].text
+    stored = board.get_task(t.id)                       # a second review does not file the same note again
+    stored.status = Status.REVIEW
+    board.update_task(stored, ["status"])
+    rev.process(board.get_task(t.id))
+    assert len([q for q in board.list_questions() if q.kind == "harness"]) == 1
+    assert not (rev.ws.worktree_root / "_main-verify").exists()
+
+
+def test_verify_full_failing_only_on_the_branch_goes_back(cfg, git_repo, tmp_path):
+    bad = '#!/bin/sh\necho "FAILED tests/test_new.py::test_mine - assert 1 == 2"; exit 1\n'
+    rev, board, t, adapter = _setup_full(cfg, git_repo, tmp_path, bad, main_script="#!/bin/sh\nexit 0\n")
+    out = rev.process(t)
+    stored = board.get_task(t.id)
+    assert out.status is Status.CHANGES_REQUESTED and adapter.prompts == []
+    assert "passes on current main" in stored.feedback and "test_mine" in stored.feedback
+    assert [q for q in board.list_questions() if q.kind == "harness"] == []
+
+
+def test_failing_tests_parses_the_short_summary():
+    from swarm.reviewer import failing_tests
+    out = ("....F\n=== short test summary info ===\nFAILED tests/a.py::test_x - AssertionError\n"
+           "ERROR tests/b.py::test_y\nFAILED tests/c.py\n1 failed")
+    assert failing_tests(out) == {"tests/a.py::test_x", "tests/b.py::test_y", "tests/c.py"}

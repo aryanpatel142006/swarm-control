@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +16,7 @@ from .models import QUESTION_TEXT_CAP, Question, Status, Task
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA
 from .runner import STRUCTURED_PROVIDERS
-from .workspace import Workspace
+from .workspace import CmdResult, Workspace
 
 DIFF_CAP = 60000
 REVIEW_TURNS = 25
@@ -93,6 +94,18 @@ def findings_to_feedback(v: Verdict, cap: int = FEEDBACK_CAP) -> str:
     return text if len(text) <= cap else text[:cap - 1] + "…"
 
 
+_FAILED_ID = re.compile(r"^(?:FAILED|ERROR) (\S+?::\S+|\S+\.py)\b", re.M)
+
+
+def failing_tests(output: str) -> set[str]:
+    """pytest node ids from the short test summary (`FAILED tests/x.py::test_y - …`, `ERROR tests/x.py`)."""
+    return set(_FAILED_ID.findall(output or ""))
+
+
+def _text(r: CmdResult | None) -> str:
+    return "" if r is None else r.out + ("\n" + r.err if r.err else "")
+
+
 class Reviewer:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, adapter_factory=get_adapter, log=print,
                  prompt_text: str | None = None, ledger=None):
@@ -103,24 +116,25 @@ class Reviewer:
     def review(self, task: Task) -> Verdict:
         wt = self.ws.provision(task.id, reuse_branch=True)
         try:
-            setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
             if setup is not None and not setup.ok:
                 return Verdict("escalate", "setup_worktree.sh failed (environment, not code)",
                                [{"severity": "high", "file": self.cfg.verify.setup_worktree or "",
                                  "issue": setup.tail(1200), "fix": "orchestrator: fix the environment, then re-review"}])
             full = self.ws.run_script(wt, self.cfg.verify.full, 1800)
+            verify_note = ""
             if full is not None and not full.ok:
-                return Verdict("request_changes", "verify_full.sh failed",
-                               [{"severity": "high", "file": self.cfg.verify.full or "", "issue": verify_feedback(
-                                     full.out + ("\n" + full.err if full.err else ""), code=full.code,
-                                     intro=f"{self.cfg.verify.full} failed (exit {full.code})."),
-                                 "fix": "make the full verify pass (the output above is the failing step's own)"}])
+                full, verify_note, verdict = self._triage_full_failure(task, wt, full)
+                if verdict is not None:
+                    return verdict
             role = self.cfg.reviewer
             if role is None:
                 return Verdict("approve", "no reviewer configured; verify passed", [])
             agent_cfg = self.cfg.agents[role.agent]
             diff = self.ws.git(wt, "diff", f"{self.ws.remote}/{self.cfg.main_branch}...HEAD", check=False).out
-            prompt = build_review_prompt(task, diff, full.tail(1500) if full else "", self.prompt_text)
+            tail = full.tail(1500) if full else ""
+            prompt = build_review_prompt(task, diff, (verify_note + "\n\n" + tail).strip() if verify_note else tail,
+                                         self.prompt_text)
             pf = wt / ".swarm-run" / "review_prompt.md"
             pf.write_text(prompt)
             structured = agent_cfg.provider in STRUCTURED_PROVIDERS
@@ -140,6 +154,70 @@ class Reviewer:
             return parse_verdict(result.structured_output, wt)
         finally:
             self.ws.dispose(wt)
+
+    # ----- verify_full failures that are not the task's (Q-189, Q-190, Q-191, Q-196) -----
+    def _triage_full_failure(self, task: Task, wt: Path, first: CmdResult):
+        """verify_full failed on the branch. Run it once more (the slot lock means less load now); if it passes the
+        failure was flaky. If it fails again, run it on current main: a failure main has too (same failing tests) is
+        not this task's to fix. Either way the task goes on to the model review, and one test-hygiene note goes to
+        the orchestrator so ONE task fixes the test (Q-196: two branches patched the same flaky Kokoro test and
+        conflicted). Returns (result to show the reviewer, note for the reviewer, verdict or None to continue)."""
+        script = self.cfg.verify.full or "verify_full"
+        second = self.ws.run_script(wt, self.cfg.verify.full, 1800)
+        if second is not None and second.ok:
+            self.log(f"[{task.id}] {script} failed, then passed on a rerun: flaky, not sent back")
+            ids = ", ".join(sorted(failing_tests(_text(first)))[:5]) or "no test id in the output"
+            self._file_test_hygiene(task, f"{script} is flaky ({ids}): it failed on {task.id}'s branch and passed "
+                                    "on an immediate rerun", first)
+            return second, (f"Note from the harness: {script} failed once and passed on a rerun (flaky; filed for "
+                            "the orchestrator). Do not ask this task to fix that test."), None
+        again = second or first
+        on_main = self._verify_full_on_main(task)
+        branch_ids, main_ids = failing_tests(_text(again)), failing_tests(_text(on_main)) if on_main else set()
+        if on_main is not None and not on_main.ok and branch_ids and branch_ids <= main_ids:
+            names = ", ".join(sorted(branch_ids)[:5])
+            self.log(f"[{task.id}] {script} fails on main too ({names}): not this task's, not sent back")
+            self._file_test_hygiene(task, f"{script} fails on main too ({names}): seen while reviewing {task.id}",
+                                    on_main)
+            return again, (f"Note from the harness: {script} fails on current main as well ({names}); that failure "
+                           "is not this task's and is filed for the orchestrator. Review the change itself."), None
+        main_line = ""
+        if on_main is not None:
+            main_line = (" It passes on current main, so this branch causes the failure." if on_main.ok else
+                         " It also fails on current main, but with different tests; fix the ones this branch breaks.")
+        return again, "", Verdict("request_changes", f"{script} failed twice", [{
+            "severity": "high", "file": script,
+            "issue": verify_feedback(_text(again), code=again.code,
+                                     intro=f"{script} failed (exit {again.code}) on two runs.{main_line}"),
+            "fix": "make the full verify pass (the output above is the failing step's own)"}])
+
+    def _verify_full_on_main(self, task: Task) -> CmdResult | None:
+        try:
+            wt = self.ws.provision_detached("_main-verify")
+        except RuntimeError as e:
+            self.log(f"[{task.id}] could not check verify_full on main: {e}")
+            return None
+        try:
+            self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
+            return self.ws.run_script(wt, self.cfg.verify.full, 1800)
+        finally:
+            self.ws.dispose(wt)
+
+    def _file_test_hygiene(self, task: Task, text: str, result: CmdResult) -> None:
+        """One open note per (failure kind, failing tests): the part of the text before the first ': '."""
+        text = f"[test-hygiene] {text}"
+        try:
+            if any(q.status == "Open" and q.text.split(": ")[0] == text.split(": ")[0]
+                   for q in self.board.list_questions(status="Open")):
+                return
+            self.board.create_question(Question(
+                id="", text=text[:QUESTION_TEXT_CAP], kind="harness",
+                context=verify_feedback(_text(result), code=result.code, intro="verify_full output:")[:1900],
+                options=["one task owns the fix", "mark the test slow/serial", "ignore"],
+                proceeding_with="the task was not sent back for it", impact="medium", task_id=task.id,
+                asked_by="reviewer"))
+        except Exception as e:   # noqa: BLE001 - a note must never fail a review
+            self.log(f"[{task.id}] could not file the test-hygiene note: {e!r}")
 
     def apply(self, task: Task, v: Verdict) -> Task:
         round_no = task.review_rounds + 1

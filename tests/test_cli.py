@@ -252,3 +252,14 @@ def test_assign_refuses_a_running_task_unless_forced(project_dir):
     r = runner.invoke(app, base + ["--force"])
     t = board.get_task("T-001")
     assert r.exit_code == 0 and t.agent == "codex-a" and t.status is Status.READY and t.claim_nonce == ""
+
+
+def test_shell_expansion_hints_catch_a_lost_variable(tmp_path):
+    """Q-186: the task text said '/demo_regress_<stamp>.json'; $HEARING_RESULTS_DIR had expanded to nothing."""
+    from swarm.policy import shell_expansion_hints
+    (tmp_path / "tmp").mkdir()
+    text = ("Write /demo_regress_<stamp>.json and /eval/results/x.json. Keep /tmp/a.json, GET /api/telemetry, "
+            "open /simple, see https://host/x.json and ${HEARING_RESULTS_DIR}/y.json")
+    hints = shell_expansion_hints(text, root=tmp_path)
+    assert len(hints) == 2
+    assert "`/demo_regress_<stamp>.json`" in hints[0] and "`/eval/results/x.json`" in hints[1]

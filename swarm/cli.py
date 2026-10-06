@@ -71,7 +71,18 @@ def make_board(cfg: Config, memory: bool = False):
 
 def _workspace(cfg: Config):
     from .workspace import Workspace
-    return Workspace(cfg.repo_root, cfg.worktree_root, cfg.main_branch)
+    ws = Workspace(cfg.repo_root, cfg.worktree_root, cfg.main_branch)
+    configure_verify_slots(ws, cfg, state.host, log=console.print)
+    return ws
+
+
+def configure_verify_slots(ws, cfg: Config, host: str | None, log=print) -> None:
+    """Every verify this process runs (runner, merger, reviewer) shares the machine's verify slots with the other
+    swarm processes and the workers' own wrapped verifies (swarm/hostlock.py, Q-175/Q-185/Q-190)."""
+    from .hostlock import lock_dir, verify_slot
+    slots = cfg.hosts[host].max_parallel_verify if host in cfg.hosts else 2
+    ws.verify_slot = lambda label: verify_slot(lock_dir(cfg.project), slots, log=log, label=label)
+    ws.script_env = cfg.project_env()
 
 
 def _ledger(cfg: Config):
@@ -360,6 +371,9 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
     from .policy import apply_task_lint, main_exists
     for n in apply_task_lint(t, None if state.memory else main_exists(_workspace(_cfg()))):
         console.print(f"lint: {n}")
+    from .policy import shell_expansion_hints
+    for n in shell_expansion_hints(f"{title}\n{description}\n{acceptance}"):
+        console.print(f"[yellow]lint: {n}[/yellow]")
     t.status = Status.READY if all(d in done for d in t.depends_on) else Status.BACKLOG
     t.agent, t.model, t.effort = route(t, _cfg(), context_from_board(board, _cfg()))
     t = board.create_task(t)

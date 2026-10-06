@@ -29,12 +29,16 @@ class VerifyConfig:
     # turns the check off. Files are globs; code files are checked only if the project adds them (e.g. "**/*.py").
     placeholders: list[str] | None = None
     placeholder_files: list[str] | None = None
+    # Regexes for backup/merge leftovers a task must not add (`*.md-e`, `*.orig`, …; Q-198). [] turns it off.
+    stray_files: list[str] | None = None
 
 
 @dataclass
 class HostConfig:
     name: str
     max_parallel: dict[str, int] = field(default_factory=dict)
+    # verify runs at once on this machine (swarm/hostlock.py); the rest wait for a slot (Q-175, Q-185, Q-190)
+    max_parallel_verify: int = 2
 
 
 @dataclass
@@ -119,6 +123,13 @@ class Config:
     plugins_required: list[str] = field(default_factory=list)
     plugins_by_type: dict[str, list[str]] = field(default_factory=dict)
     mcp_servers: dict = field(default_factory=dict)   # inline MCP server definitions, override discovered ones
+    # Environment for every worker CLI and every harness-run verify script. `{repo_root}` expands to the main
+    # checkout, so shared data outside the worktrees is found without `source scripts/_py.sh` (Q-198:
+    # HEARING_FIXTURES_DIR / HEARING_MODELS_DIR were only set by one script).
+    env: dict[str, str] = field(default_factory=dict)
+
+    def project_env(self) -> dict[str, str]:
+        return {k: v.replace("{repo_root}", str(self.repo_root)) for k, v in self.env.items()}
 
     def mcp_for(self, task_type: str, agent: AgentConfig, importance: str | None = None) -> list[str]:
         """MCP servers a worker run gets: the task type's, the importance tier's, then the agent's own."""
@@ -181,7 +192,7 @@ def _str_list(value, key: str) -> list[str] | None:
         return None
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"{key} must be a list of strings")
-    if key == "verify.placeholders":
+    if key in ("verify.placeholders", "verify.stray_files"):
         import re
         for v in value:
             try:
@@ -204,7 +215,8 @@ def load_config(path: Path | str) -> Config:
         notion_raw = yaml.safe_load(notion_file.read_text()) or {}
     notion_raw = {**(raw.get("notion") or {}), **notion_raw}
 
-    hosts = {name: HostConfig(name=name, max_parallel=dict((h or {}).get("max_parallel", {})))
+    hosts = {name: HostConfig(name=name, max_parallel=dict((h or {}).get("max_parallel", {})),
+                              max_parallel_verify=max(1, int((h or {}).get("max_parallel_verify", 2))))
              for name, h in (raw.get("hosts") or {}).items()}
 
     agents: dict[str, AgentConfig] = {}
@@ -279,7 +291,8 @@ def load_config(path: Path | str) -> Config:
                             full=verify_raw.get("full"),
                             placeholders=_str_list(verify_raw.get("placeholders"), "verify.placeholders"),
                             placeholder_files=_str_list(verify_raw.get("placeholder_files"),
-                                                        "verify.placeholder_files")),
+                                                        "verify.placeholder_files"),
+                            stray_files=_str_list(verify_raw.get("stray_files"), "verify.stray_files")),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),
@@ -292,6 +305,7 @@ def load_config(path: Path | str) -> Config:
         plugins_required=[str(x) for x in (raw.get("plugins_required") or [])],
         plugins_by_type=_str_lists(raw.get("plugins_by_type")),
         mcp_servers={str(k): dict(v or {}) for k, v in (raw.get("mcp_servers") or {}).items()},
+        env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
     )
 
 

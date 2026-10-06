@@ -29,15 +29,22 @@ verify:
   # Defaults below; [] turns the check off; add "**/*.py" to placeholder_files to check code too (off by default).
   # placeholders: ['\bTBD\b', 'TODO\(fill\)', '\{\{', '<fill', '\bXXX\b', '(?i)\blorem\b']
   # placeholder_files: ['**/*.md', '**/*.markdown', '**/*.rst', '**/*.txt', '**/*.adoc', 'docs/**']
+  # Backup/merge leftovers a task must not add (regexes; [] turns it off):
+  # stray_files: ['\.[A-Za-z0-9]+-e$', '\.orig$', '\.rej$', '\.bak$', '~$', '\.sw[op]$', '(^|/)\.DS_Store$']
+
+# Environment for every worker CLI and harness-run script; {repo_root} is the main checkout. Point workers at data
+# shared across worktrees (fixtures, weights, results) here rather than in a script they must remember to source.
+# env:
+#   PROJECT_RESULTS_DIR: "{repo_root}/eval/results"
 
 task_limits:   # worker turns never go below 60/100/150 for medium/high/xhigh effort (runner EFFORT_TURN_FLOOR); Codex has no turn limit
   S: { turns: 30,  minutes: 20, budget_usd: 3 }
   M: { turns: 60,  minutes: 40, budget_usd: 8 }
   L: { turns: 120, minutes: 75, budget_usd: 20 }
 
-hosts:
-  laptop-a: { max_parallel: { claude: 3, codex: 3, gemini: 1, antigravity: 2, grok: 1, generic: 2 } }
-  laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, generic: 2 } }
+hosts:   # max_parallel_verify: verify runs at once on that machine (default 2); the rest wait for a slot
+  laptop-a: { max_parallel: { claude: 3, codex: 3, gemini: 1, antigravity: 2, grok: 1, generic: 2 }, max_parallel_verify: 2 }
+  laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, generic: 2 }, max_parallel_verify: 2 }
 
 routing:
   importance_to_tier: { critical: best, high: high, normal: mid, low: low }

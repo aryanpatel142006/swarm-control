@@ -4,6 +4,7 @@ Every function here is pure (text in, text out) so the rules are unit-tested wit
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from .policy import glob_match
 
@@ -16,6 +17,9 @@ _PYTEST_BANNER = re.compile(r"^(=+ .*(test session starts|FAILURES|ERRORS|warnin
 _PYTEST_SUMMARY = re.compile(r"^=*\s*(\d+ (passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)"
                              r"(, )?)+.* in [\d.]+s.*$|^=+ no tests ran", re.I)
 OTHER_CAP = 3000
+_TIMEOUT = re.compile(r"\[timeout after (\d+)s\]")
+_FAIL_HINT = re.compile(r"FAIL|ERROR|[Ee]rror|Traceback|exit(ed)? (code |status )?[1-9]|:\d+:\d+: [A-Z]+\d+"
+                        r"|would reformat|not found|[Dd]enied|[Ff]ound \d+ (error|issue)|over (the|its) .*budget")
 PYTEST_FAIL_CAP = 3000
 PYTEST_PASS_CAP = 500
 
@@ -58,15 +62,28 @@ def verify_feedback(output: str, *, script: str = "scripts/verify_fast.sh", code
                     intro: str = "") -> str:
     """Feedback for a failed verify: the failing step first, each section capped on its own."""
     head = intro or f"{script} failed" + (f" (exit {code})" if code is not None else "") + ". Fix it."
+    timeout = _TIMEOUT.search(output or "")
+    if timeout:
+        # run_cmd's own timeout (code -1): nothing in the output failed, the script ran out of time (Q-173)
+        head += (f" It was stopped after {timeout.group(1)} s without finishing: a hang or a very slow step (other "
+                 "agents may load this machine). Find the slow step with `pytest --durations=15` before resubmitting.")
     other, pytest_part, passed = split_verify_output(output or "")
     other = other.strip("\n")
     if passed is None:
         return head + "\n" + clip_middle(output or "(no output)", OTHER_CAP + PYTEST_PASS_CAP)
     parts = [head]
     if passed:
-        if other.strip():
+        if other.strip() and _FAIL_HINT.search(other):
             parts += ["The tests passed; the failing step is in this output (lint, type check or another step):",
                       clip_middle(other, OTHER_CAP)]
+        elif not timeout:
+            if other.strip():
+                parts += ["Other output from the script (no failure recognised in it):", clip_middle(other, OTHER_CAP)]
+            # T-080's feedback was a green pytest tail and nothing else (Q-172, Q-173): say so instead of leaving
+            # the worker to guess
+            parts.append("pytest passed and no other step printed a failure, yet the script exited non-zero: run "
+                         f"`bash {script} > .swarm-run/verify.log 2>&1; echo rc=$?` and read the whole log (a step "
+                         "after pytest, a time budget, or a step that fails silently).")
         parts += ["pytest (passed), tail:", pytest_part[-PYTEST_PASS_CAP:].lstrip()]
     else:
         parts += ["pytest failed:", clip_middle(pytest_part, PYTEST_FAIL_CAP)]
@@ -187,3 +204,84 @@ def placeholder_feedback(hits: list[tuple[str, int, str]], limit: int = 30) -> s
     if len(hits) > limit:
         lines.append(f"- … and {len(hits) - limit} more")
     return "\n".join(lines)
+
+
+# ----- files a previous attempt's notes name (Q-193) -----
+# T-085 attempt 1 started three evals and was cut off; their JSONs were complete when attempt 2 started, but nothing
+# said so and attempt 2 spent its first minutes finding out whether the table could be rebuilt from them.
+_PATH_TOKEN = re.compile(r"(?<![\w/.$~{-])((?:~|\$\{?[A-Za-z_]\w*\}?|\.{0,2}/)?[\w.@+-]*(?:/[\w.@+{}$-]+)*"
+                         r"\.(?:json|jsonl|csv|tsv|txt|log|md|wav|flac|mp3|mp4|npz|npy|pt|onnx|parquet|png|html|yaml|yml))\b")
+NOTES_FILES_CAP = 15
+
+
+def note_paths(text: str) -> list[str]:
+    """Path-like tokens with a data/result extension, in order of appearance, without duplicates."""
+    out: list[str] = []
+    for m in _PATH_TOKEN.finditer(text or ""):
+        tok = m.group(1).strip("`'\"(),;:")
+        if tok and tok not in out:
+            out.append(tok)
+    return out
+
+
+def _expand(tok: str, env: dict) -> str | None:
+    def sub(m):
+        return env.get(m.group(1) or m.group(2), "\0")
+    expanded = re.sub(r"\$\{(\w+)\}|\$(\w+)", sub, tok)
+    if "\0" in expanded:
+        return None
+    if expanded.startswith("~"):
+        expanded = str(Path.home()) + expanded[1:]
+    return expanded
+
+
+def notes_files_status(text: str, roots: list[Path], env: dict, *, ended_at: float | None = None,
+                       cap: int = NOTES_FILES_CAP) -> str:
+    """One line per file the notes name that exists now: size, modification time (and whether it changed after the
+    attempt ended), JSON validity / JSONL line count. Paths are tried as given (absolute, ~ or $VAR) and relative to
+    each root (the worktree, then the main checkout). "" when none exist."""
+    import json
+    import time as _time
+    lines = []
+    for tok in note_paths(text):
+        expanded = _expand(tok, env)
+        if expanded is None:
+            continue
+        cands = [Path(expanded)] if expanded.startswith("/") else [r / expanded for r in roots]
+        f = next((c for c in cands if c.is_file()), None)
+        if f is None:
+            continue
+        st = f.stat()
+        bits = [f"{st.st_size} bytes", "modified " + _time.strftime("%H:%M UTC", _time.gmtime(st.st_mtime))]
+        if ended_at and st.st_mtime > ended_at + 1:
+            bits.append("written after that attempt ended (a background job finished it)")
+        if f.suffix == ".json" and st.st_size <= 20_000_000:
+            try:
+                json.loads(f.read_text(errors="replace"))
+                bits.append("valid JSON")
+            except ValueError:
+                bits.append("NOT valid JSON (partial or still being written?)")
+        elif f.suffix == ".jsonl" and st.st_size <= 50_000_000:
+            with f.open(errors="replace") as fh:
+                bits.append(f"{sum(1 for ln in fh if ln.strip())} lines")
+        lines.append(f"- `{tok}` → {f}: " + ", ".join(bits))
+        if len(lines) >= cap:
+            break
+    return "\n".join(lines)
+
+
+# ----- stray editor/merge backups (Q-198) -----
+# A BSD-sed backup `docs/BENCHMARKS.md-e` was committed in T-073 and was still on main three tasks later.
+DEFAULT_STRAY_PATTERNS = [r"\.[A-Za-z0-9]+-e$", r"\.orig$", r"\.rej$", r"\.bak$", r"~$", r"\.sw[op]$",
+                          r"(^|/)\.DS_Store$"]
+
+
+def stray_files(paths: list[str], patterns: list[str]) -> list[str]:
+    regs = [re.compile(p) for p in patterns]
+    return [f for f in paths if any(r.search(f) for r in regs)]
+
+
+def stray_feedback(files: list[str]) -> str:
+    return ("This branch adds backup or merge leftovers that must not be committed: " + ", ".join(files)
+            + ". Remove them with `git rm --cached <file>` and delete the file (on macOS `sed -i -e` writes a "
+            "`<file>-e` backup: use `sed -i '' …` or Python), then verify again.")

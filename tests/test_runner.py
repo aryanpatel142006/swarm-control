@@ -1006,3 +1006,126 @@ def test_busy_runner_drains_once_its_code_is_stale(cfg, git_repo, tmp_path, monk
     r2.auto_update, r2._loaded_head = True, "old"
     r2.maybe_self_update(now)
     assert calls["restart"] == 2
+
+
+def test_loser_of_a_forced_reassign_leaves_the_winners_worktree(cfg, git_repo, tmp_path):
+    """Q-200 (T-093): `swarm assign --force` moved a claimed task to another agent; the old run's claim watch stopped
+    its CLI and its cleanup disposed the worktree path the new owner was already working in."""
+    from swarm.board.base import claim_task
+
+    class TransferMidRun(FakeAdapter):
+        def run(self, spec):
+            res = super().run(spec)
+            t = board.get_task(task.id)
+            t.agent, t.status, t.claim_nonce = "claude-a", Status.READY, ""     # assign --force
+            board.update_task(t, ["agent", "status", "claim_nonce"])
+            winner = board.get_task(task.id)
+            assert claim_task(board, winner, "claude-a", sleep=lambda s: None)
+            wt2 = r.ws.provision(task.id, reuse_branch=False)                     # the new owner's attempt
+            (wt2 / "winner.txt").write_text("still here\n")
+            return res
+
+    adapter = TransferMidRun(files={"src/a.py": "x = 1\n"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    task = ready_task(board)
+    r.run_task(task)
+    wt = r.ws.worktree_path(task.id)
+    assert (wt / "winner.txt").read_text() == "still here\n"
+    stored = board.get_task(task.id)
+    assert stored.agent == "claude-a" and stored.status is Status.RUNNING   # the loser published nothing
+    r.ws.dispose(wt)
+
+
+def test_claim_moved_before_provision_does_not_touch_the_path(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    real_claim_moved = r._claim_moved
+    r._claim_moved = lambda task, nonce, on_error=True: True
+    r.run_task(t)
+    assert adapter.specs == [] and not r.ws.worktree_path(t.id).exists()
+    r._claim_moved = real_claim_moved
+
+
+def _max_turns(adapter):
+    orig = adapter.run
+
+    def run(spec):
+        res = orig(spec)
+        res.error = "error_max_turns: "
+        res.session_id = "sess-1"
+        return res
+    adapter.run = run
+
+
+def test_resumed_prompt_lists_branch_commits_and_quotes_docs_from_the_worktree(cfg, git_repo, tmp_path):
+    """Q-180 (T-079): the resume prompt quoted CONTRACTS from the main checkout, which the branch had rewritten."""
+    adapter = FakeAdapter(files={"docs/CONTRACTS.md": "# Contracts\n\n## synth_feed\nBRANCH WORDING: back to mixture\n"},
+                          ok=False, structured=None)
+    _max_turns(adapter)
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="sonnet", effort="medium", scope=["docs/**"])
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    stored = board.get_task(t.id)
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    adapter.files = {"src/a.py": "x\n"}
+    r.run_task(board.get_task(t.id))
+    p = adapter.prompts[1]
+    assert "## Work already on this branch" in p and f"{t.id}: " in p.split("## Work already on this branch")[1]
+    assert "BRANCH WORDING: back to mixture" in p and "## events" not in p     # not the main checkout's copy
+    assert "read from your worktree" in p
+    assert "## Work already on this branch" not in adapter.prompts[0]
+
+
+def test_cut_off_run_without_notes_carries_its_last_commands(cfg, git_repo, tmp_path, monkeypatch):
+    """Q-183 (T-075): attempt 1 hit max_turns without notes; its iLab job id and RTT were lost."""
+    import json as _json
+    from swarm import transcript
+    home = tmp_path / "claude-home"
+    monkeypatch.setattr(transcript.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    adapter = FakeAdapter(files={"src/a.py": "half\n"}, ok=False, structured=None)
+    _max_turns(adapter)
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="sonnet", effort="medium")
+    proj = home / ".claude" / "projects" / transcript.project_dir_name(r.ws.worktree_path(t.id))
+    proj.mkdir(parents=True)
+    lines = [{"message": {"content": [{"type": "tool_use", "id": "u1", "name": "Bash",
+                                       "input": {"command": "sbatch gpu.sh"}}]}},
+             {"message": {"content": [{"type": "tool_result", "tool_use_id": "u1",
+                                       "content": "Submitted batch job 81234"}]}},
+             {"message": {"content": [{"type": "tool_use", "id": "u2", "name": "Bash",
+                                       "input": {"command": "python -m eval.rtt"}}]}},
+             {"message": {"content": [{"type": "tool_result", "tool_use_id": "u2",
+                                       "content": [{"type": "text", "text": "rtt p50 5.6 ms"}]}]}}]
+    (proj / "sess-1.jsonl").write_text("\n".join(_json.dumps(x) for x in lines) + "\n")
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    assert (tmp_path / "logs" / t.id / "attempt-1" / "commands.md").exists()
+    stored = board.get_task(t.id)
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    r.run_task(board.get_task(t.id))
+    p = adapter.prompts[1]
+    assert "last shell commands" in p and "$ sbatch gpu.sh\nSubmitted batch job 81234" in p and "rtt p50 5.6 ms" in p
+
+
+def test_backup_files_added_by_a_task_send_it_back(cfg, git_repo, tmp_path):
+    """Q-198: a BSD-sed backup docs/BENCHMARKS.md-e reached main."""
+    adapter = FakeAdapter(files={"src/a.py": "x = 1\n", "docs/BENCHMARKS.md-e": "old\n", "src/a.py.orig": "x\n"},
+                          structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, scope=["src/**", "docs/**"])
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    fb = board.get_task(t.id).feedback
+    assert "docs/BENCHMARKS.md-e" in fb and "src/a.py.orig" in fb and "git rm --cached" in fb
+    cfg.verify.stray_files = []
+    r2, board2 = make_runner(cfg, git_repo, tmp_path / "two", adapter)
+    assert r2.run_task(ready_task(board2, scope=["src/**", "docs/**"])).status is Status.MERGE_READY
+
+
+def test_stray_patterns():
+    from swarm.feedback import DEFAULT_STRAY_PATTERNS, stray_files
+    paths = ["docs/BENCHMARKS.md-e", "a.orig", "x.rej", "notes.bak", "f.py~", ".DS_Store", "web/.DS_Store",
+             "docs/pre-e.md", "scripts/run-e", "src/ok.py", "tests/test_some-e2e.mjs"]
+    assert stray_files(paths, DEFAULT_STRAY_PATTERNS) == paths[:7]

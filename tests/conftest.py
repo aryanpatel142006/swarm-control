@@ -124,3 +124,12 @@ def git_repo(tmp_path):
     _git(repo, "remote", "add", "origin", str(remote))
     _git(repo, "push", "-q", "-u", "origin", "main")
     return repo
+
+
+@pytest.fixture(autouse=True)
+def _isolated_verify_locks(tmp_path, monkeypatch):
+    """Runner tests export the per-host verify lock to the worker env; keep its files out of the real ~/.swarm."""
+    import swarm.hostlock as hostlock
+    root = tmp_path / "swarm-home"
+    monkeypatch.setattr(hostlock, "lock_dir", lambda project: root / project / "locks")
+    monkeypatch.delenv(hostlock.HELD_ENV, raising=False)

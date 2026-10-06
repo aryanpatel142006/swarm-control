@@ -107,3 +107,46 @@ def test_placeholders_are_found_in_added_doc_lines_only():
 def test_fenced_lines():
     text = "a\n```bash\n{{x}}\n```\nb"
     assert fenced_lines(text) == {2, 3, 4}
+
+
+def test_verify_feedback_says_when_no_step_printed_a_failure():
+    """Q-172/Q-173 (T-080): the feedback was a green pytest tail with no reason for the failure."""
+    from swarm.feedback import verify_feedback
+    out = "verify_fast: python\n" + "." * 60 + " [100%]\n855 passed, 34 deselected, 1 warning in 54.93s\n"
+    fb = verify_feedback(out, script="scripts/verify_fast.sh", code=1)
+    assert "(exit 1)" in fb and "no other step printed a failure" in fb and "855 passed" in fb
+
+
+def test_verify_feedback_names_a_timeout():
+    from swarm.feedback import verify_feedback
+    out = "." * 40 + " [ 50%]\n\n[timeout after 900s]"
+    fb = verify_feedback(out, script="scripts/verify_fast.sh", code=-1)
+    assert "stopped after 900 s" in fb and "no other step printed" not in fb
+
+
+def test_notes_files_status_lists_results_a_cut_off_attempt_left(tmp_path):
+    """Q-193 (T-085): attempt 1's evals finished after it was cut off; attempt 2 was not told the JSONs existed."""
+    import json
+    import os
+    import time
+    from swarm.feedback import note_paths, notes_files_status
+    results = tmp_path / "shared" / "results"
+    results.mkdir(parents=True)
+    wt = tmp_path / "wt"
+    (wt / "eval").mkdir(parents=True)
+    ended = time.time() - 600
+    (results / "assoc_pair1.json").write_text(json.dumps({"ok": 1}))
+    (results / "assoc_pair2.json").write_text('{"partial": ')
+    (wt / "eval" / "runs.jsonl").write_text('{"a":1}\n{"a":2}\n')
+    os.utime(wt / "eval" / "runs.jsonl", (ended - 60, ended - 60))
+    notes = ("- started `python -m eval.assoc --pair 1 > $HEARING_RESULTS_DIR/assoc_pair1.json` (PID 4242)\n"
+             "- pair 2 → ${HEARING_RESULTS_DIR}/assoc_pair2.json, pair 3 → $HEARING_RESULTS_DIR/assoc_pair3.json\n"
+             "- runs in eval/runs.jsonl; table goes to docs/EVAL.md")
+    assert "$HEARING_RESULTS_DIR/assoc_pair1.json" in note_paths(notes)
+    out = notes_files_status(notes, [wt], {"HEARING_RESULTS_DIR": str(results)}, ended_at=ended)
+    lines = out.splitlines()
+    assert len(lines) == 3                               # pair 3 and docs/EVAL.md do not exist: not listed
+    assert "assoc_pair1.json" in lines[0] and "valid JSON" in lines[0] and "after that attempt ended" in lines[0]
+    assert "NOT valid JSON" in lines[1]
+    assert "2 lines" in lines[2] and "after that attempt ended" not in lines[2]
+    assert notes_files_status("nothing here", [wt], {}) == ""

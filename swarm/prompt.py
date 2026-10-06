@@ -92,7 +92,7 @@ def tools_section(task: Task, mcp: list[str], skills: list[str], skill_tool: boo
 def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: dict[str, str],
                    structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = (),
                    skill_tool: bool = True, conflicts_note: str = "", previous_notes: str = "",
-                   limits_line: str = "") -> str:
+                   limits_line: str = "", doc_root: Path | None = None, branch_log: str = "") -> str:
     import platform
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
@@ -114,6 +114,11 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
         parts += ["", "## Merge conflicts: resolve these first", "", conflicts_note.strip()]
     if task.feedback.strip():
         parts += ["", "## Feedback and messages for this task (address every item)", "", task.feedback.strip()]
+    if branch_log.strip():
+        # a resumed run read docs quoted from main and concluded its own doc work was undone (Q-180)
+        parts += ["", "## Work already on this branch", "",
+                  "Earlier attempts committed these (newest first); build on them, do not redo them. `git show <sha>` "
+                  "shows one.", "", "```", branch_log.strip(), "```"]
     if previous_notes.strip():
         # verbatim: measurements and half-done steps a cut-off attempt recorded (Q-160, Q-162)
         parts += ["", "## Notes from the previous attempt", "",
@@ -122,8 +127,12 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
                   "", previous_notes.strip()]
     parts += tools_section(task, list(mcp), list(skills), skill_tool)
     parts += ["", "## Project context", ""]
+    if doc_root is not None:
+        parts += ["Excerpts below are read from your worktree as this run started (current main"
+                  + (" merged into this branch, so they include its earlier commits" if branch_log.strip() else "")
+                  + "). The files on disk are the truth if they differ.", ""]
     for ref in select_docs(cfg, task.type):
-        text = read_doc(cfg.repo_root, ref)
+        text = (read_doc(doc_root, ref) if doc_root is not None else None) or read_doc(cfg.repo_root, ref)
         if text:
             parts += [f"### {ref}", "", text.strip(), ""]
     parts += ["Other docs are in the repo; read them when you need them: PLAN.md, docs/ARCHITECTURE.md, "

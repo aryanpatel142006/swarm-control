@@ -12,8 +12,9 @@ from typing import Callable
 
 from .adapters import get_adapter
 from .adapters.base import RunSpec
-from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, fenced_lines, placeholder_feedback,
-                       placeholder_hits, reconcile_sync_feedback, verify_feedback)
+from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, DEFAULT_STRAY_PATTERNS, fenced_lines,
+                       placeholder_feedback, placeholder_hits, reconcile_sync_feedback, stray_feedback, stray_files,
+                       verify_feedback)
 from .board.base import Board, claim_task
 from .config import Config
 from .models import QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
@@ -73,13 +74,22 @@ def next_tier_model(agent_cfg, current: str) -> tuple[str, str | None]:
     return current, agent_cfg.effort.get(tiers[idx])
 
 
-def worker_env(wt: Path, task: Task) -> dict:
+def worker_env(wt: Path, task: Task, cfg: Config | None = None, host: str | None = None) -> dict:
     """Environment for the worker CLI. PYTHONPATH puts the worktree first, so a script run from /tmp imports the
-    worktree's package and not the main checkout's editable install (six notes: Q-086 … Q-126)."""
+    worktree's package and not the main checkout's editable install (six notes: Q-086 … Q-126). With a config: the
+    project's `env:` block (shared data paths, Q-198) and the per-host verify lock (SWARM_VERIFY_LOCK_DIR, and
+    `swarm-lock` on PATH) so the worker's own verify runs share the machine's slots with the harness's."""
     paths = [str(wt)] + ([str(wt / "src")] if (wt / "src").is_dir() else [])
     old = os.environ.get("PYTHONPATH", "")
-    return {"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
-            "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)}
+    env = {}
+    if cfg is not None:
+        env.update(cfg.project_env())
+        from .hostlock import worker_lock_env
+        slots = cfg.hosts[host].max_parallel_verify if host in cfg.hosts else 2
+        env.update(worker_lock_env(cfg.project, slots))
+    env.update({"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
+                "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)})
+    return env
 
 
 def _append_log(path: Path, section: str) -> None:
@@ -433,6 +443,12 @@ class Runner:
                 self.log(f"[{task.id}] could not check the old branch: {e}")
         self.log(f"[{task.id}] {task.agent} attempt {attempt} model={task.model} reuse={reuse}")
         started = self.now()
+        nonce = task.claim_nonce
+        if self._claim_moved(task, nonce, on_error=False):
+            # `swarm assign --force` (or a reap) handed the task on between our claim and here: provisioning now
+            # would delete the new owner's worktree at the same path (Q-200, T-093)
+            self.log(f"[{task.id}] claim moved before provisioning; leaving the task to its new owner")
+            return Outcome(task, None, None, None, task.status)
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
             if carried:
@@ -448,7 +464,7 @@ class Runner:
                 task.feedback, synced=synced, conflicts=conflicts,
                 markers=self.ws.conflict_marker_files(wt) if reuse else [],
                 main_ref=f"{self.ws.remote}/{self.cfg.main_branch}")
-            setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
             if setup is not None and not setup.ok:   # a broken environment is not the model's job to debug
                 task.last_error = f"{self.cfg.verify.setup_worktree} failed: {setup.tail(600)}"[:1900]
                 task.flags = list(dict.fromkeys(task.flags + ["env"]))
@@ -479,7 +495,8 @@ class Runner:
             prompt = compile_prompt(task, self.cfg, rules_text=self.rules_text, deps_summaries=deps,
                                     structured_output_supported=structured, mcp=mcp, skills=skills,
                                     skill_tool=agent_cfg.provider == "claude", conflicts_note=conflicts_note,
-                                    previous_notes=self._previous_carry(task.id, attempt), limits_line=limits_line)
+                                    previous_notes=self._previous_carry(task.id, attempt, wt), limits_line=limits_line,
+                                    doc_root=wt, branch_log=self._branch_log(wt) if reuse else "")
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=turns,
@@ -487,21 +504,51 @@ class Runner:
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
                            extra_args=list(agent_cfg.extra_args), mcp=mcp, plugin_dirs=dirs,
                            mcp_servers=inline, settings=settings, should_stop=self._claim_watch(task),
-                           claim_nonce=task.claim_nonce, env=worker_env(wt, task))
+                           claim_nonce=task.claim_nonce, env=worker_env(wt, task, self.cfg, self.host))
             result = self.adapter_factory(agent_cfg).run(spec)
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
                                duration_s=duration, ok=result.ok)
             self._save_logs(wt, task.id, attempt, result)
-            self._save_carry(wt, task.id, attempt, final_report=result.ok and result.structured_output is not None)
+            self._save_carry(wt, task.id, attempt, final_report=result.ok and result.structured_output is not None,
+                             result=result, agent_env=agent_cfg.env)
             if self._stopping:
                 return self._park(task, wt, result)
             if result.rate_limited:
                 return self._rate_limited(task, result)
             return self._publish(task, wt, attempt, result)
         finally:
-            self.ws.dispose(wt)
+            if self._claim_moved(task, nonce):
+                # the worktree path is per task, not per run: the new owner's attempt may already be working in it
+                # (Q-200: claude-a's cleanup deleted claude-a2's cwd a few minutes into T-093). Its provision
+                # replaces whatever this run left there.
+                self.log(f"[{task.id}] claim moved to another run; leaving the worktree to it")
+            else:
+                self.ws.dispose(wt)
             self._bump_agent_row(task.agent, result_usage=None)
+
+    def _claim_moved(self, task: Task, nonce: str, *, on_error: bool = True) -> bool:
+        """True when the board shows another run owning this task: a different claim nonce on a Running task, or
+        another agent than the one this run last wrote (an `assign --force` clears the claim and changes the agent
+        before the new runner claims). A board read failure counts as moved: leaving a worktree behind is harmless
+        (the next provision replaces it), deleting someone's live worktree is not. Before provisioning a read
+        failure must not abandon a claimed task, so the caller passes on_error=False there."""
+        try:
+            fresh = self.board.get_task(task.id)
+        except Exception:   # noqa: BLE001
+            return on_error
+        if fresh is None:
+            return False
+        if fresh.claim_nonce and fresh.claim_nonce != nonce and fresh.status is Status.RUNNING:
+            return True
+        return bool(fresh.agent and task.agent and fresh.agent != task.agent)
+
+    def _branch_log(self, wt: Path, cap: int = 20) -> str:
+        """`git log --oneline main..HEAD` without merge commits (the harness's own syncs), newest first."""
+        r = self.ws.git(wt, "log", "--oneline", "--no-merges", f"{self.ws.remote}/{self.cfg.main_branch}..HEAD",
+                        check=False)
+        lines = [ln for ln in (r.out if r.ok else "").splitlines() if ln.strip()]
+        return "\n".join(lines[:cap] + ([f"… and {len(lines) - cap} older"] if len(lines) > cap else []))
 
     def _sync_before_run(self, task: Task, wt: Path) -> tuple[str, bool, list[str]]:
         """A parked branch drifts from main: merge current main in before the CLI starts. On a conflict the markers
@@ -543,11 +590,30 @@ class Runner:
         except OSError as e:
             self.log(f"could not save logs: {e}")
 
-    def _save_carry(self, wt: Path, task_id: str, attempt: int, *, final_report: bool) -> None:
+    def _save_carry(self, wt: Path, task_id: str, attempt: int, *, final_report: bool,
+                    result: RunResult | None = None, agent_env: dict | None = None) -> None:
         """Keep the worker's running notes (and its draft report when the run produced no final one) beside the
         attempt's logs: the worktree, and .swarm-run with it, is deleted when the run ends. Before Oct 6 a
-        max-turns attempt lost both and the retry re-derived measurements it had already taken (Q-160, Q-162)."""
+        max-turns attempt lost both and the retry re-derived measurements it had already taken (Q-160, Q-162).
+        A run that ended without a final report and without notes gets the tail of its Claude transcript instead
+        (each shell command with the end of its output) as commands.md (Q-183)."""
         logdir = self.log_dir / task_id / f"attempt-{attempt}"
+        notes = wt / ".swarm-run" / "notes.md"
+        try:
+            has_notes = notes.is_file() and bool(notes.read_text(errors="replace").strip())
+        except OSError:
+            has_notes = False
+        if not final_report and not has_notes and result is not None and result.session_id:
+            from .transcript import bash_digest, find_transcript
+            extra = [Path(agent_env["CLAUDE_CONFIG_DIR"]).expanduser()] if (agent_env or {}).get("CLAUDE_CONFIG_DIR") else []
+            path = find_transcript(result.session_id, wt, extra)
+            digest = bash_digest(path) if path else ""
+            if digest:
+                try:
+                    logdir.mkdir(parents=True, exist_ok=True)
+                    (logdir / "commands.md").write_text(digest)
+                except OSError as e:
+                    self.log(f"[{task_id}] could not keep the command digest: {e}")
         for name in CARRY_FILES:
             if name == "report.json" and final_report:
                 continue
@@ -559,23 +625,47 @@ class Runner:
             except OSError as e:
                 self.log(f"[{task_id}] could not keep .swarm-run/{name}: {e}")
 
-    def _previous_carry(self, task_id: str, attempt: int) -> str:
-        """The newest earlier attempt's notes and draft report, verbatim, for the prompt ("" if none on this host)."""
+    def _previous_carry(self, task_id: str, attempt: int, wt: Path | None = None) -> str:
+        """The newest earlier attempt's notes and draft report, verbatim, for the prompt ("" if none on this host).
+        Without notes, the shell-command digest from its transcript (Q-183). Files the notes name are listed with
+        their state now (size, mtime, JSON validity), so a retry knows a background job finished (Q-193)."""
         base = self.log_dir / task_id
         for k in range(attempt - 1, 0, -1):
             d = base / f"attempt-{k}"
             parts = []
-            for name, label in (("notes.md", "`.swarm-run/notes.md`"), ("report.json", "draft `.swarm-run/report.json`")):
+            texts = []
+            for name, label in (("notes.md", "`.swarm-run/notes.md`"), ("report.json", "draft `.swarm-run/report.json`"),
+                                ("commands.md", "last shell commands and their output (from the CLI transcript; "
+                                 "it wrote no notes)")):
                 f = d / name
                 try:
                     text = f.read_text(errors="replace").strip() if f.is_file() else ""
                 except OSError:
                     text = ""
                 if text:
+                    texts.append(text)
                     parts.append(f"From attempt {k}, {label}:\n\n```\n{text[:CARRY_CAP]}\n```")
             if parts:
+                status = self._notes_files(d, "\n".join(texts), wt)
+                if status:
+                    parts.append(f"Files named above, as they are now (attempt {k} ended at the time shown for its "
+                                 "logs; a file written later was finished by a background job):\n\n" + status)
                 return "\n\n".join(parts)
         return ""
+
+    def _notes_files(self, attempt_dir: Path, text: str, wt: Path | None) -> str:
+        from .feedback import notes_files_status
+        ended = None
+        for name in ("stdout.txt", "notes.md", "commands.md"):
+            f = attempt_dir / name
+            if f.is_file():
+                ended = f.stat().st_mtime
+                break
+        roots = [r for r in (wt, self.cfg.repo_root) if r is not None]
+        try:
+            return notes_files_status(text, roots, {**os.environ, **self.cfg.project_env()}, ended_at=ended)
+        except OSError:
+            return ""
 
     def _park(self, task: Task, wt: Path, result: RunResult) -> Outcome:
         """Runner is stopping: keep whatever the model left, push it, and requeue for a resume."""
@@ -673,6 +763,7 @@ class Runner:
         else:
             verify_tail = verify.tail(1500) if verify is not None else ""
         placeholders = self._placeholder_hits(wt) if changed and verify_ok is not False and not markers else []
+        strays = self._stray_files(wt, changed) if changed and verify_ok is not False and not markers else []
 
         pr_url, push_error = task.pr_url, ""
         if changed:
@@ -713,7 +804,8 @@ class Runner:
         for note in deliver_messages(self.board, task, report):
             self.log(f"[{task.id}] {note.text[:120]}")
 
-        status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error, markers, placeholders)
+        status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error, markers, placeholders,
+                              strays)
         if not self.publish_outcome(task, status):
             return Outcome(task, report, result, verify_ok, self.board.get_task(task.id).status)
         self.log(f"[{task.id}] → {status.value}")
@@ -733,6 +825,11 @@ class Runner:
         task.status = status
         self.board.update_task(task, PUBLISH_FIELDS)
         return True
+
+    def _stray_files(self, wt: Path, changed: list[str]) -> list[str]:
+        patterns = self.cfg.verify.stray_files
+        patterns = DEFAULT_STRAY_PATTERNS if patterns is None else patterns
+        return stray_files([f for f in changed if (wt / f).is_file()], patterns) if patterns else []
 
     def _placeholder_hits(self, wt: Path) -> list[tuple[str, int, str]]:
         patterns = self.cfg.verify.placeholders
@@ -757,7 +854,7 @@ class Runner:
 
     def _decide(self, task: Task, report: Report, result: RunResult, changed: list[str],
                 verify_ok: bool | None, verify_tail: str, push_error: str, markers: list[str] = (),
-                placeholders: list[tuple[str, int, str]] = ()) -> Status:
+                placeholders: list[tuple[str, int, str]] = (), strays: list[str] = ()) -> Status:
         if report.status == "blocked":
             return Status.BLOCKED
         if report.status == "failed":
@@ -814,12 +911,13 @@ class Runner:
             task.feedback = verify_tail
             task.flags = list(dict.fromkeys(task.flags + ["resume"]))
             return Status.CHANGES_REQUESTED
-        if placeholders:
-            text = placeholder_feedback(list(placeholders))
+        if placeholders or strays:
+            text = "\n\n".join(([placeholder_feedback(list(placeholders))] if placeholders else [])
+                               + ([stray_feedback(list(strays))] if strays else []))
             task.review_rounds += 1
             if task.review_rounds > self.cfg.max_review_rounds:
                 self._file_question(task, report, {
-                    "kind": "blocking", "text": f"{task.id} still leaves placeholder tokens after "
+                    "kind": "blocking", "text": f"{task.id} still leaves placeholder tokens or backup files after "
                     f"{task.review_rounds} rounds. Fill them by hand, relax verify.placeholders, or cut?",
                     "options": ["human fix", "relax the check", "cut"], "proceeding_with": ""}, context=text)
                 return Status.BLOCKED

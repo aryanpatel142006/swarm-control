@@ -76,6 +76,9 @@ class Workspace:
         self.main_branch = main_branch
         self.remote = remote
         self.gh = gh or _default_gh
+        # set by the CLI: a context-manager factory holding a per-host verify slot (swarm/hostlock.py); None = no lock
+        self.verify_slot: Callable[[str], object] | None = None
+        self.script_env: dict[str, str] = {}      # Config.project_env(): shared data paths for verify scripts
 
     # ----- git plumbing -----
     def git(self, cwd: Path, *args: str, check: bool = True, timeout: int = 300) -> CmdResult:
@@ -166,6 +169,18 @@ class Workspace:
                 exclude.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + pattern + "\n")
         except OSError:
             pass
+
+    def provision_detached(self, name: str, ref: str | None = None) -> Path:
+        """A throwaway worktree at `ref` (default: current origin/main) with no branch, e.g. to run verify on main."""
+        self.fetch()
+        path = self.worktree_root / name
+        if path.exists():
+            self.dispose(path)
+        self.git(self.repo_root, "worktree", "prune")
+        self.worktree_root.mkdir(parents=True, exist_ok=True)
+        self.git(self.repo_root, "worktree", "add", "-q", "--detach", str(path), ref or self._main_ref())
+        (path / ".swarm-run").mkdir(exist_ok=True)
+        return path
 
     def dispose(self, path: Path) -> None:
         r = self.git(self.repo_root, "worktree", "remove", "--force", str(path), check=False)
@@ -283,7 +298,10 @@ class Workspace:
                 return True
         return False
 
-    def run_script(self, path: Path, script_rel: str | None, timeout: int) -> CmdResult | None:
+    def run_script(self, path: Path, script_rel: str | None, timeout: int, *, slot: bool = True) -> CmdResult | None:
+        """Run a project script in a worktree. With slot=True (verify scripts) it first takes a per-host verify
+        slot when the CLI configured one, so N verifies at most run at once on this machine; setup scripts pass
+        slot=False. The wait for a slot does not count against `timeout`."""
         if not script_rel:
             return None
         script = path / script_rel
@@ -292,8 +310,13 @@ class Workspace:
         # the target repo's scripts must not resolve `python3` to swarm-control's own venv
         own_bin = str(Path(sys.executable).parent)
         path_env = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if p and p != own_bin)
-        return run_cmd(["bash", str(script)], cwd=path, timeout=timeout,
-                       env={"PATH": path_env, **{k: v for k, v in (("VIRTUAL_ENV", ""),) if False}})
+        env = {**self.script_env, "PATH": path_env}
+        if not slot or self.verify_slot is None:
+            return run_cmd(["bash", str(script)], cwd=path, timeout=timeout, env=env)
+        from .hostlock import HELD_ENV
+        with self.verify_slot(f"{path.name}: {script_rel}") as held:
+            return run_cmd(["bash", str(script)], cwd=path, timeout=timeout,
+                           env={**env, HELD_ENV: "1"} if held else env)
 
     # ----- GitHub -----
     def pr_create_or_update(self, branch: str, title: str, body: str) -> str:

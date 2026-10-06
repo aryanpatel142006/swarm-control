@@ -113,7 +113,7 @@ class Merger:
             ok, conflicts, causes = self.ws.merge_main(wt, keep_conflicts=False)
             if not ok:
                 return self._back(task, conflict_feedback(conflicts, causes, self.cfg.main_branch))
-            self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
+            self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
             verify = self.ws.run_script(wt, self.cfg.verify.fast, 900)
             if verify is not None and not verify.ok:
                 return self._back(task, verify_feedback(

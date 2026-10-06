@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from .config import Config
 from .models import Task
@@ -92,3 +93,25 @@ def main_exists(ws):
     except Exception:  # noqa: BLE001 - the lint is advice; never block task creation on it
         return None
     return lambda p: (wt / p).exists()
+
+
+_ROOT_PATH = re.compile(r"(?:^|(?<=[\s'\"(`=]))(/[\w.<>{}@+-]+)((?:/[\w.<>{}@+-]+)*\.[A-Za-z0-9]{1,6})?(?=$|[\s'\"),`;:]|\.(?:\s|$))",
+                        re.M)
+
+
+def shell_expansion_hints(text: str, root: Path | None = None) -> list[str]:
+    """Paths in orchestrator-written task text that start at a filesystem-root entry that does not exist and carry
+    a file extension: almost always a `$VAR/…` that the shell expanded to nothing because the text was in double
+    quotes (Q-186: `/demo_regress_<stamp>.json` had lost `$HEARING_RESULTS_DIR`). Advice for `swarm add` only."""
+    root = Path(root or "/")
+    hints = []
+    for m in _ROOT_PATH.finditer(text or ""):
+        first, rest = m.group(1), m.group(2) or ""
+        token = first + rest
+        if not re.search(r"\.[A-Za-z0-9]{1,6}$", token):
+            continue                                   # /simple, /api/x: routes, not files
+        if (root / first.lstrip("/")).exists():
+            continue
+        hints.append(f"`{token}` starts at the filesystem root, where `{first}` does not exist: probably a `$VAR/…` "
+                     "your shell expanded to nothing. Pass task text in single quotes or a quoted heredoc.")
+    return list(dict.fromkeys(hints))
