@@ -55,7 +55,7 @@ plugins_required: [frontend-design, context7]    # ~80 tok always-on + the docs-
 plugins_by_type:
   frontend: [modern-web-guidance, playwright]   # current web-platform practices; browser checks (chromium installed by `swarm tools --install`)
 
-# Skills the worker is told to invoke (Skill tool) before the relevant work; it also auto-discovers the rest.
+# Skills the worker is told to use before the relevant work (Claude: Skill tool; other CLIs are pointed at .claude/skills/<name>/SKILL.md); Claude also auto-discovers the rest.
 skills_by_type:
   frontend: [frontend-design, modern-web-guidance]
   backend:  [test-driven-development]
