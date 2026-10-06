@@ -26,7 +26,7 @@ verify:
   fast: scripts/verify_fast.sh      # ≤ 60 s; run after every task
   full: scripts/verify_full.sh      # run by the reviewer
 
-task_limits:
+task_limits:   # worker turns never go below 60/100/150 for medium/high/xhigh effort (runner EFFORT_TURN_FLOOR); Codex has no turn limit
   S: { turns: 30,  minutes: 20, budget_usd: 3 }
   M: { turns: 60,  minutes: 40, budget_usd: 8 }
   L: { turns: 120, minutes: 75, budget_usd: 20 }

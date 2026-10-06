@@ -100,7 +100,7 @@ def test_done_normal_goes_merge_ready(cfg, git_repo, tmp_path):
     assert out.status is Status.MERGE_READY and stored.status is Status.MERGE_READY
     assert stored.pr_url == "https://gh/pr/1" and stored.attempts == 1 and stored.claim_nonce == ""
     assert board.reports[t.id][0][0] == "Report — attempt 1"
-    assert adapter.specs[0].model == "gpt-6-sol" and adapter.specs[0].max_turns == 30
+    assert adapter.specs[0].model == "gpt-6-sol" and adapter.specs[0].max_turns == 60   # S=30, medium floor 60
     assert "RULES" in adapter.prompts[0]
     assert not r.ws.worktree_path(t.id).exists()
     assert r.ledger.totals("codex-a").cost_usd == 0.25
@@ -776,3 +776,33 @@ def test_usage_limit_cools_down_until_the_reset_or_three_hours(cfg, git_repo, tm
     # the runner's first heartbeat after a restart keeps the limit note (status and routing read it)
     r.heartbeat(force=True)
     assert board.get_agent("codex-a").note.startswith("usage limit") and board.get_agent("codex-a").status == "cooldown"
+
+
+def test_worker_turns_have_an_effort_floor():
+    """Q-142/Q-143: S tasks hit error_max_turns right before finishing at 30 turns."""
+    from swarm.runner import worker_turns
+    assert [worker_turns(30, e) for e in ("low", "medium", "high", "xhigh", None)] == [30, 60, 100, 150, 30]
+    assert worker_turns(120, "medium") == 120          # a bigger size limit is never lowered
+
+
+def test_after_max_turns_the_next_prompt_says_finish_do_not_start_over(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "nearly done\n"}, ok=False, structured=None)
+    orig = adapter.run
+
+    def run(spec):
+        res = orig(spec)
+        res.error = "error_max_turns: "
+        return res
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="sonnet", effort="medium", feedback="reviewer: handle empty input")
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    assert adapter.specs[0].max_turns == 60             # S limit is 30; medium effort raises it
+    stored = board.get_task(t.id)
+    assert stored.feedback.startswith("The previous attempt ran out of turns right before finishing; its work is on "
+                                      "the branch — finish and report, do not start over.")
+    assert "reviewer: handle empty input" in stored.feedback
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    r.run_task(board.get_task(t.id))
+    assert "do not start over" in adapter.prompts[1]

@@ -33,6 +33,19 @@ TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "
 SELF_UPDATE_EVERY_S = 600
 
 
+# Turn floors by reasoning effort for worker runs. task_limits (turns by size: 30/60/120 in selective-hearing) cut
+# S/M runs off with error_max_turns right before they finished (Q-096, Q-103, Q-126, Q-142, Q-143); deeper
+# effort spends more turns per step. Codex exec has no turn limit (only the size's time limit applies).
+EFFORT_TURN_FLOOR = {"medium": 60, "high": 100, "xhigh": 150, "max": 150}
+MAX_TURNS_NOTE = ("The previous attempt ran out of turns right before finishing; its work is on the branch — finish and "
+                  "report, do not start over. `git log origin/main..HEAD` and `git diff origin/main...HEAD --stat` show "
+                  "what it did; run verify, fix what is left, and produce the report.")
+
+
+def worker_turns(size_turns: int, effort: str | None) -> int:
+    return max(size_turns, EFFORT_TURN_FLOOR.get((effort or "").lower(), 0))
+
+
 def backoff_seconds(failures: int) -> int:
     """Retry delay after a failed tick: 15, 30, then 60 s at most. Longer gaps let the heartbeat go stale and a
     healthy worker's task gets reaped during an ordinary Wi-Fi blip (Oct 5 2026)."""
@@ -421,7 +434,7 @@ class Runner:
             limit = self.cfg.limit_for(task.size)
             model = task.model or agent_cfg.models["mid"]
             effort = task.effort or agent_cfg.effort.get("mid")
-            spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=limit.turns,
+            spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=worker_turns(limit.turns, effort),
                            budget_usd=limit.budget_usd, timeout_s=limit.minutes * 60, cwd=wt,
                            schema=REPORT_SCHEMA if structured else None, sandbox=agent_cfg.sandbox,
                            extra_args=list(agent_cfg.extra_args), mcp=mcp, plugin_dirs=dirs,
@@ -657,8 +670,14 @@ class Runner:
             if task.attempts >= self.cfg.max_attempts:
                 task.last_error = result.error[:1900] or "abnormal end"
                 return Status.FAILED
-            task.feedback = (f"The previous attempt ended with: {result.error or 'unknown error'}. "
-                             "Continue from the current branch state, finish the task, and produce the report.")
+            if "max_turns" in result.error:
+                note = MAX_TURNS_NOTE
+            else:
+                note = (f"The previous attempt ended with: {result.error or 'unknown error'}. "
+                        "Continue from the current branch state, finish the task, and produce the report.")
+            # keep what the worker was addressing (reviewer findings, messages); drop older resume notes
+            kept = [] if task.feedback.startswith(("The previous attempt", "Previous attempt")) else [task.feedback.strip()]
+            task.feedback = "\n\n".join([note] + [k for k in kept if k])[:6000]
             task.flags = list(dict.fromkeys(task.flags + ["resume"]))
             # the same model at the same budget usually ends the same way: resume one tier up
             agent_cfg = self.cfg.agents.get(task.agent)
