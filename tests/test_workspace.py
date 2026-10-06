@@ -262,3 +262,32 @@ def test_unmerged_commits_counts_branch_work_main_lacks(git_repo, tmp_path):
     ws.dispose(wt)
     ws.fetch()
     assert ws.unmerged_commits("T-001") == 1
+
+
+def test_merge_main_keeps_conflict_markers_and_merge_head_when_asked(git_repo, tmp_path):
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    wt = ws.provision("T-020")
+    (wt / "README.md").write_text("branch\n")
+    ws.commit_all(wt, "branch side")
+    (git_repo / "README.md").write_text("main\n")
+    _git(git_repo, "commit", "-qam", "main side")
+    _git(git_repo, "push", "-q", "origin", "main")
+    ok, conflicts, causes = ws.merge_main(wt, keep_conflicts=False)
+    assert not ok and conflicts == ["README.md"] and any("main side" in c for c in causes)
+    assert not ws.merge_in_progress(wt) and "<<<<<<<" not in (wt / "README.md").read_text()
+    ok, conflicts, _ = ws.merge_main(wt, keep_conflicts=True)
+    assert not ok and ws.merge_in_progress(wt) and "<<<<<<<" in (wt / "README.md").read_text()
+    assert ws.conflict_marker_files(wt) == ["README.md"]
+    (wt / "README.md").write_text("both\n")
+    assert ws.commit_all(wt, "resolve") and not ws.merge_in_progress(wt) and ws.conflict_marker_files(wt) == []
+
+
+def test_merge_main_clean_brings_main_in(git_repo, tmp_path):
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    wt = ws.provision("T-021")
+    (wt / "new.txt").write_text("n\n")
+    ws.commit_all(wt, "new")
+    (git_repo / "other.txt").write_text("o\n")
+    _git(git_repo, "add", "other.txt"); _git(git_repo, "commit", "-qm", "main other"); _git(git_repo, "push", "-q", "origin", "main")
+    assert ws.merge_main(wt, keep_conflicts=True) == (True, [], [])
+    assert (wt / "other.txt").exists() and ws.changed_files(wt) == ["new.txt"]

@@ -72,12 +72,37 @@ def test_small_tasks_get_skills_as_optional(cfg):
     t.size = "M"
     p2 = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
                         skills=["frontend-design"])
-    assert "Skills to invoke before you start" in p2
+    assert "Skills to use before you start" in p2
 
 
 def test_skill_line_tells_cli_without_a_skill_tool_where_to_read(cfg):
-    """Q-128: a Codex worker was told to use a Skill tool it does not have."""
+    """Q-128, Q-134: a Codex worker was told to use a Skill tool it does not have. Only Claude hears about the tool."""
     t = Task(id="T-063", title="Page", type="frontend", importance="normal", size="M")
+    codex = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                           skills=["frontend-design"], skill_tool=False)
+    assert ".claude/skills/<name>/SKILL.md" in codex and "with the Skill tool" not in codex
+    claude = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                            skills=["frontend-design"])
+    assert "with the Skill tool" in claude and "SKILL.md" not in claude
+    t.size = "S"
+    small = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
+                           skills=["frontend-design"], skill_tool=False)
+    assert "Skill tool" not in small and ".claude/skills/<name>/SKILL.md" in small
+
+
+def test_rules_never_ask_a_worker_to_rebase_or_fetch():
+    """Q-140/Q-144/Q-146: the Codex sandbox cannot write rebase or fetch metadata; the harness merges main."""
+    from swarm.prompt import load_rules
+    rules = load_rules()
+    for line in rules.splitlines():
+        low = line.lower()
+        if "git rebase" in low or "git fetch" in low:
+            assert "never" in low or "do not" in low, line
+
+
+def test_merge_conflicts_section_comes_before_feedback(cfg):
+    t = Task(id="T-066", title="Replay", type="frontend", importance="normal", size="M", feedback="reviewer note")
     p = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True,
-                       skills=["frontend-design"])
-    assert ".claude/skills/<name>/SKILL.md" in p
+                       conflicts_note="- web/a.css")
+    assert "## Merge conflicts: resolve these first" in p
+    assert p.index("Merge conflicts") < p.index("reviewer note")

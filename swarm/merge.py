@@ -1,4 +1,4 @@
-"""Merger: rebase onto main, fast verify, force-with-lease push, squash merge, mark Done."""
+"""Merger: merge current main into the branch, fast verify, force-with-lease push, squash merge, mark Done."""
 from __future__ import annotations
 
 import time
@@ -16,6 +16,17 @@ MERGEABILITY_WAIT_S = 3.0
 
 def merge_failures(task: Task) -> int:
     return sum(1 for f in task.flags if f.startswith("merge_failed"))
+
+
+def conflict_feedback(conflicts: list[str], causes: list[str], main_branch: str) -> str:
+    """Changes-requested text for a branch that no longer merges cleanly. It tells the worker what will be in its
+    worktree, not to rebase: the Codex sandbox cannot write rebase or fetch metadata (Q-140, Q-144, Q-146) and
+    three Claude attempts at T-063 went to a hand rebase instead of the task (Q-137)."""
+    return ("Main moved and now conflicts with this branch in: " + ", ".join(conflicts)
+            + (" (main changed them in: " + "; ".join(causes) + ")" if causes else "")
+            + f". Before your next run the harness merges origin/{main_branch} into your branch and leaves conflict "
+            "markers in those files. Resolve them keeping main's intent and this task's change, `git add` them and "
+            "`git commit`. Do not run `git rebase`, `git fetch` or `git merge` yourself.")
 
 
 class Merger:
@@ -96,16 +107,16 @@ class Merger:
     def merge(self, task: Task) -> bool:
         wt = self.ws.provision(task.id, reuse_branch=True)
         try:
-            ok, conflicts, causes = self.ws.rebase_onto_main(wt)
+            # merge, never rebase: a branch may hold a conflict-resolution merge commit (the worker resolved the
+            # markers the runner left), and a rebase would replay those conflicts. The PR is squash-merged.
+            ok, conflicts, causes = self.ws.merge_main(wt, keep_conflicts=False)
             if not ok:
-                return self._back(task, "Rebase onto main conflicted. Resolve conflicts in: " + ", ".join(conflicts)
-                                  + (" (main changed them in: " + "; ".join(causes) + ")" if causes else "")
-                                  + f". Run `git fetch origin && git rebase origin/{self.cfg.main_branch}`, "
-                                  "resolve keeping main's intent, then `git rebase --continue`.")
+                return self._back(task, conflict_feedback(conflicts, causes, self.cfg.main_branch))
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
             verify = self.ws.run_script(wt, self.cfg.verify.fast, 900)
             if verify is not None and not verify.ok:
-                return self._back(task, "verify_fast.sh failed after rebase onto main:\n" + verify.tail(1500))
+                return self._back(task, "verify_fast.sh failed after merging current main into the branch:\n"
+                                  + verify.tail(1500))
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if not push.ok:
                 return self._merge_failed(task, "push failed: " + push.err.strip())

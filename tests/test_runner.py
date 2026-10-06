@@ -454,7 +454,7 @@ def test_abnormal_end_resumes_one_model_tier_up(cfg, git_repo, tmp_path):
     assert board.get_task(t.id).model == "opus"   # mid → high; never above the agent's best tier
 
 
-def test_resumed_branch_is_rebased_onto_main_before_the_run(cfg, git_repo, tmp_path):
+def test_resumed_branch_gets_current_main_before_the_run(cfg, git_repo, tmp_path):
     """T-011 resumed on a branch cut before the backend merges and could not even run verify. A resumed run
     starts from current main; a rebase conflict is reported in the prompt instead of silently working on stale code."""
     adapter = FakeAdapter(files={"src/a.py": "half"}, ok=False, structured=None)
@@ -481,7 +481,69 @@ def test_resumed_branch_is_rebased_onto_main_before_the_run(cfg, git_repo, tmp_p
     _git(git_repo, "add", "src/a.py"); _git(git_repo, "commit", "-qm", "conflicting"); _git(git_repo, "push", "-q", "origin", "main")
     stored = board.get_task(t.id); stored.status = Status.READY; board.update_task(stored, ["status"])
     r.run_task(board.get_task(t.id))
-    assert "rebase onto main conflicted" in seen["prompt"].lower() and "src/a.py" in seen["prompt"]
+    assert "## Merge conflicts: resolve these first" in seen["prompt"] and "- src/a.py" in seen["prompt"]
+
+
+def test_conflicting_resume_leaves_markers_and_merge_head_for_the_worker(cfg, git_repo, tmp_path):
+    """Q-140/Q-144/Q-146: the Codex sandbox cannot rebase or fetch. The runner merges main before the CLI starts and
+    leaves the conflict for plain edits + `git add` + `git commit`, which the sandbox allows."""
+    adapter = FakeAdapter(files={"src/a.py": "branch version\n"}, ok=False, structured=None)
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="codex-a")
+    r.run_task(t)                                       # attempt 1 parks work on the branch (resume)
+    _git(git_repo, "checkout", "-q", "main")
+    (git_repo / "src").mkdir(exist_ok=True); (git_repo / "src" / "a.py").write_text("main version\n")
+    _git(git_repo, "add", "src/a.py"); _git(git_repo, "commit", "-qm", "T-050 rewrote a.py"); _git(git_repo, "push", "-q", "origin", "main")
+    stored = board.get_task(t.id); stored.status = Status.READY; board.update_task(stored, ["status"])
+    seen = {}
+
+    def run(spec):                                       # the worker resolves the markers, adds and commits
+        a = spec.cwd / "src" / "a.py"
+        seen["markers"] = "<<<<<<<" in a.read_text() and ">>>>>>>" in a.read_text()
+        seen["merge_head"] = subprocess.run(["git", "-C", str(spec.cwd), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                                            capture_output=True).returncode == 0
+        seen["prompt"] = spec.prompt_file.read_text()
+        a.write_text("resolved\n")
+        _git(spec.cwd, "add", "src/a.py")
+        _git(spec.cwd, "-c", "user.email=w@x", "-c", "user.name=w", "commit", "-q", "--no-edit")
+        return RunResult(ok=True, exit_code=0, stdout="", stderr="", structured_output={"status": "done", "summary": "ok"})
+    adapter.run = run
+    assert r.run_task(board.get_task(t.id)).status is Status.MERGE_READY
+    assert seen["markers"] and seen["merge_head"]
+    p = seen["prompt"]
+    assert "- src/a.py" in p and "T-050 rewrote a.py" in p and "`git add src/a.py`" in p
+    assert "Do not run `git rebase`, `git fetch`" in p
+    assert _git(git_repo, "show", f"origin/task/{t.id}:src/a.py") == "resolved\n"
+
+
+def test_unresolved_markers_go_back_to_the_worker_not_to_review(cfg, git_repo, tmp_path):
+    """A worker that `git add`s a file without resolving it (or a sandboxed one whose commit the harness makes) must
+    never send conflict markers to review; the work is kept on the branch and the task comes back."""
+    body = "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> origin/main\n"
+    adapter = FakeAdapter(files={"src/a.py": body}, structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.CHANGES_REQUESTED
+    stored = board.get_task(t.id)
+    assert "Conflict markers are still in: src/a.py" in stored.feedback and "resume" in stored.flags
+    assert "<<<<<<<" in _git(git_repo, "show", f"origin/task/{t.id}:src/a.py")   # pushed, not lost
+
+
+def test_runner_merges_main_that_moved_during_the_run_instead_of_rebasing(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "x\n"}, structured={"status": "done", "summary": "ok"})
+    orig = adapter.run
+
+    def run(spec):
+        out = orig(spec)
+        _git(git_repo, "checkout", "-q", "main")
+        (git_repo / "src").mkdir(exist_ok=True); (git_repo / "src" / "a.py").write_text("main\n")
+        _git(git_repo, "add", "src/a.py"); _git(git_repo, "commit", "-qm", "conflicting main"); _git(git_repo, "push", "-q", "origin", "main")
+        return out
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.MERGE_READY      # the pre-verify conflict is aborted and left to the merger
+    assert _git(git_repo, "show", f"origin/task/{t.id}:src/a.py") == "x\n"
 
 
 def test_runner_arms_a_claim_watchdog_on_every_run(cfg, git_repo, tmp_path):
@@ -626,7 +688,7 @@ def test_retry_after_a_failure_continues_from_the_pushed_branch(cfg, git_repo, t
     assert seen["a"] == "first attempt\n" and "previous attempt's commits" in seen["prompt"]
 
 
-def test_branch_is_rebased_onto_main_that_moved_during_the_run(cfg, git_repo, tmp_path):
+def test_branch_gets_main_that_moved_during_the_run(cfg, git_repo, tmp_path):
     """Q-097/Q-121: main moved while the worker ran; verify and review now see the branch on current main."""
     adapter = FakeAdapter(files={"src/a.py": "x\n"}, structured={"status": "done", "summary": "ok"})
     orig = adapter.run

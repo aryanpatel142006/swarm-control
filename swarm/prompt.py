@@ -56,7 +56,7 @@ def select_docs(cfg: Config, task_type: str) -> list[str]:
     return list(dict.fromkeys(refs))
 
 
-def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
+def tools_section(task: Task, mcp: list[str], skills: list[str], skill_tool: bool = True) -> list[str]:
     """Tell the worker which MCP servers are live and which skills to invoke; critical tasks may add more."""
     if not mcp and not skills and task.importance != "critical":
         return []
@@ -66,15 +66,19 @@ def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
     if mcp:
         parts.append("- MCP servers enabled for this run: " + ", ".join(mcp)
                      + ". Use them (docs lookup, browser checks, component search) instead of guessing.")
+    names = ", ".join(f"`{s}`" for s in skills)
+    # Codex and the other non-Claude CLIs have no Skill tool; telling them to use one cost a harness note per
+    # task (Q-128, Q-134). They get the file path and nothing about a tool they do not have.
+    where = ("read `.claude/skills/<name>/SKILL.md` in the worktree (or `~/.claude/skills/<name>/SKILL.md`, "
+             "`~/.codex/skills/<name>/SKILL.md`) and follow it; reading those files is allowed")
     if skills and task.size == "S":   # a small wiring change paid ~6k tokens of general guides it never used (Q-123, Q-127)
-        parts.append("- Skills available for this task: " + ", ".join(f"`{s}`" for s in skills)
-                     + ". This is a small task: invoke only the ones whose area your change actually touches, and "
-                       "read only the sections you need (no Skill tool: read `.claude/skills/<name>/SKILL.md`).")
+        how = "invoke them with the Skill tool" if skill_tool else where
+        parts.append(f"- Skills available for this task: {names}. This is a small task: use only the ones whose area "
+                     f"your change actually touches ({how}), and read only the sections you need.")
     elif skills:
-        parts.append("- Skills to invoke before you start the relevant work: "
-                     + ", ".join(f"`{s}`" for s in skills)
-                     + ". Invoke them with the Skill tool (or `/<name>`) and follow them. If your CLI has no Skill "
-                       "tool, read `.claude/skills/<name>/SKILL.md` (or `~/.claude/skills/<name>/SKILL.md`) and follow it.")
+        how = ("Invoke them with the Skill tool (or `/<name>`) and follow them." if skill_tool
+               else f"Your CLI has no Skill tool: for each one, {where}.")
+        parts.append(f"- Skills to use before you start the relevant work: {names}. {how}")
     if task.importance == "critical":
         parts.append("- This task is critical. If another official plugin or skill would clearly raise the "
                      "quality of the result, install it: `claude plugin install <name>@claude-plugins-official` "
@@ -86,7 +90,8 @@ def tools_section(task: Task, mcp: list[str], skills: list[str]) -> list[str]:
 
 
 def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: dict[str, str],
-                   structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = ()) -> str:
+                   structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = (),
+                   skill_tool: bool = True, conflicts_note: str = "") -> str:
     import platform
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
@@ -101,9 +106,11 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
                                                    for d in task.depends_on))
     parts += ["", "### Description", "", task.description.strip() or "(none)", "", "### Acceptance criteria", "",
               task.acceptance.strip() or "(none given; make it work and test it)"]
+    if conflicts_note.strip():
+        parts += ["", "## Merge conflicts: resolve these first", "", conflicts_note.strip()]
     if task.feedback.strip():
         parts += ["", "## Feedback and messages for this task (address every item)", "", task.feedback.strip()]
-    parts += tools_section(task, list(mcp), list(skills))
+    parts += tools_section(task, list(mcp), list(skills), skill_tool)
     parts += ["", "## Project context", ""]
     for ref in select_docs(cfg, task.type):
         text = read_doc(cfg.repo_root, ref)

@@ -50,7 +50,7 @@ def test_merge_success_marks_done(cfg, git_repo, tmp_path):
     assert board.reports[t.id][-1][0] == "Merged"
 
 
-def test_rebase_conflict_goes_back(cfg, git_repo, tmp_path):
+def test_merge_conflict_goes_back(cfg, git_repo, tmp_path):
     m, board, t, dep, calls = prep(cfg, git_repo, tmp_path)
     (git_repo / "feature.txt").write_text("conflict\n")
     _git(git_repo, "add", "feature.txt")
@@ -60,9 +60,28 @@ def test_rebase_conflict_goes_back(cfg, git_repo, tmp_path):
     stored = board.get_task(t.id)
     assert stored.status is Status.CHANGES_REQUESTED and "feature.txt" in stored.feedback
     assert "resume" in stored.flags
+    # the worker is never told to rebase or fetch (the Codex sandbox cannot, Q-140): the runner merges for it
+    assert "Do not run `git rebase`" in stored.feedback and "git rebase origin" not in stored.feedback
 
 
-def test_verify_failure_after_rebase_goes_back(cfg, git_repo, tmp_path):
+def test_merger_merges_main_into_a_branch_that_holds_a_conflict_resolution(cfg, git_repo, tmp_path):
+    """A rebase would replay the conflict the worker already resolved in a merge commit; a merge does not."""
+    m, board, t, dep, calls = prep(cfg, git_repo, tmp_path)
+    (git_repo / "feature.txt").write_text("main side\n")
+    _git(git_repo, "add", "feature.txt"); _git(git_repo, "commit", "-qm", "main feature"); _git(git_repo, "push", "-q", "origin", "main")
+    wt = m.ws.provision(t.id, reuse_branch=True)
+    ok, conflicts, _ = m.ws.merge_main(wt, keep_conflicts=True)
+    assert not ok and conflicts == ["feature.txt"]
+    (wt / "feature.txt").write_text("resolved\n")
+    m.ws.commit_all(wt, "resolve")            # what the worker (or the harness for a sandboxed one) commits
+    m.ws.push(wt, t.branch, force_with_lease=True)
+    m.ws.dispose(wt)
+    (git_repo / "other.txt").write_text("more\n")
+    _git(git_repo, "add", "other.txt"); _git(git_repo, "commit", "-qm", "main moves again"); _git(git_repo, "push", "-q", "origin", "main")
+    assert m.merge(t) is True and board.get_task(t.id).status is Status.DONE
+
+
+def test_verify_failure_after_merging_main_goes_back(cfg, git_repo, tmp_path):
     m, board, t, dep, calls = prep(cfg, git_repo, tmp_path, verify_ok=False)
     assert m.merge(t) is False
     stored = board.get_task(t.id)

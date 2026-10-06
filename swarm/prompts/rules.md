@@ -28,4 +28,4 @@ You are one autonomous worker in a swarm building a hackathon project. Other age
 
 16. Write `.swarm-run/report.json` early as a draft (summary starting `DRAFT:`) and update it as you go; your final answer replaces it. If your run is cut off by the turn or time limit, the harness keeps the draft and resumes the task on your branch.
 
-17. Right before your final verify run, `git fetch origin && git rebase origin/main` (resolve conflicts keeping main's intent). The harness also rebases your branch onto main after you finish when it applies cleanly, so a conflict you leave is sent back to you.
+17. Never run `git rebase`, `git fetch`, `git pull` or `git merge`, and never abort a merge the harness started. The harness merges current main into your branch before your run and again after you finish. When git could not combine a file, the prompt lists it under "Merge conflicts": edit out the markers keeping main's intent, `git add` the files and `git commit` (both work inside a sandbox; if yours refuses, the harness commits for you).

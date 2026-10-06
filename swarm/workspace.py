@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,25 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+_MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)", re.M)
+_SEPARATOR_RE = re.compile(r"^={7}$", re.M)
+
+
+def merge_conflict_instructions(conflicts: list[str], causes: list[str], main_ref: str) -> str:
+    """What a worker must do with the conflict markers the runner left in its worktree. Plain edits, `git add` and
+    `git commit` only: those work inside the Codex sandbox, `git rebase` and `git fetch` do not (Q-140)."""
+    lines = [f"Before this run the harness merged current `{main_ref}` into your branch. Git could not combine "
+             "these files on its own; they contain conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`):", ""]
+    lines += [f"- {f}" for f in conflicts]
+    if causes:
+        lines += ["", "Main changed them in: " + "; ".join(causes)]
+    lines += ["", "Resolve them first: edit each file so it keeps main's intent and this task's change, remove every "
+              "marker, then `git add " + " ".join(conflicts) + "` and `git commit --no-edit` (that concludes the "
+              "merge). Do not run `git rebase`, `git fetch`, `git pull`, `git merge`, `git merge --abort` or "
+              "`git reset`: the merge is already in progress and the harness handles main. If your sandbox refuses "
+              "the commit, leave the resolved files in place; the harness commits them for you."]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -179,6 +199,51 @@ class Workspace:
         causes = self.git(path, "log", "--format=%h %s", "-5", self._main_ref(), "--not", "HEAD", "--",
                           *conflicts, check=False).out.splitlines() if conflicts else []
         return False, conflicts, [c.strip() for c in causes if c.strip()]
+
+    def merge_main(self, path: Path, *, keep_conflicts: bool) -> tuple[bool, list[str], list[str]]:
+        """Merge current main into the branch: (ok, conflicting files, main commits that touched them).
+
+        The harness syncs branches with main by merging, never by rebasing: a sandboxed worker CLI (Codex) cannot
+        write rebase or fetch metadata, and rebasing a branch that already holds a conflict-resolution merge would
+        replay the same conflicts (Q-140, Q-144, Q-146, Oct 6 2026). PRs are squash-merged, so merge commits on a
+        task branch never reach main. With keep_conflicts the markers and MERGE_HEAD stay in the worktree for the
+        worker to resolve with plain edits, `git add` and `git commit`; otherwise the merge is aborted."""
+        self.fetch()
+        r = self.git(path, "-c", "user.email=swarm@local", "-c", "user.name=swarm",
+                     "merge", "--no-edit", "-q", self._main_ref(), check=False)
+        if r.ok:
+            return True, [], []
+        conflicts = self.unmerged_files(path)
+        if not conflicts:   # not a content conflict (dirty tree, unrelated histories): never leave it half done
+            self.git(path, "merge", "--abort", check=False)
+            raise RuntimeError(f"git merge {self._main_ref()} failed: {r.err.strip() or r.out.strip()}")
+        causes = self.git(path, "log", "--format=%h %s", "-5", self._main_ref(), "--not", "HEAD", "--",
+                          *conflicts, check=False).out.splitlines()
+        if not keep_conflicts:
+            self.git(path, "merge", "--abort", check=False)
+        return False, conflicts, [c.strip() for c in causes if c.strip()]
+
+    def unmerged_files(self, path: Path) -> list[str]:
+        return sorted(self.git(path, "diff", "--name-only", "--diff-filter=U", check=False).out.split())
+
+    def merge_in_progress(self, path: Path) -> bool:
+        return self.git(path, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).ok
+
+    def conflict_marker_files(self, path: Path) -> list[str]:
+        """Changed files that still hold conflict markers (a `<<<<<<<`/`>>>>>>>` line and a `=======` line). Catches
+        a worker that `git add`ed a file without resolving it, so markers never reach review or main."""
+        hits = []
+        for rel in self.changed_files(path):
+            p = Path(path) / rel
+            try:
+                if not p.is_file() or p.is_symlink() or p.stat().st_size > 2_000_000:
+                    continue
+                text = p.read_text(errors="ignore")
+            except OSError:
+                continue
+            if _MARKER_RE.search(text) and _SEPARATOR_RE.search(text):
+                hits.append(rel)
+        return hits
 
     def rebase_in_progress(self, path: Path) -> bool:
         for name in ("rebase-merge", "rebase-apply"):

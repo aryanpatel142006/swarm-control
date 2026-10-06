@@ -21,7 +21,7 @@ from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settin
 from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, harness_feedback_question, parse_report,
                      report_to_markdown)
 from .usage import Ledger
-from .workspace import Workspace
+from .workspace import Workspace, merge_conflict_instructions
 
 STRUCTURED_PROVIDERS = {"claude", "codex"}
 ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
@@ -386,20 +386,11 @@ class Runner:
         try:
             if carried:
                 note = (f"This worktree continues from the previous attempt's commits on "
-                        f"{self.ws.remote}/{task.branch} (rebased onto current main below). Read "
+                        f"{self.ws.remote}/{task.branch} (current main merged in). Read "
                         f"`git log {self.ws.remote}/{self.cfg.main_branch}..HEAD` before you continue; do not redo them.")
                 if note not in task.feedback:
                     task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
-            if reuse:   # a parked branch drifts from main; start the resume from current main, or say why not
-                ok, conflicts, causes = self.ws.rebase_onto_main(wt)
-                if not ok:
-                    note = ("Rebase onto main conflicted in: " + ", ".join(conflicts)
-                            + (" (main changed them in: " + "; ".join(causes) + ")" if causes else "")
-                            + f". First run `git fetch {self.ws.remote} && git rebase {self.ws.remote}/{self.cfg.main_branch}`, "
-                            "resolve every conflict keeping main's intent, `git rebase --continue`, then do the task.")
-                    if note not in task.feedback:
-                        task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
-                    self.log(f"[{task.id}] resume: rebase conflicted ({', '.join(conflicts)})")
+            conflicts_note = self._sync_before_run(task, wt) if reuse else ""
             setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600)
             if setup is not None and not setup.ok:   # a broken environment is not the model's job to debug
                 task.last_error = f"{self.cfg.verify.setup_worktree} failed: {setup.tail(600)}"[:1900]
@@ -421,7 +412,8 @@ class Runner:
                 dirs, settings = self._setup_plugins(task)
             inline = {n: self.cfg.mcp_servers[n] for n in mcp if n in self.cfg.mcp_servers}
             prompt = compile_prompt(task, self.cfg, rules_text=self.rules_text, deps_summaries=deps,
-                                    structured_output_supported=structured, mcp=mcp, skills=skills)
+                                    structured_output_supported=structured, mcp=mcp, skills=skills,
+                                    skill_tool=agent_cfg.provider == "claude", conflicts_note=conflicts_note)
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             limit = self.cfg.limit_for(task.size)
@@ -446,6 +438,21 @@ class Runner:
         finally:
             self.ws.dispose(wt)
             self._bump_agent_row(task.agent, result_usage=None)
+
+    def _sync_before_run(self, task: Task, wt: Path) -> str:
+        """A parked branch drifts from main: merge current main in before the CLI starts. On a conflict the markers
+        and MERGE_HEAD stay in the worktree and the prompt lists the files; the worker resolves them with edits,
+        `git add` and `git commit`. No worker ever rebases or fetches: the Codex sandbox cannot (Q-140, Q-144,
+        Q-146) and Claude workers got rebases wrong under deadline (Q-137). Returns the prompt section, or ""."""
+        try:
+            ok, conflicts, causes = self.ws.merge_main(wt, keep_conflicts=True)
+        except RuntimeError as e:   # a failed fetch must not stop the run; it works on the branch as it is
+            self.log(f"[{task.id}] could not merge main before the run: {e}")
+            return ""
+        if ok:
+            return ""
+        self.log(f"[{task.id}] merged main with conflicts left for the worker ({', '.join(conflicts)})")
+        return merge_conflict_instructions(conflicts, causes, f"{self.ws.remote}/{self.cfg.main_branch}")
 
     def _bump_agent_row(self, agent: str, result_usage=None) -> None:
         """Refresh runs/spend on the Agents row so the status page shows real numbers after each task."""
@@ -533,19 +540,23 @@ class Runner:
         if dec or debt:
             changed = self.ws.changed_files(wt)
 
+        markers: list[str] = []
         if changed:
             # main often moves while a worker runs; verify and review the branch on top of current main (Q-097,
-            # Q-121: workers rebased on a main that was already stale). A conflict is left to the merger.
+            # Q-121). Merged, not rebased (see Workspace.merge_main). A conflict here is aborted and left to the
+            # merger, which sends the task back; the next run starts with the markers in place.
+            # commit_all also concludes a merge the worker resolved but could not commit (sandbox).
             self.ws.commit_all(wt, f"{task.id}: {(report.summary or 'work in progress')[:60]}")
+            markers = self.ws.conflict_marker_files(wt)
             try:
-                if not self.ws.rebase_in_progress(wt):
-                    ok, conflicts, _ = self.ws.rebase_onto_main(wt)
+                if not markers and not self.ws.rebase_in_progress(wt):
+                    ok, conflicts, _ = self.ws.merge_main(wt, keep_conflicts=False)
                     if ok:
                         changed = self.ws.changed_files(wt)
                     else:
-                        self.log(f"[{task.id}] pre-verify rebase conflicted ({', '.join(conflicts)}); the merger will ask")
+                        self.log(f"[{task.id}] pre-verify merge of main conflicted ({', '.join(conflicts)}); the merger will ask")
             except RuntimeError as e:   # a failed fetch must not lose the run's result
-                self.log(f"[{task.id}] pre-verify rebase skipped: {e}")
+                self.log(f"[{task.id}] pre-verify merge skipped: {e}")
 
         verify = self.ws.run_script(wt, self.cfg.verify.fast, 900) if changed else None
         verify_ok = verify.ok if verify is not None else None
@@ -583,7 +594,7 @@ class Runner:
         for note in deliver_messages(self.board, task, report):
             self.log(f"[{task.id}] {note.text[:120]}")
 
-        status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error)
+        status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error, markers)
         if not self.publish_outcome(task, status):
             return Outcome(task, report, result, verify_ok, self.board.get_task(task.id).status)
         self.log(f"[{task.id}] → {status.value}")
@@ -605,7 +616,7 @@ class Runner:
         return True
 
     def _decide(self, task: Task, report: Report, result: RunResult, changed: list[str],
-                verify_ok: bool | None, verify_tail: str, push_error: str) -> Status:
+                verify_ok: bool | None, verify_tail: str, push_error: str, markers: list[str] = ()) -> Status:
         if report.status == "blocked":
             return Status.BLOCKED
         if report.status == "failed":
@@ -617,6 +628,20 @@ class Runner:
         if push_error:
             task.last_error = f"push failed: {push_error}"[:1900]
             return Status.FAILED
+        if markers:
+            # conflict markers left in place (committed so the work is kept): never send that to review or merge
+            task.review_rounds += 1
+            if task.review_rounds > self.cfg.max_review_rounds:
+                self._file_question(task, report, {
+                    "kind": "blocking", "text": f"{task.id} still has conflict markers in {', '.join(markers)}"[:190],
+                    "options": ["resolve by hand", "cut", "split"], "proceeding_with": ""})
+                return Status.BLOCKED
+            task.feedback = ("Conflict markers are still in: " + ", ".join(markers) + ". Edit each file so it keeps "
+                             "main's intent and this task's change, remove every `<<<<<<<`/`=======`/`>>>>>>>` line, "
+                             "then `git add` the files and `git commit`. Do not run `git rebase`, `git fetch` or "
+                             "`git merge`; the harness handles main.")
+            task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+            return Status.CHANGES_REQUESTED
         if not result.ok and (report.synthesized or result.structured_output is None):
             # the CLI ended abnormally (max turns, timeout, crash) but left work behind: continue on the branch.
             # A draft .swarm-run/report.json written early counts as left-behind work too (Q-096, Q-103, Q-126).

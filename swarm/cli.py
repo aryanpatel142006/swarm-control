@@ -492,8 +492,12 @@ def run(agent: str = typer.Option(None, "--agent", help="only this agent"),
         if not tasks:
             console.print("no pending tasks")
             raise typer.Exit()
-        console.print(compile_prompt(tasks[0], _cfg(), rules_text=load_rules(), deps_summaries={},
-                                     structured_output_supported=True))
+        first = tasks[0]
+        provider = r.agents[first.agent].provider if first.agent in r.agents else "claude"
+        console.print(compile_prompt(first, _cfg(), rules_text=load_rules(), deps_summaries={},
+                                     structured_output_supported=True,
+                                     skills=_cfg().skills_for(first.type, first.importance),
+                                     skill_tool=provider == "claude"))
         raise typer.Exit()
     r.loop(once=once)
 
