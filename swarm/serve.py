@@ -78,6 +78,10 @@ class Server:
         self.retro = self._default_retro
         self._holds_lock = False
         self._transport_failed_at = None  # last serve step that failed to reach the board at all
+        # stops while the machine sleeps, the wall clock does not; an injected clock (tests) never sleeps
+        self.monotonic = time.monotonic if now is utcnow else (lambda: self.now().timestamp())
+        self._clock_ref = None             # (wall, monotonic) at the last reap
+        self._woke_at = None               # when this machine last woke from sleep (wall clock)
         self._skew_warned: set[str] = set()
         self._waiting_logged: dict[str, str] = {}   # task id -> "HH:MM UTC" already logged as waiting on cooldowns
         self._slow_thread: threading.Thread | None = None
@@ -135,10 +139,33 @@ class Server:
             n += 1
         return n
 
+    SUSPEND_GAP_S = 60
+
+    def _note_wake(self, now) -> None:
+        """The wall clock ran ahead of the monotonic clock since the last reap: this machine slept. Lid closed on
+        battery at 23:05 Oct 6 (caffeinate cannot hold a closed lid off battery), opened at 23:46: serve's first
+        tick saw claude-a's 41-minute-old heartbeat and reaped T-115 attempt 4 mid-measurement, before the runner
+        on the same laptop had beaten once since waking."""
+        mono = self.monotonic()
+        if self._clock_ref is not None:
+            wall0, mono0 = self._clock_ref
+            gap = (now - wall0).total_seconds() - (mono - mono0)
+            if gap >= self.SUSPEND_GAP_S:
+                self._woke_at = now
+                self.log(f"this machine was asleep for about {int(gap // 60)} min; heartbeats older than the wake "
+                         f"get a fresh {self.cfg.heartbeat_stale_minutes}-minute window before anything is reaped")
+        self._clock_ref = (now, mono)
+
     def reap(self) -> int:
         now = self.now()
         stale = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
         orphan_after = timedelta(minutes=self.cfg.heartbeat_stale_minutes)
+        self._note_wake(now)
+        woke = self._woke_at
+
+        def beat(row):   # a heartbeat from before this machine woke counts from the wake
+            hb = row.last_heartbeat if row else None
+            return max(hb, woke) if (hb and woke) else hb
         rows = {a.name: a for a in self.board.list_agents()}
         # A stale heartbeat during a board outage says nothing about the worker: when serve itself could not reach
         # Notion within the stale window, the workers on this network could not either (T-061 was reaped and
@@ -155,7 +182,7 @@ class Server:
         n = 0
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             row = rows.get(t.agent or "")
-            alive = bool(row and row.last_heartbeat and (now - row.last_heartbeat) < stale)
+            alive = bool(row and row.last_heartbeat and (now - beat(row)) < stale)
             if not alive and outage:
                 continue
             listed = bool(row and t.id in [x.strip() for x in row.current_task.split(",") if x.strip()])
@@ -173,7 +200,7 @@ class Server:
         for name, row in rows.items():
             if name == "serve":
                 continue
-            if row.last_heartbeat and (now - row.last_heartbeat) >= stale and (row.status != "offline" or row.current_task):
+            if row.last_heartbeat and (now - beat(row)) >= stale and (row.status != "offline" or row.current_task):
                 row.status, row.current_task = "offline", ""
                 self.board.upsert_agent(row)
         return n

@@ -126,16 +126,36 @@ def _words(text: str) -> set[str]:
     return set(re.sub(r"\W+", " ", (text or "").lower()).split())
 
 
-def repeated_feedback(item: dict, earlier: list[str], *, threshold: float = 0.8) -> bool:
+_STOPWORDS = set("a an the and or but of to in on for is it its as at by be with that this not no from was are were "
+                 "do does did so if than then there their they i we you which when what who how all any every some "
+                 "has have had can".split())
+
+
+def _identifier(word: str) -> bool:
+    """A name, not prose: ILAB_CPUS, hearing_hq_backend, demo_regress, a100."""
+    return "_" in word or (any(c.isdigit() for c in word) and any(c.isalpha() for c in word))
+
+
+def repeated_feedback(item: dict, earlier: list[str], *, threshold: float = 0.8, loose: float = 0.6) -> bool:
     """True when a harness note says what an earlier note for the same task already said. A resumed attempt reads
     the previous report and re-files its harness_feedback reworded ("said" → "says", one clause dropped): T-110's
-    attempt 2 opened Q-288 with two of Q-286's three notes. Word overlap over the shorter note, not equality."""
-    words = _words(item.get("what", ""))
-    if len(words) < 5:
+    attempt 2 opened Q-288 with two of Q-286's three notes. Content-word overlap over the shorter note (stopwords
+    dropped): at least `threshold`, or at least `loose` when the two also share an identifier (a config key, an env
+    var) or six content words. T-115's attempts re-filed "documents ILAB_CPUS … (srun --cpus-per-task) as working"
+    (0.82 without stopwords), "needs HEARING_HQ_BACKEND=remote" (0.73) and the S-sizing note (0.62, eight shared
+    words) as Q-295, Q-297 and Q-300 (Oct 6)."""
+    words = _words(item.get("what", "")) - _STOPWORDS
+    if len(words) < 4:
         return False
     for line in earlier:
-        other = _words(line.split(" → ", 1)[0])
-        if len(other) >= 5 and len(words & other) / min(len(words), len(other)) >= threshold:
+        other = _words(line.split(" → ", 1)[0]) - _STOPWORDS
+        if len(other) < 4:
+            continue
+        shared = words & other
+        ratio = len(shared) / min(len(words), len(other))
+        if ratio >= threshold:
+            return True
+        if ratio >= loose and (any(_identifier(w) for w in shared) or len(shared) >= 6):
             return True
     return False
 

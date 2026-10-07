@@ -1526,3 +1526,235 @@ def test_a_resumed_attempt_does_not_refile_the_previous_attempts_harness_notes(c
     assert "Mac Enrolled" not in notes[1].context
     # the resumed prompt says the earlier notes are filed already
     assert "harness_feedback` is already on the board" in adapter.prompts[1]
+
+
+def test_heartbeat_thread_keeps_beating_while_the_cli_is_silent_and_the_loop_is_blocked(cfg, git_repo, tmp_path):
+    """T-115 (Oct 6) was reaped as 'worker heartbeat stale' at attempt 4 while its worker sat mid-measurement. The
+    beat now runs on its own thread: neither a silent CLI (a worker waiting on a remote eval) nor a main loop that
+    does not tick stops it, and the row names the running task."""
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+    release, started = threading.Event(), threading.Event()
+
+    class Silent(FakeAdapter):
+        def run(self, spec):
+            started.set()
+            release.wait(20)          # no output, no tool calls: a long remote GPU run
+            return super().run(spec)
+
+    cfg.heartbeat_seconds = 1
+    r, board = make_runner(cfg, git_repo, tmp_path, Silent(files={"src/a.py": "x"},
+                                                           structured={"status": "done", "summary": "s"}))
+    r.executor = ThreadPoolExecutor(max_workers=1)
+    r.HEARTBEAT_STEP_S = 0.05
+    t = ready_task(board)
+    try:
+        r.start_heartbeat()
+        assert r.tick() == 1          # the only tick: the main loop never runs again in this test
+        assert started.wait(30)
+        first = board.get_agent("codex-a").last_heartbeat
+        _time.sleep(2.5)
+        row = board.get_agent("codex-a")
+        assert row.last_heartbeat > first and row.status == "running" and row.current_task == t.id
+    finally:
+        release.set()
+        r.executor.shutdown(wait=True)
+        r.stop_heartbeat()
+    assert not r.heartbeat_running()
+
+
+def test_heartbeat_thread_logs_a_board_failure_once_and_keeps_trying(cfg, git_repo, tmp_path):
+    import time as _time
+    logs = []
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    r.log = logs.append
+    r.HEARTBEAT_STEP_S = 0.02
+    cfg.heartbeat_seconds = 0
+    calls = {"n": 0}
+    real = board.upsert_agent
+
+    def flaky(row):
+        calls["n"] += 1
+        if calls["n"] <= 5:
+            raise RuntimeError("Notion 0 transport")
+        return real(row)
+    board.upsert_agent = flaky
+    r.start_heartbeat()
+    deadline = _time.monotonic() + 10
+    while calls["n"] < 8 and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    r.stop_heartbeat()
+    assert sum("heartbeat failed" in m for m in logs) == 1
+    assert any("heartbeat writes again" in m for m in logs)
+    assert board.get_agent("codex-a").last_heartbeat is not None
+
+
+def test_the_agent_row_says_running_as_soon_as_a_run_is_claimed(cfg, git_repo, tmp_path):
+    """T-117 (Oct 7): `swarm status` showed claude-a2 idle while its runner had already claimed the task and
+    started the CLI; the row waited for the next beat."""
+    seen = {}
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+
+    class Peek(FakeAdapter):
+        def run(self, spec):
+            row = board.get_agent("codex-a")
+            seen["row"] = (row.status, row.current_task)
+            return super().run(spec)
+    r.adapter_factory = lambda a: Peek(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r.heartbeat(force=True)                       # idle row from the last beat
+    t = ready_task(board)
+    assert r.tick() == 1
+    assert seen["row"] == ("running", t.id)
+
+
+def test_a_cli_left_by_a_killed_runner_is_stopped_on_start(cfg, git_repo, tmp_path):
+    """T-117 (Oct 7): the runner was killed by hand 5 s after starting the CLI; the CLI (own session) kept running
+    in a deleted worktree for its whole budget while the restarted runner resumed the task with a second CLI."""
+    import json as _json
+    import os
+    import threading
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    orphan = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    other = subprocess.Popen(["sleep", "60"], start_new_session=True)       # a CLI of another live runner
+    live_runner = subprocess.Popen(["sleep", "60"])
+    dead_runner = subprocess.Popen(["true"]); dead_runner.wait()
+    reaper = threading.Thread(target=orphan.wait, daemon=True); reaper.start()
+    try:
+        t = board.create_task(Task(id="", title="orphan", status=Status.RUNNING, agent="codex-a", claim_nonce="x"))
+        rec = r.log_dir / t.id / "cli-codex-a.pid"
+        rec.parent.mkdir(parents=True)
+        rec.write_text(_json.dumps({"pid": orphan.pid, "runner_pid": dead_runner.pid, "task": t.id}))
+        keep = r.log_dir / "T-099" / "cli-codex-a.pid"
+        keep.parent.mkdir(parents=True)
+        keep.write_text(_json.dumps({"pid": other.pid, "runner_pid": live_runner.pid, "task": "T-099"}))
+        assert r.stop_orphan_clis(grace_s=5) == [t.id]
+        reaper.join(5)
+        assert orphan.poll() is not None and not rec.exists()
+        assert other.poll() is None and keep.exists()
+        assert r.recover_orphans() == 1 and board.get_task(t.id).status is Status.READY
+    finally:
+        for p in (orphan, other, live_runner):
+            if p.poll() is None:
+                p.kill(); p.wait()
+
+
+def test_the_cli_pid_file_lives_exactly_as_long_as_the_cli(cfg, git_repo, tmp_path):
+    import json as _json
+    seen = {}
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+
+    class Starts(FakeAdapter):
+        def run(self, spec):
+            spec.on_start(424242)
+            f = r.log_dir / spec.env["SWARM_TASK_ID"] / "cli-codex-a.pid"
+            seen["rec"] = _json.loads(f.read_text())
+            return super().run(spec)
+    r.adapter_factory = lambda a: Starts(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    t = ready_task(board)
+    r.run_task(t)
+    assert seen["rec"]["pid"] == 424242 and seen["rec"]["task"] == t.id
+    assert not (r.log_dir / t.id / "cli-codex-a.pid").exists()
+
+
+def test_stop_ends_the_cli_at_the_next_poll_instead_of_waiting_for_it(cfg, git_repo, tmp_path):
+    """SIGTERM used to wait for every CLI to finish on its own, so restarts by hand ended in kill -9 (T-117)."""
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    t = ready_task(board, status=Status.RUNNING, claim_nonce="n1")
+    lost = r._claim_watch(t)
+    assert lost() is False
+    r.stop()
+    assert lost() is True
+
+
+def _session_sleeper():
+    import threading
+    p = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    threading.Thread(target=p.wait, daemon=True).start()      # reap it as soon as it dies
+    return p
+
+
+def test_sigterm_and_exit_stop_the_worker_clis_process_groups(cfg, git_repo, tmp_path):
+    """Q-302: killing the runner never reached its CLI (own session). The SIGTERM handler and an atexit hook now
+    signal every live CLI's process group."""
+    import signal
+    import time as _time
+    from swarm.runner import InFlight
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    captured = {}
+    r.install_signal_handlers(signal_fn=lambda sig, h: captured.setdefault(sig, h))
+    cli = _session_sleeper()
+    r.runs["T-001"] = InFlight("T-001", "codex-a", "S", utcnow(), pid=cli.pid, phase="cli")
+    try:
+        captured[signal.SIGTERM](signal.SIGTERM, None)
+        deadline = _time.monotonic() + 5
+        while cli.poll() is None and _time.monotonic() < deadline:
+            _time.sleep(0.05)
+        assert r._stopping is True and cli.poll() is not None
+        cli2 = _session_sleeper()
+        r.runs["T-002"] = InFlight("T-002", "codex-a", "S", utcnow(), pid=cli2.pid, phase="cli")
+        r._kill_clis_at_exit()
+        deadline = _time.monotonic() + 5
+        while cli2.poll() is None and _time.monotonic() < deadline:
+            _time.sleep(0.05)
+        assert cli2.poll() is not None
+    finally:
+        for p in (cli,) + ((cli2,) if "cli2" in locals() else ()):
+            if p.poll() is None:
+                p.kill()
+
+
+def test_no_second_worker_starts_while_an_earlier_cli_is_alive_in_the_worktree(cfg, git_repo, tmp_path):
+    """Q-302 / T-117: the relaunched runner recovered the task and started a second worker in the same worktree.
+    A live CLI recorded in `.swarm-run/cli.pid` blocks the start (when another live runner owns it) or is stopped
+    first (when its runner is gone)."""
+    import json as _json
+    import os
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+    calls = []
+
+    class Count(FakeAdapter):
+        def run(self, spec):
+            calls.append(spec)
+            return super().run(spec)
+    r.adapter_factory = lambda a: Count(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    t = ready_task(board, flags=["resume"])
+    wt = r.ws.provision(t.id)
+    (wt / "half.txt").write_text("the old CLI's work\n")
+    cli = _session_sleeper()
+    owner = subprocess.Popen(["sleep", "60"])                  # its runner, still alive
+    try:
+        (wt / ".swarm-run" / "cli.pid").write_text(_json.dumps({"pid": cli.pid, "runner_pid": owner.pid}))
+        out = r.run_task(board.get_task(t.id))
+        s = board.get_task(t.id)
+        assert not calls and out.status is Status.READY and s.status is Status.READY and s.claim_nonce == ""
+        assert str(cli.pid) in s.last_error and (wt / "half.txt").exists() and cli.poll() is None
+        assert r.tick() == 0                                   # not claimed again while the CLI may be alive
+        # its runner is gone: the CLI is stopped and the run goes ahead
+        owner.kill(); owner.wait()
+        r._cli_busy.clear()
+        out = r.run_task(board.get_task(t.id))
+        assert calls and cli.poll() is not None and out.status is Status.MERGE_READY
+        assert not (r.ws.worktree_path(t.id) / ".swarm-run" / "cli.pid").exists()
+    finally:
+        for p in (cli, owner):
+            if p.poll() is None:
+                p.kill()
+
+
+def test_the_worktree_pid_file_is_written_while_the_cli_runs_and_never_carried(cfg, git_repo, tmp_path):
+    import json as _json
+    seen = {}
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+
+    class Starts(FakeAdapter):
+        def run(self, spec):
+            spec.on_start(434343)
+            seen["rec"] = _json.loads((spec.cwd / ".swarm-run" / "cli.pid").read_text())
+            return super().run(spec)
+    r.adapter_factory = lambda a: Starts(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    t = ready_task(board)
+    r.run_task(t)
+    assert seen["rec"]["pid"] == 434343
+    from swarm.runner import CARRY_SKIP
+    assert "cli.pid" in CARRY_SKIP

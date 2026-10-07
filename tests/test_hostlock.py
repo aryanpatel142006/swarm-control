@@ -172,8 +172,10 @@ def test_a_tasks_wait_is_recorded_for_the_runner(tmp_path):
     rec_dir = d / hostlock.WAITS_DIR / "T-7"
     rec_dir.mkdir(parents=True)
 
+    logs = []
+
     def waiter():
-        with verify_slot(d, 1, wait_s=5, poll_s=0.02, record=rec_dir / "w.json"):
+        with verify_slot(d, 1, wait_s=5, poll_s=0.02, record=rec_dir / "w.json", log=logs.append):
             pass
 
     with verify_slot(d, 1):
@@ -183,6 +185,7 @@ def test_a_tasks_wait_is_recorded_for_the_runner(tmp_path):
         assert hostlock.task_wait_seconds(d, "T-7") >= 0.2   # counted while still waiting
     th.join(5)
     assert hostlock.task_wait_seconds(d, "T-7") >= 0.25
+    assert any("added back to your run's time limit" in m for m in logs)    # Q-290
     hostlock.clear_task_waits(d, "T-7")
     assert hostlock.task_wait_seconds(d, "T-7") == 0
 

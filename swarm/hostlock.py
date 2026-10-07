@@ -206,6 +206,9 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                                  "label": label})
         if log and (not state["announced"] or nowm - state["last_report"] >= REPORT_EVERY_S):
             prefix = reason if not state["announced"] else f"still waiting after {nowm - started:.0f} s; {reason}"
+            if not state["announced"] and record is not None:
+                # Q-290: a worker read a few minutes behind a measurement as lost budget; it is credited back
+                prefix += " The time this waits is added back to your run's time limit (up to half of it)."
             log(f"{label}: {prefix}")
             state["announced"], state["last_report"] = True, nowm
 

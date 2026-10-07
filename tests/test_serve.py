@@ -614,3 +614,32 @@ def test_serve_says_once_that_an_edited_config_needs_a_serve_restart(cfg):
     srv.warn_config_changed()
     srv.warn_config_changed()
     assert len(logs) == 1 and "restart serve" in logs[0]
+
+
+def test_reap_gives_heartbeats_a_fresh_window_after_this_machine_slept(cfg, git_repo, tmp_path):
+    """Oct 6 23:05-23:46: the lid was closed on battery and the laptop slept. On waking, serve's first tick saw
+    claude-a's 41-minute-old heartbeat and reaped T-115 attempt 4 mid-measurement, though its runner (same laptop)
+    was alive and beat seconds later."""
+    logs = []
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    srv.log = logs.append
+    mono = {"t": 1000.0}
+    srv.monotonic = lambda: mono["t"]
+    start = clock["now"]
+    board.upsert_agent(AgentRow(name="claude-a", status="running", last_heartbeat=start, current_task="T-001"))
+    t1 = board.create_task(Task(id="", title="measuring", status=Status.RUNNING, agent="claude-a", started=start))
+    assert srv.reap() == 0
+    clock["now"] = start + timedelta(minutes=41)      # asleep: the wall clock moved, the monotonic one did not
+    mono["t"] += 2
+    assert srv.reap() == 0 and board.get_task(t1.id).status is Status.RUNNING
+    assert any("asleep" in m for m in logs)
+    assert board.get_agent("claude-a").status == "running"   # not marked offline either
+    # the runner beats after waking: nothing happens
+    clock["now"] += timedelta(seconds=30); mono["t"] += 30
+    board.upsert_agent(AgentRow(name="claude-a", status="running", last_heartbeat=clock["now"], current_task="T-001"))
+    assert srv.reap() == 0
+    # a runner that really died during the sleep is reaped one stale window after the wake
+    board.upsert_agent(AgentRow(name="claude-a", status="running", last_heartbeat=start, current_task="T-001"))
+    step = timedelta(minutes=cfg.heartbeat_stale_minutes + 1)
+    clock["now"] += step; mono["t"] += step.total_seconds()
+    assert srv.reap() == 1 and board.get_task(t1.id).status is Status.READY

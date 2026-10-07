@@ -111,3 +111,27 @@ def test_harness_feedback_is_parsed_logged_and_becomes_a_board_note(tmp_path):
     assert "Harness feedback" in md and "add ruff" in md
     empty = parse_report({"status": "done", "summary": "ok"}, tmp_path, changed_files=["a.py"])
     assert empty.harness_feedback == [] and harness_feedback_question(task, empty) is None
+
+
+def test_reworded_notes_from_earlier_attempts_count_as_repeats_and_other_notes_do_not():
+    """T-115's attempts 2-5 re-filed attempt 1's notes reworded (Q-295, Q-297, Q-300, Oct 6)."""
+    from swarm.report import repeated_feedback
+    earlier = [
+        "scripts/gpu_up.sh documents ILAB_CPUS as a working option, but the cluster rejects every CPU flag. → remove it",
+        "The task text did not say that HEARING_HQ_BACKEND=remote is needed for demo_regress to use the A100. Without "
+        "it, runs silently use the Mac. → print the backend",
+        "The task is sized S but needs several 60 s live runs plus a baseline, and the 20-minute limit is too short "
+        "for that. → Re-plan it as M.",
+    ]
+    for again in ("scripts/gpu_up.sh documents ILAB_CPUS (srun --cpus-per-task) as working, but iLab rejects every "
+                  "CPU flag.",
+                  "demo_regress needs HEARING_HQ_BACKEND=remote as well as HEARING_REMOTE_URL. Without it, runs "
+                  "silently use the Mac.",
+                  "The task needs a 6-run A/B plus server restarts, but it is sized S with a 20-minute limit."):
+        assert repeated_feedback({"what": again}, earlier), again
+    for new in ("demo_regress has no cold-start metric; I had to score out.wav slices by hand.",
+                "The task assumed a cold-start-only tier is possible on the remote ladder. The ladder runs every tier "
+                "every chunk, so any CPU tier added for the first seconds costs CPU for the whole run.",
+                "gpu_up.sh ilab always closes the tunnel forward in the shared state dir, so a second job for an A/B "
+                "kills the live job's tunnel."):
+        assert not repeated_feedback({"what": new}, earlier), new

@@ -42,6 +42,9 @@ SELF_UPDATE_EVERY_S = 600
 STALE_DRAIN_AFTER_S = 1800
 # A drain logs what it is still waiting on this often, and gives up after one size limit (field note 90).
 DRAIN_LOG_EVERY_S = 60
+# A task whose worktree still has a live worker CLI that this runner cannot stop is not claimed again for this long.
+CLI_BUSY_RETRY_S = 300
+WORKTREE_PIDFILE = ".swarm-run/cli.pid"
 CARRY_FILES = ("notes.md", "report.json")      # .swarm-run files handed to the next attempt (Q-160, Q-162)
 CARRY_CAP = 6000            # per file, in the prompt only: the files themselves are kept and restored whole
 CARRY_FILE_MAX = 1_000_000  # a carried file bigger than this is cut (never JSON: an invalid report helps nobody)
@@ -49,7 +52,7 @@ CARRY_FILE_MAX = 1_000_000  # a carried file bigger than this is cut (never JSON
 # resumed T-095 had to rewrite enr_phase.py and a3runs.sh that its notes still pointed to (Q-250, Q-257, Q-274).
 CARRY_EXTRA_MAX_FILE = 256_000
 CARRY_EXTRA_MAX_TOTAL = 2_000_000
-CARRY_SKIP = {"prompt.md", "notes.md", "report.json", "previous_report.json", "verify.log"}
+CARRY_SKIP = {"prompt.md", "notes.md", "report.json", "previous_report.json", "verify.log", "cli.pid"}
 
 
 # Turn floors by reasoning effort for worker runs. task_limits (turns by size: 30/60/120 in selective-hearing) cut
@@ -107,15 +110,25 @@ def lock_wait_cap(timeout_s: int) -> int:
     return int(timeout_s) // 2
 
 
-def _kill_group(pid: int) -> None:
+def _kill_group(pid: int, *, hard: bool = False) -> None:
     import signal
+    sig = signal.SIGKILL if hard else signal.SIGTERM
     try:
-        os.killpg(pid, signal.SIGTERM)     # the adapter starts the CLI in its own session: pgid == pid
+        os.killpg(pid, sig)     # the adapter starts the CLI in its own session: pgid == pid
     except (ProcessLookupError, PermissionError, OSError):
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.kill(pid, sig)
         except OSError:
             pass
+
+
+def _session_leader(pid: int) -> bool:
+    """The adapter starts every CLI in a session of its own (pgid == pid). A recycled pid almost never is one,
+    so this guards a stale pid file from signalling an unrelated process."""
+    try:
+        return os.getpgid(pid) == pid
+    except OSError:
+        return False
 
 
 def _append_log(path: Path, section: str) -> None:
@@ -232,6 +245,13 @@ class Runner:
         workers = max(1, sum(a.parallel for a in self.agents.values()))
         self.executor = executor or ThreadPoolExecutor(max_workers=workers)
         self._last_heartbeat = None
+        self._hb_lock = threading.Lock()          # one agent-row write at a time (heartbeat thread, tick, bump)
+        self._hb_stop = threading.Event()
+        self._hb_kick = threading.Event()         # set to beat now (a run was just claimed)
+        self._hb_thread: threading.Thread | None = None
+        self._hb_error: str | None = None         # last heartbeat failure, logged once per streak
+        self._last_tick = None                    # wall clock of the main loop's last tick (heartbeat thread watches)
+        self._loop_stall_logged = False
         self._last_update_check = None
         self.auto_update = True
         self._loaded_head: str | None = None     # harness commit this process imported (set by loop())
@@ -245,10 +265,45 @@ class Runner:
         self._drain_started = None
         self._drain_deadline_s: int | None = None
         self._drain_last_log = None
+        self._cli_busy: dict[str, datetime] = {}  # task id → when a live foreign CLI in its worktree blocked a start
+        self._atexit_registered = False
 
     def stop(self) -> None:
-        """Ask in-flight runs to requeue their task instead of publishing (Ctrl-C / kill path)."""
+        """Ask in-flight runs to park: their CLI is stopped at the next poll (seconds), the work on disk is committed
+        and pushed, and the task is requeued to resume. Before Oct 7 a SIGTERM waited for every CLI to finish on its
+        own (up to a size limit), so a restart by hand ended with `kill -9` and the CLI, in its own session, lived
+        on as an orphan next to the resumed attempt (T-117)."""
         self._stopping = True
+
+    def _live_cli_pids(self) -> list[tuple[str, int]]:
+        """(task id, pid) of every worker CLI this process started that is still alive. Safe from a signal handler:
+        no lock (the loop may hold it), and a dict changing under the copy is retried."""
+        for _ in range(5):
+            try:
+                runs = list(self.runs.values())
+                break
+            except RuntimeError:
+                continue
+        else:
+            return []
+        return [(r.task_id, r.pid) for r in runs if r.pid and pid_alive(r.pid)]
+
+    def kill_live_clis(self) -> list[int]:
+        """SIGTERM the process group of every live worker CLI (each runs in a session of its own, so killing the
+        runner, or the runner's process group, never reaches them: T-117's CLI outlived its runner, Oct 7)."""
+        killed = []
+        for task_id, pid in self._live_cli_pids():
+            _kill_group(pid)
+            killed.append(pid)
+        return killed
+
+    def _kill_clis_at_exit(self) -> None:
+        pids = self.kill_live_clis()
+        if pids:
+            try:
+                self.log(f"exiting: stopped worker CLI pid(s) {', '.join(map(str, pids))}")
+            except Exception:   # noqa: BLE001 - the log may be closed at interpreter exit
+                pass
 
     def request_restart(self) -> None:
         """SIGUSR1 / `swarm restart`: claim nothing new, let in-flight runs finish, then re-exec on the current code.
@@ -332,8 +387,9 @@ class Runner:
         signal_fn = signal_fn or signal.signal
 
         def handler(signum, frame):
-            self.log(f"signal {signum}: stopping after in-flight runs park their work")
+            self.log(f"signal {signum}: stopping the worker CLIs; in-flight runs park their work and requeue")
             self.stop()
+            self.kill_live_clis()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -359,6 +415,10 @@ class Runner:
 
     # ----- heartbeat -----
     def heartbeat(self, force: bool = False) -> None:
+        with self._hb_lock:
+            self._heartbeat_locked(force)
+
+    def _heartbeat_locked(self, force: bool) -> None:
         now = self.now()
         if (not force and self._last_heartbeat
                 and (now - self._last_heartbeat).total_seconds() < self.cfg.heartbeat_seconds):
@@ -382,6 +442,74 @@ class Runner:
             row.current_task = ", ".join(current)
             row.cost_5h_usd = self.ledger.window(name, 5, now).cost_usd or 0.0
             self.board.upsert_agent(row)
+
+    HEARTBEAT_STEP_S = 5.0
+
+    def start_heartbeat(self) -> None:
+        """Beat on a thread of its own, every heartbeat_seconds of wall clock, whatever the main loop is doing.
+        Until Oct 7 the beat ran at the top of each tick: anything that held the loop (a board call retrying for
+        minutes, a git fetch, a slow drain check) silenced it, and serve reaps a silent agent's Running tasks. The
+        thread wakes every few seconds and compares wall-clock time, so after the laptop sleeps it beats within
+        seconds of waking (Event.wait counts monotonic time, which stops during sleep)."""
+        if self._hb_thread is not None and self._hb_thread.is_alive():
+            return
+        self._hb_stop.clear()
+        self._hb_thread = threading.Thread(target=self._heartbeat_loop, name="swarm-heartbeat", daemon=True)
+        self._hb_thread.start()
+
+    def stop_heartbeat(self) -> None:
+        self._hb_stop.set()
+        self._hb_kick.set()
+        t = self._hb_thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=10)
+        self._hb_thread = None
+
+    def heartbeat_running(self) -> bool:
+        return self._hb_thread is not None and self._hb_thread.is_alive()
+
+    def kick_heartbeat(self) -> None:
+        """Write the agent rows now (a run was just claimed): `swarm status` showed the agent idle for up to a
+        minute after its runner had claimed a task and started the CLI (T-117, Oct 7)."""
+        if self.heartbeat_running():
+            self._hb_kick.set()
+        else:
+            try:
+                self.heartbeat(force=True)
+            except Exception as e:  # noqa: BLE001 - bookkeeping never fails a run
+                self.log(f"heartbeat failed: {e!r}")
+
+    def _heartbeat_loop(self) -> None:
+        while not self._hb_stop.is_set():
+            force = self._hb_kick.is_set()
+            self._hb_kick.clear()
+            try:
+                self.heartbeat(force=force)
+                if self._hb_error:
+                    self.log("heartbeat writes again")
+                self._hb_error = None
+            except Exception as e:  # noqa: BLE001 - a board outage: keep trying, log once per streak
+                msg = f"{type(e).__name__}: {str(e)[:160]}"
+                if self._hb_error is None:
+                    self.log(f"heartbeat failed ({msg}); retrying every {int(self.HEARTBEAT_STEP_S)} s")
+                self._hb_error = msg
+            self._watch_loop_stall()
+            self._hb_kick.wait(self.HEARTBEAT_STEP_S)
+
+    def _watch_loop_stall(self) -> None:
+        """The heartbeat no longer proves the main loop is ticking: say so when it has not ticked for a stale window
+        (runs in flight keep going; nothing new is claimed until it returns)."""
+        if self._last_tick is None:
+            return
+        quiet = (self.now() - self._last_tick).total_seconds()
+        if quiet >= self.cfg.heartbeat_stale_minutes * 60:
+            if not self._loop_stall_logged:
+                self._loop_stall_logged = True
+                self.log(f"main loop has not ticked for {int(quiet // 60)} min (runs in flight continue; nothing new "
+                         "is claimed until it does)")
+        elif self._loop_stall_logged:
+            self._loop_stall_logged = False
+            self.log("main loop ticking again")
 
     # ----- recovery -----
     def _requeue(self, task: Task, why: str, *, prev_status: Status | None = None) -> None:
@@ -409,7 +537,9 @@ class Runner:
         return [t for t in tasks if t.agent in self.agents]
 
     def tick(self) -> int:
-        self.heartbeat()
+        self._last_tick = self.now()
+        if not self.heartbeat_running():      # tests and --once: no heartbeat thread
+            self.heartbeat()
         self.reap_finished_runs()
         if self.draining:
             self.finish_drain_if_idle()
@@ -418,6 +548,9 @@ class Runner:
         now = self.now()
         rows = {a.name: a for a in self.board.list_agents()}
         for task in self.pending_tasks():
+            busy = self._cli_busy.get(task.id)
+            if busy is not None and (now - busy).total_seconds() < CLI_BUSY_RETRY_S:
+                continue      # its worktree still has a worker CLI this runner could not stop
             row = rows.get(task.agent)
             if row and row.cooldown_until and row.cooldown_until > now:
                 continue  # a rate-limited provider cannot run anything, whatever the importance
@@ -468,7 +601,13 @@ class Runner:
             from .selfupdate import current_head
             self._loaded_head = current_head()
         self.install_signal_handlers()
+        if not self._atexit_registered:      # any exit path (an uncaught error, a second Ctrl-C) stops the CLIs too
+            import atexit
+            atexit.register(self._kill_clis_at_exit)
+            self._atexit_registered = True
+        self.stop_orphan_clis()
         self.recover_orphans()
+        self.start_heartbeat()
         failures = 0
         try:
             while not stop() and not self._stopping:
@@ -500,9 +639,10 @@ class Runner:
         except KeyboardInterrupt:
             self.log("stopping: waiting for in-flight runs to park their work (Ctrl-C again to abandon)")
             self.stop()
-        self.executor.shutdown(wait=True)
+        self.executor.shutdown(wait=True)      # the heartbeat thread keeps the rows fresh while runs park
         if self._stopping:
             self.recover_orphans()
+        self.stop_heartbeat()
 
     def maybe_reload_config(self) -> bool:
         """Re-read the config when config.yaml / tuning.yaml / notion.yaml changed on disk. The runner loaded it once at
@@ -636,6 +776,8 @@ class Runner:
         def lost() -> bool:
             if state["lost"]:
                 return True
+            if self._stopping:      # SIGTERM / Ctrl-C: stop the CLI now and park (see stop())
+                return True
             if time.monotonic() - state["last"] < self.claim_check_s:
                 return False
             state["last"] = time.monotonic()
@@ -680,6 +822,7 @@ class Runner:
         if not claim_task(self.board, task, task.agent, sleep=self.sleep):
             self.log(f"[{task.id}] claim lost")
             return Outcome(task, None, None, None, task.status)
+        self.kick_heartbeat()     # the agent row says running T-x now, not at the next beat
         attempt = task.attempts + 1
         reuse = prev_status is Status.CHANGES_REQUESTED or "resume" in task.flags
         carried = False
@@ -703,6 +846,18 @@ class Runner:
             # would delete the new owner's worktree at the same path (Q-200, T-093)
             self.log(f"[{task.id}] claim moved before provisioning; leaving the task to its new owner")
             return Outcome(task, None, None, None, task.status)
+        blocker = self._live_cli_in_worktree(task)
+        if blocker:
+            self._cli_busy[task.id] = self.now()
+            task.status, task.claim_nonce = requeue_status(prev_status), ""
+            task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+            task.last_error = (f"a worker CLI from an earlier run (pid {blocker}) is still running in this task's "
+                               "worktree; not starting a second one")[:1900]
+            self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error"])
+            self.log(f"[{task.id}] worker CLI pid {blocker} from an earlier run is still alive in the worktree; not "
+                     f"starting a second worker (retry in {CLI_BUSY_RETRY_S // 60} min)")
+            return Outcome(task, None, None, None, task.status)
+        self._cli_busy.pop(task.id, None)
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
             if carried:
@@ -774,10 +929,21 @@ class Runner:
                            mcp_servers=inline, settings=settings, should_stop=self._claim_watch(task),
                            claim_nonce=task.claim_nonce, env=worker_env(wt, task, self.cfg, self.host),
                            extra_time_s=self._lock_wait_credit(task, limit.minutes * 60))
-            spec.on_start = lambda pid: self._run_phase(task.id, "cli", pid)
+            run_agent = task.agent
+
+            def on_start(pid: int) -> None:
+                self._run_phase(task.id, "cli", pid, agent=run_agent)
+                self._write_worktree_pidfile(wt, task.id, run_agent, pid)
+            spec.on_start = on_start
             self._mark_started(task.id, attempt)
-            result = self.adapter_factory(agent_cfg).run(spec)
-            self._run_phase(task.id, "publish")
+            try:
+                result = self.adapter_factory(agent_cfg).run(spec)
+            finally:
+                self._run_phase(task.id, "publish", agent=run_agent)
+                try:
+                    (wt / WORKTREE_PIDFILE).unlink()
+                except OSError:
+                    pass
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
                                duration_s=duration, ok=result.ok)
@@ -799,13 +965,111 @@ class Runner:
                 self.ws.dispose(wt)
             self._bump_agent_row(task.agent, result_usage=None)
 
-    def _run_phase(self, task_id: str, phase: str, pid: int | None = None) -> None:
+    def _run_phase(self, task_id: str, phase: str, pid: int | None = None, agent: str | None = None) -> None:
         with self.lock:
             run = self.runs.get(task_id)
             if run is not None:
                 run.phase = phase
                 if pid:
                     run.pid = pid
+                agent = agent or run.agent
+        if agent and pid:
+            self._write_cli_pidfile(task_id, agent, pid)
+        elif agent and phase != "cli":
+            self._clear_cli_pidfile(task_id, agent)
+
+    # ----- worker CLIs left behind by a previous runner process -----
+    def _cli_pidfile(self, task_id: str, agent: str) -> Path:
+        return self.log_dir / task_id / f"cli-{agent}.pid"
+
+    def _write_cli_pidfile(self, task_id: str, agent: str, pid: int) -> None:
+        """Record the worker CLI so the next runner process on this laptop can stop it. The adapter starts it in its
+        own session, so a runner killed with SIGKILL leaves it running: T-117's first CLI (pid 39470) kept going for
+        its whole budget after the runner was restarted by hand, next to the resumed attempt's CLI (Oct 7)."""
+        path = self._cli_pidfile(task_id, agent)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"pid": pid, "runner_pid": os.getpid(), "agent": agent, "task": task_id,
+                                        "started": self.now().isoformat()}))
+        except OSError:
+            pass
+
+    def _clear_cli_pidfile(self, task_id: str, agent: str) -> None:
+        try:
+            self._cli_pidfile(task_id, agent).unlink()
+        except OSError:
+            pass
+
+    def _write_worktree_pidfile(self, wt: Path, task_id: str, agent: str, pid: int) -> None:
+        """The same record inside the worktree (`.swarm-run/cli.pid`, never committed or carried): whichever runner
+        provisions this task next checks it before reusing the path (Q-302)."""
+        try:
+            f = wt / WORKTREE_PIDFILE
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"pid": pid, "runner_pid": os.getpid(), "agent": agent, "task": task_id,
+                                     "started": self.now().isoformat()}))
+        except OSError:
+            pass
+
+    def _live_cli_in_worktree(self, task: Task, *, grace_s: float = 10.0) -> int | None:
+        """Before a run provisions (and so replaces) the task's worktree: a worker CLI recorded there that is still
+        alive and is not one of this process's runs means an earlier runner's attempt is still writing it (T-117:
+        the relaunched runner started a second worker next to the killed runner's CLI, Q-302). When that runner is
+        gone (or was this process before a re-exec) nothing will read the CLI's result, so it is stopped; when its
+        runner is alive, or it will not die, the pid is returned and no second worker starts."""
+        f = self.ws.worktree_path(task.id) / WORKTREE_PIDFILE
+        try:
+            rec = json.loads(f.read_text())
+            pid, owner = int(rec.get("pid") or 0), int(rec.get("runner_pid") or 0)
+        except (OSError, ValueError, TypeError):
+            return None
+        mine = {p for _, p in self._live_cli_pids()}
+        if not pid or pid in mine or not pid_alive(pid) or not _session_leader(pid):
+            return None
+        if owner and owner != os.getpid() and pid_alive(owner):
+            return pid           # another live runner owns that CLI
+        self.log(f"[{task.id}] stopping worker CLI pid {pid} left in the worktree by a previous runner process")
+        _kill_group(pid)
+        deadline = time.monotonic() + grace_s
+        while pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if pid_alive(pid):
+            _kill_group(pid, hard=True)
+            time.sleep(0.5)
+        return pid if pid_alive(pid) else None
+
+    def stop_orphan_clis(self, *, grace_s: float = 10.0) -> list[str]:
+        """On start: a recorded worker CLI of one of this runner's agents that is still alive belongs to a runner
+        process that is gone (or to this process before it re-exec'd); nothing will ever read its result, and the
+        resumed attempt reuses its worktree. Stop its process group. A record of another live runner on this laptop
+        (claude-a and claude-a2 share the runs directory) is left alone."""
+        stopped = []
+        me = os.getpid()
+        for name in self.agents:
+            for path in sorted(self.log_dir.glob(f"*/cli-{name}.pid")):
+                try:
+                    rec = json.loads(path.read_text())
+                    pid, owner = int(rec.get("pid") or 0), int(rec.get("runner_pid") or 0)
+                except (OSError, ValueError, TypeError):
+                    rec, pid, owner = {}, 0, 0
+                if owner and owner != me and pid_alive(owner):
+                    continue          # another runner process that is still alive owns it
+                if pid and pid_alive(pid) and _session_leader(pid):
+                    task_id = rec.get("task") or path.parent.name
+                    self.log(f"[{task_id}] stopping worker CLI pid {pid} left by a previous runner process "
+                             f"({name}); its attempt is requeued to resume on its branch")
+                    _kill_group(pid)
+                    deadline = time.monotonic() + grace_s
+                    while pid_alive(pid) and time.monotonic() < deadline:
+                        time.sleep(0.2)
+                    if pid_alive(pid):
+                        _kill_group(pid, hard=True)
+                    stopped.append(task_id)
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        return stopped
 
     def _claim_moved(self, task: Task, nonce: str, *, on_error: bool = True) -> bool:
         """True when the board shows another run owning this task: a different claim nonce on a Running task, or
@@ -852,12 +1116,16 @@ class Runner:
     def _bump_agent_row(self, agent: str, result_usage=None) -> None:
         """Refresh runs/spend on the Agents row so the status page shows real numbers after each task."""
         try:
-            row = self.board.get_agent(agent) or AgentRow(name=agent, provider=self.agents[agent].provider, host=self.host)
-            totals = self.ledger.totals(agent)
-            row.runs, row.tokens_in, row.tokens_out = row.runs + 1, totals.input_tokens, totals.output_tokens
-            row.cost_usd = totals.cost_usd or 0.0
-            row.cost_5h_usd = self.ledger.window(agent, 5, self.now()).cost_usd or 0.0
-            self.board.upsert_agent(row)
+            with self._hb_lock:   # never interleave with a heartbeat's read-modify-write of the same row
+                row = (self.board.get_agent(agent)
+                       or AgentRow(name=agent, provider=self.agents[agent].provider, host=self.host))
+                totals = self.ledger.totals(agent)
+                row.runs, row.tokens_in, row.tokens_out = row.runs + 1, totals.input_tokens, totals.output_tokens
+                row.cost_usd = totals.cost_usd or 0.0
+                row.cost_5h_usd = self.ledger.window(agent, 5, self.now()).cost_usd or 0.0
+                if self._last_heartbeat and (row.last_heartbeat is None or row.last_heartbeat < self._last_heartbeat):
+                    row.last_heartbeat = self._last_heartbeat   # a lagging read must not move the beat back
+                self.board.upsert_agent(row)
         except Exception as e:  # noqa: BLE001 - bookkeeping must never fail a task
             self.log(f"could not update agent row: {e!r}")
 
@@ -1091,6 +1359,19 @@ class Runner:
     def _rate_limited(self, task: Task, result: RunResult, *, prev_status: Status | None = None) -> Outcome:
         now = self.now()
         limited = task.agent
+        with self._hb_lock:      # a heartbeat that read the row before this write would drop the cooldown
+            row = self._write_cooldown(limited, result, now)
+        self._reroute_after_limit(task, limited, now)
+        # a merge-conflict or review round goes back as Changes Requested (feedback and PR intact), not Ready
+        task.status, task.claim_nonce = requeue_status(prev_status), ""
+        kind = USAGE_LIMIT_NOTE if result.usage_limited else "rate limited"
+        task.last_error = f"{kind}: {result.error[:300]}"
+        self.board.update_task(task, ["status", "claim_nonce", "last_error", "agent", "model", "effort"])
+        self.log(f"[{task.id}] {kind}; {limited} cooling down until {row.cooldown_until}"
+                 + (f"; task rerouted → {task.agent}" if task.agent != limited else ""))
+        return Outcome(task, None, result, None, task.status)
+
+    def _write_cooldown(self, limited: str, result: RunResult, now) -> AgentRow:
         row = self.board.get_agent(limited) or AgentRow(
             name=limited, provider=self.agents[limited].provider, host=self.host)
         usage = result.usage_limited
@@ -1104,6 +1385,9 @@ class Runner:
         row.note = (f"{kind} until {row.cooldown_until.strftime('%H:%M')} UTC "
                     f"(hit at {now.strftime('%H:%M')}{'' if reset else ', no reset time given'})")
         self.board.upsert_agent(row)
+        return row
+
+    def _reroute_after_limit(self, task: Task, limited: str, now) -> None:
         # hand the task to someone else now; otherwise it bounces back to this agent at every cooldown end
         # (T-043 lost an hour that way on Oct 5 2026 while two agents idled)
         # Only to an agent that can run it now: when every agent is cooling, moving it just swaps cooldowns (field
@@ -1118,13 +1402,6 @@ class Runner:
                 task.agent, task.model, task.effort = agent, model, effort
         except Exception as e:  # noqa: BLE001 - routing must never block the requeue
             self.log(f"[{task.id}] reroute after rate limit failed: {e!r}")
-        # a merge-conflict or review round goes back as Changes Requested (feedback and PR intact), not Ready
-        task.status, task.claim_nonce = requeue_status(prev_status), ""
-        task.last_error = f"{kind}: {result.error[:300]}"
-        self.board.update_task(task, ["status", "claim_nonce", "last_error", "agent", "model", "effort"])
-        self.log(f"[{task.id}] {kind}; {limited} cooling down until {row.cooldown_until}"
-                 + (f"; task rerouted → {task.agent}" if task.agent != limited else ""))
-        return Outcome(task, None, result, None, task.status)
 
     def _publish(self, task: Task, wt: Path, attempt: int, result: RunResult) -> Outcome:
         fresh = self.board.get_task(task.id)
