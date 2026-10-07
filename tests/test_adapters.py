@@ -426,3 +426,18 @@ def test_runner_credit_reads_this_tasks_lock_waits(cfg, tmp_path, monkeypatch):
     (stale / "w2.json").write_text('{"pid": 1, "waited_s": 900}')
     assert credit() == lock_wait_cap(1200) == 600
     assert InMemoryBoard  # imported for parity with other runner tests
+
+
+def test_run_reports_the_cli_pid_to_the_runner(tmp_path):
+    """Field note 90: the drain counts a run as in flight only while its CLI pid is alive, so the adapter hands the
+    pid back as soon as the process starts."""
+    from swarm.adapters.generic import GenericAdapter
+    from swarm.config import AgentConfig
+    script = tmp_path / "quick.sh"
+    script.write_text("#!/bin/sh\necho done\n")
+    script.chmod(0o755)
+    a = GenericAdapter(AgentConfig(name="g", provider="generic", host="h", command_template=f"{script} {{prompt_file}}"))
+    pids = []
+    r = a.run(spec(tmp_path, schema=None, timeout_s=10, should_stop=lambda: False, stop_poll_s=0.05,
+                   on_start=pids.append))
+    assert r.ok and len(pids) == 1 and pids[0] > 0

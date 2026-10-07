@@ -124,6 +124,7 @@ class RunSpec:
     claim_nonce: str = ""                              # the claim this run holds on the board (for logs and tests)
     env: dict = field(default_factory=dict)            # extra environment for this run (PYTHONPATH, SWARM_TASK_ID)
     extra_time_s: Callable[[], float] | None = None    # seconds added to timeout_s (the worker's swarm-lock waits)
+    on_start: Callable[[int], None] | None = None      # called with the CLI's pid once it is launched (runner drain)
 
 
 class Adapter:
@@ -144,6 +145,11 @@ class Adapter:
         """Like subprocess.run, but polls spec.should_stop and kills the CLI when it says so (exit -3)."""
         proc = subprocess.Popen(argv, cwd=str(spec.cwd), env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        if spec.on_start is not None:
+            try:
+                spec.on_start(proc.pid)
+            except Exception:   # noqa: BLE001 - bookkeeping never stops a run
+                pass
 
         def stop(sig):   # the CLI spawns children (shells, servers); signal the whole process group
             try:

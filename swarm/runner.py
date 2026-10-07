@@ -25,7 +25,7 @@ from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settin
 from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, harness_feedback_question, parse_report,
                      report_to_markdown)
 from .usage import Ledger
-from .workspace import Workspace, merge_conflict_instructions
+from .workspace import Workspace, automerge_note, merge_conflict_instructions
 
 STRUCTURED_PROVIDERS = {"claude", "codex"}
 ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
@@ -39,8 +39,16 @@ SELF_UPDATE_EVERY_S = 600
 # the merger ran current code, and their instructions mixed in one prompt (Q-164, Q-166, Q-167, Oct 6 2026). Once
 # its loaded code has been behind for this long, a busy runner drains (claims nothing new) and restarts.
 STALE_DRAIN_AFTER_S = 1800
+# A drain logs what it is still waiting on this often, and gives up after one size limit (field note 90).
+DRAIN_LOG_EVERY_S = 60
 CARRY_FILES = ("notes.md", "report.json")      # .swarm-run files handed to the next attempt (Q-160, Q-162)
-CARRY_CAP = 6000
+CARRY_CAP = 6000            # per file, in the prompt only: the files themselves are kept and restored whole
+CARRY_FILE_MAX = 1_000_000  # a carried file bigger than this is cut (never JSON: an invalid report helps nobody)
+# Other files the worker left in .swarm-run (helper scripts, partial results) are kept for the next attempt too: a
+# resumed T-095 had to rewrite enr_phase.py and a3runs.sh that its notes still pointed to (Q-250, Q-257, Q-274).
+CARRY_EXTRA_MAX_FILE = 256_000
+CARRY_EXTRA_MAX_TOTAL = 2_000_000
+CARRY_SKIP = {"prompt.md", "notes.md", "report.json", "previous_report.json", "verify.log"}
 
 
 # Turn floors by reasoning effort for worker runs. task_limits (turns by size: 30/60/120 in selective-hearing) cut
@@ -98,6 +106,17 @@ def lock_wait_cap(timeout_s: int) -> int:
     return int(timeout_s) // 2
 
 
+def _kill_group(pid: int) -> None:
+    import signal
+    try:
+        os.killpg(pid, signal.SIGTERM)     # the adapter starts the CLI in its own session: pgid == pid
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
 def _append_log(path: Path, section: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text() if path.exists() else ""
@@ -129,6 +148,49 @@ class Outcome:
     result: RunResult | None
     verify_ok: bool | None
     status: Status
+
+
+def pid_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:      # exists, owned by someone else
+        return True
+    except OSError:
+        return False
+    return True
+
+
+@dataclass
+class InFlight:
+    """One dispatched run, for the drain: which agent slot it holds, its worker thread and its CLI pid."""
+    task_id: str
+    agent: str
+    size: str
+    started: datetime
+    thread: threading.Thread | None = None     # None until the executor starts it
+    pid: int | None = None                     # the worker CLI, once launched
+    phase: str = "queued"                      # queued → setup → cli → publish
+
+    def alive(self) -> bool:
+        """A run is in flight while its CLI is alive, or its thread is still setting up or publishing. A run whose
+        CLI is gone and whose thread has ended is finished, whatever the bookkeeping says."""
+        if pid_alive(self.pid):
+            return True
+        if self.thread is None:
+            return self.phase == "queued"
+        return self.thread.is_alive()
+
+    def describe(self, now: datetime) -> str:
+        mins = int(max(0.0, (now - self.started).total_seconds()) // 60)
+        if self.pid:
+            proc = f"pid {self.pid} {'alive' if pid_alive(self.pid) else 'exited'}"
+        else:
+            proc = "no CLI yet"
+        return f"{self.task_id} ({self.agent}, {self.phase}, {proc}, {mins} min)"
 
 
 def requeue_status(prev_status: Status | None) -> Status:
@@ -165,6 +227,10 @@ class Runner:
         self._idle_since = None
         self._stopping = False
         self.draining = False
+        self.runs: dict[str, InFlight] = {}       # task id → the run holding a slot in self.active
+        self._drain_started = None
+        self._drain_deadline_s: int | None = None
+        self._drain_last_log = None
 
     def stop(self) -> None:
         """Ask in-flight runs to requeue their task instead of publishing (Ctrl-C / kill path)."""
@@ -173,13 +239,72 @@ class Runner:
     def request_restart(self) -> None:
         """SIGUSR1 / `swarm restart`: claim nothing new, let in-flight runs finish, then re-exec on the current code.
         Killing a busy runner parks half-done work (T-006 lost Fable minutes on Oct 4 2026); draining does not."""
+        if self.draining:
+            self.log("restart requested again: still draining")
+            return
+        # runs from a signal handler on the main thread: never take self.lock here (the loop may hold it)
         self.draining = True
+        self._drain_started = self.now()
+        self._drain_deadline_s = None          # set by the first drain check: one size limit of what is in flight
+        self._drain_last_log = None
         self.log("restart requested: finishing in-flight runs, claiming nothing new")
 
+    def drain_timeout_s(self, sizes: list[str]) -> int:
+        """One size limit: the longest limit among the runs in flight (the largest configured one when a size is
+        unknown). A run still going after that is stuck, not busy."""
+        limits = self.cfg.task_limits
+        biggest = max((lim.minutes for lim in limits.values()), default=60)
+        return int(max((limits[s].minutes if s in limits else biggest for s in sizes), default=0) * 60)
+
+    def reap_finished_runs(self) -> list[str]:
+        """Drop slots held by runs that are no longer running: no live CLI and no live thread, or no run record at
+        all. Before Oct 6 a usage-limit reroute changed task.agent mid-run and the run's `finally` released the new
+        agent's slot, not its own; the phantom kept the drain waiting with no CLI alive (field note 90)."""
+        dropped = []
+        with self.lock:
+            for agent, ids in self.active.items():
+                for tid in sorted(ids):
+                    run = self.runs.get(tid)
+                    if run is not None and run.agent == agent and run.alive():
+                        continue
+                    ids.discard(tid)
+                    if run is not None and run.agent == agent:
+                        self.runs.pop(tid, None)
+                    dropped.append(f"{tid} ({agent}{', ' + run.describe(self.now()) if run else ', no run record'})")
+        for d in dropped:
+            self.log(f"in-flight run {d} has no live worker; counting it as finished")
+        return dropped
+
     def finish_drain_if_idle(self) -> bool:
-        if not self.draining or any(self.active.values()):
+        if not self.draining:
             return False
+        self.reap_finished_runs()
+        now = self.now()
+        with self.lock:
+            waiting = [r for agent, ids in self.active.items() for tid in sorted(ids)
+                       if (r := self.runs.get(tid)) is not None]
+        if self._drain_deadline_s is None:
+            self._drain_deadline_s = self.drain_timeout_s([r.size for r in waiting])
         from . import selfupdate
+        if waiting:
+            elapsed = (now - (self._drain_started or now)).total_seconds()
+            if self._drain_deadline_s and elapsed >= self._drain_deadline_s:
+                self.log(f"drain timed out after {int(elapsed // 60)} min, still waiting on "
+                         + "; ".join(r.describe(now) for r in waiting)
+                         + ". Restarting anyway, parking nothing: the restarted runner requeues these tasks to "
+                         "resume from their branches")
+                for r in waiting:      # an orphaned CLI would keep writing the worktree the resumed attempt reuses
+                    if pid_alive(r.pid):
+                        self.log(f"[{r.task_id}] stopping worker CLI pid {r.pid}")
+                        _kill_group(r.pid)
+            else:
+                if (self._drain_last_log is None
+                        or (now - self._drain_last_log).total_seconds() >= DRAIN_LOG_EVERY_S):
+                    self._drain_last_log = now
+                    left = max(0, int(self._drain_deadline_s - elapsed)) // 60
+                    self.log("draining: waiting on " + "; ".join(r.describe(now) for r in waiting)
+                             + f" · gives up in {left} min")
+                return False
         if self.auto_update:
             selfupdate.check_and_update()     # restart on current origin/main, not on what happened to be on disk
         self.log("drained; restarting runner")
@@ -271,6 +396,7 @@ class Runner:
 
     def tick(self) -> int:
         self.heartbeat()
+        self.reap_finished_runs()
         if self.draining:
             self.finish_drain_if_idle()
             return 0
@@ -287,11 +413,17 @@ class Runner:
                 if task.id in self.active[task.agent]:
                     continue
                 self.active[task.agent].add(task.id)
+                self.runs[task.id] = InFlight(task.id, task.agent, task.size, now)
             self.executor.submit(self._guarded_run, task)
             dispatched += 1
         return dispatched
 
     def _guarded_run(self, task: Task) -> None:
+        agent = task.agent        # run_task may reroute the task (task.agent changes); the slot is this agent's
+        with self.lock:
+            run = self.runs.get(task.id)
+            if run is not None:
+                run.thread, run.phase = threading.current_thread(), "setup"
         try:
             self.run_task(task)
         except Exception as e:  # noqa: BLE001 - a worker crash must never kill the loop
@@ -310,7 +442,11 @@ class Runner:
                 self.log(f"[{task.id}] could not record crash: {e2!r}")
         finally:
             with self.lock:
-                self.active.get(task.agent, set()).discard(task.id)
+                self.active.get(agent, set()).discard(task.id)
+                if task.agent != agent:
+                    self.active.get(task.agent, set()).discard(task.id)
+                if self.runs.get(task.id) is run:
+                    self.runs.pop(task.id, None)
 
     def loop(self, *, once: bool = False, stop: Callable[[], bool] = lambda: False) -> None:
         self.log(f"swarm run · host={self.host} · agents={', '.join(self.agents)}")
@@ -517,13 +653,22 @@ class Runner:
                         f"`git log {self.ws.remote}/{self.cfg.main_branch}..HEAD` before you continue; do not redo them.")
                 if note not in task.feedback:
                     task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
-            conflicts_note, synced, conflicts = self._sync_before_run(task, wt) if reuse else ("", False, [])
+            conflicts_note, synced, conflicts, automerged_note = (self._sync_before_run(task, wt) if reuse
+                                                                  else ("", False, [], ""))
             # feedback written for an earlier round (a merger's "conflicts will be left", an old runner's "git
             # rebase origin/main") must not contradict what the harness just did to this worktree (Q-164, Q-166)
             task.feedback = reconcile_sync_feedback(
                 task.feedback, synced=synced, conflicts=conflicts,
                 markers=self.ws.conflict_marker_files(wt) if reuse else [],
                 main_ref=f"{self.ws.remote}/{self.cfg.main_branch}")
+            if self.cfg.worktree_links:
+                try:
+                    linked = self.ws.link_ignored(wt, self.cfg.worktree_links)
+                    if linked:
+                        self.log(f"[{task.id}] linked {len(linked)} gitignored file(s) from the main checkout "
+                                 f"({', '.join(self.cfg.worktree_links)})")
+                except Exception as e:  # noqa: BLE001 - shared inputs are a convenience, never a reason to fail
+                    self.log(f"[{task.id}] could not link shared files: {e!r}")
             setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
             if setup is not None and not setup.ok:   # a broken environment is not the model's job to debug
                 task.last_error = f"{self.cfg.verify.setup_worktree} failed: {setup.tail(600)}"[:1900]
@@ -561,7 +706,7 @@ class Runner:
                                     skill_tool=agent_cfg.provider == "claude", conflicts_note=conflicts_note,
                                     previous_notes=self._previous_carry(task.id, attempt, wt), limits_line=limits_line,
                                     doc_root=wt, branch_log=self._branch_log(wt) if reuse else "",
-                                    references_note=references_note)
+                                    references_note=references_note, automerged_note=automerged_note)
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=turns,
@@ -571,8 +716,10 @@ class Runner:
                            mcp_servers=inline, settings=settings, should_stop=self._claim_watch(task),
                            claim_nonce=task.claim_nonce, env=worker_env(wt, task, self.cfg, self.host),
                            extra_time_s=self._lock_wait_credit(task, limit.minutes * 60))
+            spec.on_start = lambda pid: self._run_phase(task.id, "cli", pid)
             self._mark_started(task.id, attempt)
             result = self.adapter_factory(agent_cfg).run(spec)
+            self._run_phase(task.id, "publish")
             duration = (self.now() - started).total_seconds()
             self.ledger.append(agent=task.agent, model=model, task_id=task.id, usage=result.usage,
                                duration_s=duration, ok=result.ok)
@@ -593,6 +740,14 @@ class Runner:
             else:
                 self.ws.dispose(wt)
             self._bump_agent_row(task.agent, result_usage=None)
+
+    def _run_phase(self, task_id: str, phase: str, pid: int | None = None) -> None:
+        with self.lock:
+            run = self.runs.get(task_id)
+            if run is not None:
+                run.phase = phase
+                if pid:
+                    run.pid = pid
 
     def _claim_moved(self, task: Task, nonce: str, *, on_error: bool = True) -> bool:
         """True when the board shows another run owning this task: a different claim nonce on a Running task, or
@@ -617,21 +772,24 @@ class Runner:
         lines = [ln for ln in (r.out if r.ok else "").splitlines() if ln.strip()]
         return "\n".join(lines[:cap] + ([f"… and {len(lines) - cap} older"] if len(lines) > cap else []))
 
-    def _sync_before_run(self, task: Task, wt: Path) -> tuple[str, bool, list[str]]:
+    def _sync_before_run(self, task: Task, wt: Path) -> tuple[str, bool, list[str], str]:
         """A parked branch drifts from main: merge current main in before the CLI starts. On a conflict the markers
         and MERGE_HEAD stay in the worktree and the prompt lists the files; the worker resolves them with edits,
         `git add` and `git commit`. No worker ever rebases or fetches: the Codex sandbox cannot (Q-140, Q-144,
         Q-146) and Claude workers got rebases wrong under deadline (Q-137).
-        Returns (prompt section or "", whether main was merged in, conflicting files)."""
+        Returns (prompt section or "", whether main was merged in, conflicting files, auto-merge section or "")."""
+        before = self.ws.git(wt, "rev-parse", "HEAD", check=False).out.strip()
         try:
             ok, conflicts, causes = self.ws.merge_main(wt, keep_conflicts=True)
         except RuntimeError as e:   # a failed fetch must not stop the run; it works on the branch as it is
             self.log(f"[{task.id}] could not merge main before the run: {e}")
-            return "", False, []
+            return "", False, [], ""
+        main_ref = f"{self.ws.remote}/{self.cfg.main_branch}"
+        automerged = automerge_note(self.ws.both_changed(wt, before, main_ref, exclude=conflicts), main_ref)
         if ok:
-            return "", True, []
+            return "", True, [], automerged
         self.log(f"[{task.id}] merged main with conflicts left for the worker ({', '.join(conflicts)})")
-        return merge_conflict_instructions(conflicts, causes, f"{self.ws.remote}/{self.cfg.main_branch}"), True, conflicts
+        return merge_conflict_instructions(conflicts, causes, main_ref), True, conflicts, automerged
 
     def _bump_agent_row(self, agent: str, result_usage=None) -> None:
         """Refresh runs/spend on the Agents row so the status page shows real numbers after each task."""
@@ -687,7 +845,8 @@ class Runner:
             try:
                 import json as _json
                 logdir.mkdir(parents=True, exist_ok=True)
-                (logdir / "final_report.json").write_text(_json.dumps(result.structured_output, indent=1)[:CARRY_CAP])
+                # whole: a cut JSON file is unreadable (Q-257: previous_report.json ended mid-string)
+                (logdir / "final_report.json").write_text(_json.dumps(result.structured_output, indent=1))
             except (OSError, TypeError, ValueError) as e:
                 self.log(f"[{task_id}] could not keep the final report: {e}")
         for name in CARRY_FILES:
@@ -696,10 +855,41 @@ class Runner:
             src = wt / ".swarm-run" / name
             try:
                 if src.is_file() and src.stat().st_size:
+                    text = src.read_text(errors="replace")
+                    if len(text) > CARRY_FILE_MAX and name.endswith(".json"):
+                        continue          # better no draft report than an invalid one
                     logdir.mkdir(parents=True, exist_ok=True)
-                    (logdir / name).write_text(src.read_text(errors="replace")[:CARRY_CAP])
+                    (logdir / name).write_text(text[:CARRY_FILE_MAX])
             except OSError as e:
                 self.log(f"[{task_id}] could not keep .swarm-run/{name}: {e}")
+        self._save_extra_files(wt, logdir, task_id)
+
+    def _save_extra_files(self, wt: Path, logdir: Path, task_id: str) -> None:
+        """Copy the worker's other `.swarm-run/` files (helper scripts, small partial results) to
+        `<attempt>/swarm-run/`, files up to CARRY_EXTRA_MAX_FILE and CARRY_EXTRA_MAX_TOTAL in all."""
+        run_dir = wt / ".swarm-run"
+        if not run_dir.is_dir():
+            return
+        import shutil
+        total = 0
+        try:
+            files = sorted(f for f in run_dir.rglob("*") if f.is_file() and not f.is_symlink())
+        except OSError:
+            return
+        for f in files:
+            rel = f.relative_to(run_dir)
+            if rel.as_posix() in CARRY_SKIP or any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
+                continue
+            try:
+                size = f.stat().st_size
+                if size == 0 or size > CARRY_EXTRA_MAX_FILE or total + size > CARRY_EXTRA_MAX_TOTAL:
+                    continue
+                dest = logdir / "swarm-run" / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, dest)
+                total += size
+            except OSError as e:
+                self.log(f"[{task_id}] could not keep .swarm-run/{rel}: {e}")
 
     def _previous_carry(self, task_id: str, attempt: int, wt: Path | None = None) -> str:
         """The newest earlier attempt's notes and draft report, verbatim, for the prompt ("" if none on this host).
@@ -710,7 +900,9 @@ class Runner:
             d = base / f"attempt-{k}"
             parts = []
             texts = []
-            for name, label in (("notes.md", "`.swarm-run/notes.md`"), ("report.json", "draft `.swarm-run/report.json`"),
+            for name, label in (("notes.md", "`.swarm-run/notes.md` (restored there; keep appending to it)"),
+                                ("report.json", "draft report (restored at `.swarm-run/previous_report.json`; copy "
+                                 "it to `.swarm-run/report.json` and keep updating it)"),
                                 ("final_report.json", "final report (that attempt finished; if the feedback above "
                                  "only asks for conflicts or verify fixes, update this report instead of rebuilding "
                                  "it; it is also in `.swarm-run/previous_report.json`)"),
@@ -723,7 +915,16 @@ class Runner:
                     text = ""
                 if text:
                     texts.append(text)
-                    parts.append(f"From attempt {k}, {label}:\n\n```\n{text[:CARRY_CAP]}\n```")
+                    cut = (f"\n… (cut at {CARRY_CAP} characters here; the whole file is in `.swarm-run/`)"
+                           if len(text) > CARRY_CAP else "")
+                    parts.append(f"From attempt {k}, {label}:\n\n```\n{text[:CARRY_CAP]}\n```{cut}")
+            extra = d / "swarm-run"
+            if extra.is_dir():
+                names = sorted(f.relative_to(extra).as_posix() for f in extra.rglob("*") if f.is_file())
+                if names:
+                    parts.append(f"Other files attempt {k} left in `.swarm-run/`, restored there for you (reuse them "
+                                 "instead of rewriting them): " + ", ".join(f"`{n}`" for n in names[:40])
+                                 + (f" and {len(names) - 40} more" if len(names) > 40 else ""))
             shared = self._new_shared_files(d)
             if parts or shared:
                 status = self._notes_files(d, "\n".join(texts), wt) if texts else ""
@@ -746,15 +947,23 @@ class Runner:
             d = base / f"attempt-{k}"
             report = next((d / n for n in ("final_report.json", "report.json") if (d / n).is_file()), None)
             notes = d / "notes.md"
-            if not report and not notes.is_file():
+            extra = d / "swarm-run"
+            if not report and not notes.is_file() and not extra.is_dir():
                 continue
             try:
+                import shutil
                 run_dir = wt / ".swarm-run"
                 run_dir.mkdir(exist_ok=True)
                 if notes.is_file() and not (run_dir / "notes.md").exists():
                     (run_dir / "notes.md").write_text(notes.read_text(errors="replace"))
                 if report:
                     (run_dir / "previous_report.json").write_text(report.read_text(errors="replace"))
+                if extra.is_dir():
+                    for f in sorted(extra.rglob("*")):
+                        dest = run_dir / f.relative_to(extra)
+                        if f.is_file() and not dest.exists():
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(f, dest)
             except OSError as e:
                 self.log(f"[{task_id}] could not restore the previous attempt's notes: {e}")
             return

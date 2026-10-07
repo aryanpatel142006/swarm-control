@@ -50,6 +50,10 @@ DEFAULT_SLOTS = 2
 DEFAULT_WAIT_S = 1800                  # after this a verify runs without a slot (logged) rather than never
 PENDING_PREFIX = "exclusive-pending-"
 WAITS_DIR = "waits"
+# A waiter refreshes its record this often: when the worker's shell tool kills a queued `swarm-lock` (a 600 s tool
+# timeout, Q-249) the wait still counts up to the last refresh. Before, a killed waiter's time was lost and T-105
+# attempt 1 timed out at exactly 1200 s although most of it was spent queued (Q-253).
+WAIT_RECORD_EVERY_S = 15
 REPORT_EVERY_S = 300                   # a long wait repeats who holds the slots this often
 SNIPPET = """# Under a swarm runner: wait for one of this machine's verify slots (swarm-control hostlock)
 if [ -n "${SWARM_VERIFY_LOCK:-}" ] && [ -z "${SWARM_VERIFY_SLOT_HELD:-}" ] && [ -x "${SWARM_VERIFY_LOCK}" ]; then
@@ -157,6 +161,8 @@ def task_wait_seconds(directory: Path | str, task_id: str, now: float | None = N
         since = d.get("waiting_since")
         if since and isinstance(d.get("pid"), int) and _alive(d["pid"]):
             total += max(0.0, now - float(since))
+        elif since:          # the waiter was killed while queued: count it up to its last refresh
+            total += max(0.0, float(d.get("last_seen") or since) - float(since))
     return total
 
 
@@ -188,14 +194,16 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
     started = time.monotonic()
     me = _me(label, exclusive)
     pending = directory / f"{PENDING_PREFIX}{os.getpid()}"
-    state = {"announced": False, "last_report": 0.0, "waiting": False}
+    state = {"announced": False, "last_report": 0.0, "waiting": False, "since": 0.0, "last_record": 0.0}
 
     def waiting(reason: str) -> None:
         nowm = time.monotonic()
         if not state["waiting"]:
-            state["waiting"] = True
-            if record is not None:
-                _write_json(record, {"pid": os.getpid(), "waiting_since": time.time(), "label": label})
+            state["waiting"], state["since"] = True, time.time()
+        if record is not None and (state["last_record"] == 0.0 or nowm - state["last_record"] >= WAIT_RECORD_EVERY_S):
+            state["last_record"] = nowm
+            _write_json(record, {"pid": os.getpid(), "waiting_since": state["since"], "last_seen": time.time(),
+                                 "label": label})
         if log and (not state["announced"] or nowm - state["last_report"] >= REPORT_EVERY_S):
             prefix = reason if not state["announced"] else f"still waiting after {nowm - started:.0f} s; {reason}"
             log(f"{label}: {prefix}")

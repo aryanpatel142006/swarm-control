@@ -3,6 +3,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 from swarm import hostlock
 from swarm.config import load_config
@@ -184,6 +185,29 @@ def test_a_tasks_wait_is_recorded_for_the_runner(tmp_path):
     assert hostlock.task_wait_seconds(d, "T-7") >= 0.25
     hostlock.clear_task_waits(d, "T-7")
     assert hostlock.task_wait_seconds(d, "T-7") == 0
+
+
+def test_a_waiter_killed_by_the_shell_tool_still_counts_up_to_its_last_refresh(tmp_path, monkeypatch):
+    """Q-249/Q-253: the worker's shell tool killed a verify still queued in swarm-lock after 600 s; its record only
+    had `waiting_since` with a dead pid, so none of the wait was added back and T-105 timed out at exactly 1200 s."""
+    import json
+    d = tmp_path / "locks"
+    rec_dir = d / hostlock.WAITS_DIR / "T-9"
+    rec_dir.mkdir(parents=True)
+    monkeypatch.setattr(hostlock, "WAIT_RECORD_EVERY_S", 0.05)
+    script = (f"import sys; sys.path.insert(0, {str(Path(hostlock.__file__).parents[1])!r}); "
+              f"from swarm.hostlock import verify_slot; from pathlib import Path\n"
+              f"import swarm.hostlock as h; h.WAIT_RECORD_EVERY_S = 0.05\n"
+              f"with verify_slot(Path({str(d)!r}), 1, wait_s=60, poll_s=0.02, record=Path({str(rec_dir / 'w.json')!r})):\n"
+              f"    pass\n")
+    with verify_slot(d, 1):
+        proc = subprocess.Popen([sys.executable, "-c", script])
+        time.sleep(1.0)
+        proc.kill()                        # the shell tool's timeout
+        proc.wait()
+    rec = json.loads((rec_dir / "w.json").read_text())
+    assert "waited_s" not in rec and rec.get("last_seen")
+    assert hostlock.task_wait_seconds(d, "T-9") >= 0.4
 
 
 def test_snippet_matches_the_template(capsys):

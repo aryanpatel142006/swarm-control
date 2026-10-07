@@ -633,7 +633,10 @@ def test_request_restart_drains_then_restarts(cfg, git_repo, tmp_path, monkeypat
     r.auto_update = False     # never pull the real harness checkout from a test
     restarted = []
     monkeypatch.setattr("swarm.selfupdate.restart_self", lambda: restarted.append(True))
-    r.active["claude-a"].add("T-001")           # one run in flight
+    import os
+    from swarm.runner import InFlight
+    r.active["claude-a"].add("T-001")           # one run in flight, its CLI alive
+    r.runs["T-001"] = InFlight("T-001", "claude-a", "S", r.now(), pid=os.getpid(), phase="cli")
     r.request_restart()
     assert r.draining and r.tick() == 0          # nothing new is claimed while draining
     assert not r.finish_drain_if_idle()           # still busy
@@ -1241,3 +1244,216 @@ def test_rate_limit_on_a_changes_requested_round_keeps_status_and_agent_when_all
     r._rate_limited(t2, RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True, error="429"),
                     prev_status=Status.READY)
     assert board.get_task(t2.id).status is Status.READY
+
+
+def _dead_pid() -> int:
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+def _finished_thread():
+    import threading
+    th = threading.Thread(target=lambda: None)
+    th.start()
+    th.join()
+    return th
+
+
+def test_drain_counts_a_run_whose_cli_and_thread_are_gone_as_finished(cfg, git_repo, tmp_path, monkeypatch):
+    """Field note 90: both runners drained for 11 minutes with no worker CLI alive; a finished run still held its
+    slot. A run with no live CLI and no live thread is finished, whatever the bookkeeping says."""
+    from swarm.runner import InFlight
+    logs = []
+    r, _ = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    r.log = logs.append
+    restarted = []
+    monkeypatch.setattr("swarm.selfupdate.restart_self", lambda: restarted.append(True))
+    r.active["codex-a"].add("T-001")
+    r.runs["T-001"] = InFlight("T-001", "codex-a", "S", r.now(), thread=_finished_thread(), pid=_dead_pid(),
+                               phase="publish")
+    r.active["claude-a"].add("T-002")           # a slot with no run record at all
+    r.request_restart()
+    assert r.finish_drain_if_idle() and restarted == [True]
+    assert not any(r.active.values()) and not r.runs
+    assert any("T-001" in line and "counting it as finished" in line for line in logs)
+    assert any("T-002" in line and "no run record" in line for line in logs)
+
+
+def test_drain_waits_on_a_live_thread_and_logs_what_it_waits_on_every_minute(cfg, git_repo, tmp_path, monkeypatch):
+    """A run between its CLI and its publish (verify, push) is still in flight; the log names task, pid, elapsed."""
+    import threading
+    from swarm.runner import InFlight
+    clock = [utcnow()]
+    logs = []
+    r, _ = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    r.now, r.log = (lambda: clock[0]), logs.append
+    monkeypatch.setattr("swarm.selfupdate.restart_self", lambda: None)
+    release = threading.Event()
+    th = threading.Thread(target=release.wait, daemon=True)
+    th.start()
+    dead = _dead_pid()
+    r.active["codex-a"].add("T-001")
+    r.runs["T-001"] = InFlight("T-001", "codex-a", "M", clock[0] - timedelta(minutes=12), thread=th, pid=dead,
+                               phase="publish")
+    try:
+        r.request_restart()
+        assert not r.finish_drain_if_idle()
+        waits = [line for line in logs if line.startswith("draining: waiting on")]
+        assert len(waits) == 1 and "T-001" in waits[0] and f"pid {dead} exited" in waits[0] and "12 min" in waits[0]
+        assert "gives up in 40 min" in waits[0]          # one M size limit (40 min in the test config)
+        clock[0] += timedelta(seconds=30)
+        assert not r.finish_drain_if_idle()
+        assert len([line for line in logs if line.startswith("draining: waiting on")]) == 1
+        clock[0] += timedelta(seconds=31)
+        assert not r.finish_drain_if_idle()
+        assert len([line for line in logs if line.startswith("draining: waiting on")]) == 2
+    finally:
+        release.set()
+        th.join()
+
+
+def test_drain_times_out_after_one_size_limit_and_stops_the_cli(cfg, git_repo, tmp_path, monkeypatch):
+    """A drain that is still waiting after one size limit restarts anyway, parking nothing; a CLI still alive is
+    stopped so it cannot keep writing the worktree the resumed attempt will reuse."""
+    from swarm.runner import InFlight
+    clock = [utcnow()]
+    logs = []
+    r, _ = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    r.now, r.log = (lambda: clock[0]), logs.append
+    restarted = []
+    monkeypatch.setattr("swarm.selfupdate.restart_self", lambda: restarted.append(True))
+    cli = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        r.active["codex-a"].add("T-001")
+        r.runs["T-001"] = InFlight("T-001", "codex-a", "S", clock[0], pid=cli.pid, phase="cli")
+        r.request_restart()
+        assert not r.finish_drain_if_idle()
+        clock[0] += timedelta(minutes=19)
+        assert not r.finish_drain_if_idle() and not restarted
+        clock[0] += timedelta(minutes=1)             # S = 20 minutes in the test config
+        assert r.finish_drain_if_idle() and restarted == [True]
+        assert cli.wait(timeout=10) != 0             # the CLI was stopped
+        assert any("drain timed out after 20 min" in line and "T-001" in line for line in logs)
+    finally:
+        if cli.poll() is None:
+            cli.kill()
+            cli.wait()
+
+
+def test_a_rerouted_rate_limited_run_releases_its_own_slot(cfg, git_repo, tmp_path):
+    """Field note 90's cause: `_rate_limited` moved the task to another agent mid-run (task.agent changed), and the
+    run's cleanup released the new agent's slot. The old agent's slot stayed taken: fewer free slots and a drain that
+    waited forever with no CLI alive."""
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter(ok=False, rate_limited=True))
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=utcnow()))
+    t = ready_task(board, id="T-001")
+    free = r.free_slots("codex-a")
+    assert r.tick() == 1
+    assert board.get_task(t.id).agent == "claude-a"      # rerouted away from the limited agent
+    assert not any(r.active.values()) and not r.runs
+    assert r.free_slots("codex-a") == free
+
+
+def test_a_long_report_is_carried_whole_and_helper_files_survive_the_next_attempt(cfg, git_repo, tmp_path):
+    """Q-257: previous_report.json was cut mid-string at 6000 characters (invalid JSON). Q-250/Q-257/Q-274: helper
+    scripts the worker wrote to .swarm-run (enr_phase.py, a3runs.sh) were gone on the resumed attempt."""
+    long_summary = "association evals done; " + "x" * 9000
+    adapter = FakeAdapter(files={"src/a.py": "x = 1\n", ".swarm-run/notes.md": "- run .swarm-run/a3runs.sh\n",
+                                 ".swarm-run/a3runs.sh": "echo shard\n", ".swarm-run/tools/enr_phase.py": "print(1)\n"},
+                          structured={"status": "done", "summary": long_summary})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="sonnet", effort="medium")
+    assert r.run_task(t).status is Status.MERGE_READY
+    stored = board.get_task(t.id)
+    stored.status, stored.feedback = Status.CHANGES_REQUESTED, "Main moved and now conflicts with this branch."
+    board.update_task(stored, ["status", "feedback"])
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        rd = spec.cwd / ".swarm-run"
+        seen["report"] = json.loads((rd / "previous_report.json").read_text())
+        seen["helpers"] = ((rd / "a3runs.sh").read_text(), (rd / "tools" / "enr_phase.py").read_text())
+        return orig(spec)
+    adapter.run = run
+    adapter.files = {"src/a.py": "x = 2\n"}
+    r.run_task(board.get_task(t.id))
+    assert seen["report"]["summary"] == long_summary
+    assert seen["helpers"] == ("echo shard\n", "print(1)\n")
+    p = adapter.prompts[1]
+    assert "`a3runs.sh`" in p and "`tools/enr_phase.py`" in p and "cut at 6000 characters" in p
+
+
+def test_resumed_prompt_lists_files_both_sides_changed_that_git_merged_cleanly(cfg, git_repo, tmp_path):
+    """Q-249 (T-089): git merged scripts/demo.sh without a conflict, but the branch's earlier `--check)` case hid
+    main's new `--check` flag. The prompt names such files so the worker re-reads them."""
+    lines = [f"line {i}" for i in range(12)]
+    (git_repo / "src").mkdir(exist_ok=True)
+    (git_repo / "src" / "demo.sh").write_text("\n".join(lines) + "\n")
+    _git(git_repo, "add", "-A"); _git(git_repo, "commit", "-qm", "base demo.sh"); _git(git_repo, "push", "-q", "origin", "main")
+    mine = list(lines); mine[0] = "line 0 --check) branch case"
+    adapter = FakeAdapter(files={"src/demo.sh": "\n".join(mine) + "\n", "src/other.py": "y\n"},
+                          structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.MERGE_READY
+    theirs = list(lines); theirs[11] = "line 11 --check flag from main"
+    _git(git_repo, "checkout", "-q", "main")
+    (git_repo / "src" / "demo.sh").write_text("\n".join(theirs) + "\n")
+    (git_repo / "src" / "unrelated.py").write_text("z\n")
+    _git(git_repo, "add", "-A"); _git(git_repo, "commit", "-qm", "T-090 adds --check"); _git(git_repo, "push", "-q", "origin", "main")
+    stored = board.get_task(t.id)
+    stored.status, stored.feedback = Status.CHANGES_REQUESTED, "Reviewer: tighten the help text."
+    board.update_task(stored, ["status", "feedback"])
+    adapter.files = {}
+    r.run_task(board.get_task(t.id))
+    p = adapter.prompts[1]
+    assert "## Files main and this branch both changed (merged without a conflict)" in p
+    assert "- src/demo.sh (main: " in p and "T-090 adds --check" in p
+    assert "src/unrelated.py" not in p.split("## Files main and this branch both changed")[1].split("##")[0]
+    assert "## Merge conflicts" not in p
+
+
+def test_worktree_links_bring_gitignored_shared_inputs_into_fresh_worktrees(cfg, git_repo, tmp_path):
+    """Q-250, Q-252, Q-254, Q-258, Q-261, Q-266, Q-274, Q-278: demo manifests are committed but the clip and stems are
+    gitignored, so every worktree failed with 'no demo clip' until the worker found the main checkout's copy."""
+    (git_repo / ".gitignore").write_text("eval/demo/*/clip.mp4\neval/demo/*/stems/\n")
+    demo = git_repo / "eval" / "demo" / "easy"
+    (demo / "stems").mkdir(parents=True)
+    (demo / "manifest.json").write_text('{"clip": "clip.mp4"}\n')
+    _git(git_repo, "add", "-A"); _git(git_repo, "commit", "-qm", "demo manifest"); _git(git_repo, "push", "-q", "origin", "main")
+    (demo / "clip.mp4").write_bytes(b"\x00clip")
+    (demo / "stems" / "mix.wav").write_bytes(b"RIFF")
+    cfg.worktree_links = ["eval/demo"]
+    adapter = FakeAdapter(files={"src/a.py": "x\n"}, structured={"status": "done", "summary": "ok"})
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        d = spec.cwd / "eval" / "demo" / "easy"
+        seen["clip"] = (d / "clip.mp4").is_symlink() and (d / "clip.mp4").read_bytes() == b"\x00clip"
+        seen["stem"] = (d / "stems" / "mix.wav").is_symlink()
+        seen["manifest_own"] = not (d / "manifest.json").is_symlink()
+        return orig(spec)
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)
+    assert seen == {"clip": True, "stem": True, "manifest_own": True}
+    committed = _git(git_repo, "ls-tree", "-r", "--name-only", f"origin/{t.branch}")
+    assert "src/a.py" in committed and "clip.mp4" not in committed and "mix.wav" not in committed
+    assert (demo / "clip.mp4").read_bytes() == b"\x00clip"     # disposing the worktree left main's copy alone
+
+
+def test_link_ignored_never_leaves_a_link_git_would_commit(git_repo, tmp_path):
+    from swarm.workspace import Workspace
+    (git_repo / ".gitignore").write_text("data/big.bin\n")
+    (git_repo / "data").mkdir()
+    (git_repo / "data" / "big.bin").write_bytes(b"1")
+    ws = Workspace(git_repo, tmp_path / "wt", gh=fake_gh)
+    wt = tmp_path / "wt" / "x"
+    _git(git_repo, "worktree", "add", "-q", "-b", "tmp-x", str(wt))
+    # .gitignore is not committed, so the worktree does not ignore data/big.bin: the link must not stay
+    assert ws.link_ignored(wt, ["data"]) == [] and not (wt / "data" / "big.bin").exists()

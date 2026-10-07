@@ -36,6 +36,9 @@ verify:
 # shared across worktrees (fixtures, weights, results) here rather than in a script they must remember to source.
 # env:
 #   PROJECT_RESULTS_DIR: "{repo_root}/eval/results"
+# Directories whose gitignored files (generated clips, stems, weights) the runner symlinks from the main checkout
+# into every fresh worktree, file by file, so tracked files there (a committed manifest.json) stay the branch's own.
+# worktree_links: [eval/fixtures/demo]
 
 task_limits:   # worker turns never go below 60/100/150 for medium/high/xhigh effort (runner EFFORT_TURN_FLOOR); Codex has no turn limit
   S: { turns: 30,  minutes: 20, budget_usd: 3 }

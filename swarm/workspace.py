@@ -36,6 +36,23 @@ def merge_conflict_instructions(conflicts: list[str], causes: list[str], main_re
     return "\n".join(lines)
 
 
+def automerge_note(files: list[tuple[str, list[str]]], main_ref: str, cap: int = 20) -> str:
+    """Files git merged without a conflict although main and the branch both changed them. A clean textual merge can
+    still change behaviour (Q-249, T-089: the branch's earlier `--check)` case in scripts/demo.sh shadowed main's new
+    `--check` flag), so the worker re-reads them before building on either side."""
+    if not files:
+        return ""
+    lines = [f"Before this run the harness merged current `{main_ref}` into your branch. Git combined these files "
+             "without a conflict, but main and this branch both changed them: read each merged file and check it "
+             "still does what both sides meant (a case, branch, flag, default or constant one side added can be "
+             "shadowed or overridden by the other's edit). Fix a clash on this branch; run the fast verify after.", ""]
+    for f, commits in files[:cap]:
+        lines.append(f"- {f}" + (f" (main: {'; '.join(commits[:3])})" if commits else ""))
+    if len(files) > cap:
+        lines.append(f"- … and {len(files) - cap} more (`git diff --name-only $(git merge-base HEAD^1 HEAD^2) HEAD^2`)")
+    return "\n".join(lines)
+
+
 @dataclass
 class CmdResult:
     code: int
@@ -268,6 +285,59 @@ class Workspace:
         if not keep_conflicts:
             self.git(path, "merge", "--abort", check=False)
         return False, conflicts, [c.strip() for c in causes if c.strip()]
+
+    def both_changed(self, path: Path, before: str, main_ref: str | None = None, *,
+                     exclude: list[str] | tuple = ()) -> list[tuple[str, list[str]]]:
+        """Files changed both on the branch (merge base..`before`) and on main (merge base..main), minus `exclude`,
+        each with the main commits that touched it. Empty when nothing was merged or a ref is missing."""
+        main_ref = main_ref or self._main_ref()
+        if not before:
+            return []
+        base = self.git(path, "merge-base", before, main_ref, check=False)
+        if not base.ok or not base.out.strip():
+            return []
+        b = base.out.strip()
+        if b == self.git(path, "rev-parse", main_ref, check=False).out.strip():
+            return []     # main had nothing new for this branch
+        mine = set(self.git(path, "diff", "--name-only", b, before, check=False).out.split())
+        theirs = set(self.git(path, "diff", "--name-only", b, main_ref, check=False).out.split())
+        out = []
+        for f in sorted((mine & theirs) - set(exclude)):
+            commits = self.git(path, "log", "--format=%h %s", "-3", f"{b}..{main_ref}", "--", f, check=False).out
+            out.append((f, [c.strip() for c in commits.splitlines() if c.strip()]))
+        return out
+
+    def link_ignored(self, wt: Path, paths: list[str], cap: int = 2000) -> list[str]:
+        """Symlink every gitignored file the main checkout has under `paths` into the worktree when the worktree
+        lacks it, file by file (tracked files beside them stay the branch's own). A link git would not ignore is
+        removed again, so `git add -A` can never commit one. Returns the linked paths."""
+        wt = Path(wt)
+        if not paths or wt.resolve() == self.repo_root:
+            return []
+        r = self.git(self.repo_root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *paths,
+                     check=False)
+        linked = []
+        for rel in [f for f in r.out.split("\0") if f][:cap]:
+            src, dest = self.repo_root / rel, wt / rel
+            if not src.is_file() or dest.exists() or dest.is_symlink():
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.symlink_to(src)
+                linked.append(rel)
+            except OSError:
+                continue
+        if not linked:
+            return []
+        chk = run_cmd(["git", "-C", str(wt), "check-ignore", "-z", "--stdin"], cwd=wt, timeout=60,
+                      input="\0".join(linked).encode())
+        ignored = {f for f in chk.out.split("\0") if f}
+        for rel in [f for f in linked if f not in ignored]:
+            try:
+                (wt / rel).unlink()
+            except OSError:
+                pass
+        return [f for f in linked if f in ignored]
 
     def unmerged_files(self, path: Path) -> list[str]:
         return sorted(self.git(path, "diff", "--name-only", "--diff-filter=U", check=False).out.split())

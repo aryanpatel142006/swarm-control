@@ -130,6 +130,9 @@ class Config:
     # checkout, so shared data outside the worktrees is found without `source scripts/_py.sh` (Q-198:
     # HEARING_FIXTURES_DIR / HEARING_MODELS_DIR were only set by one script).
     env: dict[str, str] = field(default_factory=dict)
+    # Directories whose gitignored files the runner symlinks from the main checkout into each fresh worktree (Q-250,
+    # Q-252, Q-254 … nine tasks lost runs to 'no demo clip': manifests are committed, clips and stems are not).
+    worktree_links: list[str] = field(default_factory=list)
 
     def project_env(self) -> dict[str, str]:
         return {k: v.replace("{repo_root}", str(self.repo_root)) for k, v in self.env.items()}
@@ -318,6 +321,7 @@ def load_config(path: Path | str) -> Config:
         plugins_by_type=_str_lists(raw.get("plugins_by_type")),
         mcp_servers={str(k): dict(v or {}) for k, v in (raw.get("mcp_servers") or {}).items()},
         env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
+        worktree_links=_str_list(raw.get("worktree_links"), "worktree_links") or [],
     )
 
 
