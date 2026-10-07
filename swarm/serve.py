@@ -82,6 +82,22 @@ class Server:
         self._waiting_logged: dict[str, str] = {}   # task id -> "HH:MM UTC" already logged as waiting on cooldowns
         self._slow_thread: threading.Thread | None = None
         self._slow_summary = {"reviewed": 0, "merged": 0}
+        from .config import config_signature
+        self._config_sig = config_signature(getattr(cfg, "path", None))   # config files serve started with
+        self._config_warned: str | None = None
+
+    def warn_config_changed(self) -> int:
+        """serve reads the config once (field note 27: it kept routing to a removed agent). Runners re-read theirs
+        now (field note 97); serve says once per edit that it is still on the old one, instead of acting on it."""
+        from .config import config_signature
+        sig = config_signature(getattr(self.cfg, "path", None))
+        if not sig or not self._config_sig or sig == self._config_sig or sig == self._config_warned:
+            return 0
+        self._config_warned = sig
+        self.log("config changed on disk since serve started; serve still routes, reviews and merges with the config "
+                 "it started with: restart serve (`swarm serve`) to apply routing, reviewer or policy changes "
+                 "(runners re-read theirs on their own)")
+        return 0
 
     # ----- lock -----
     def acquire_lock(self) -> bool:
@@ -511,11 +527,11 @@ class Server:
         self._slow_summary = summary
 
     # ----- self-improvement -----
-    def _default_retro(self):
+    def _default_retro(self, milestone: str | None = None):
         from .retro import run_retro
         from .usage import Ledger, default_ledger_path
         ledger = Ledger(default_ledger_path(self.cfg.project), board=(self.cfg.notion.tasks_ds or "")[:8])
-        return run_retro(self.cfg, self.board, self.ws, ledger=ledger, log=self.log)
+        return run_retro(self.cfg, self.board, self.ws, ledger=ledger, log=self.log, milestone=milestone)
 
     def maybe_retro(self) -> int:
         """When every task of a milestone is Done or Cut (and at least one is Done), run the retro once for it."""
@@ -535,7 +551,7 @@ class Server:
                 continue
             if all(t.status in (Status.DONE, Status.CUT) for t in group) and any(t.status is Status.DONE for t in group):
                 self.log(f"milestone {ms} complete → retro")
-                self.retro()
+                self.retro(ms)
                 done_before.append(ms)
                 ran += 1
                 try:
@@ -570,6 +586,7 @@ class Server:
         self._step(summary, "rerouted", self.reroute)
         self._step(summary, "rebalanced", self.rebalance)
         self._step(summary, "retro", self.maybe_retro)
+        self._step(summary, "config", self.warn_config_changed)
         self._step(summary, "status", lambda: 1 if self.write_status() else 0)
         summary.pop("lock", None)
         return summary

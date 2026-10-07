@@ -1,6 +1,7 @@
 """Worker loop: claim → worktree → prompt → run CLI → verify → push/PR → publish. One process per laptop."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -17,13 +18,13 @@ from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, 
                        placeholder_feedback, placeholder_hits, reconcile_sync_feedback, stray_feedback, stray_files,
                        verify_feedback)
 from .board.base import Board, claim_task
-from .config import Config
+from .config import Config, config_signature
 from .models import QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
-from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, harness_feedback_question, parse_report,
-                     report_to_markdown)
+from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, earlier_feedback_lines, harness_feedback_question,
+                     parse_report, repeated_feedback, report_to_markdown)
 from .usage import Ledger
 from .workspace import Workspace, automerge_note, merge_conflict_instructions
 
@@ -193,6 +194,17 @@ class InFlight:
         return f"{self.task_id} ({self.agent}, {self.phase}, {proc}, {mins} min)"
 
 
+def _has_feedback(report_text: str) -> bool:
+    """A carried report (JSON) that holds at least one harness_feedback entry."""
+    if '"harness_feedback"' not in report_text:
+        return False
+    try:
+        data = json.loads(report_text)
+    except ValueError:
+        return False
+    return isinstance(data, dict) and bool(data.get("harness_feedback"))
+
+
 def requeue_status(prev_status: Status | None) -> Status:
     """Where a run that ended without a result (rate limit, runner stop) puts its task back: the status it was
     claimed from when that was Changes Requested (the reviewer's or merger's round is still open), else Ready."""
@@ -223,6 +235,8 @@ class Runner:
         self._last_update_check = None
         self.auto_update = True
         self._loaded_head: str | None = None     # harness commit this process imported (set by loop())
+        self._config_sig: str | None = config_signature(getattr(cfg, "path", None))   # config files as loaded
+        self._config_bad_sig: str | None = None  # an edit that did not load, logged once
         self._stale_since = None
         self._idle_since = None
         self._stopping = False
@@ -474,6 +488,7 @@ class Runner:
                 if once:
                     break
                 now = self.now()
+                self.maybe_reload_config()           # an edited .swarm/config.yaml or tuning.yaml applies to the next run
                 self.maybe_self_update(now)          # busy or idle: a busy runner drains once its code is stale
                 if n == 0:
                     self._idle_since = self._idle_since or now
@@ -488,6 +503,49 @@ class Runner:
         self.executor.shutdown(wait=True)
         if self._stopping:
             self.recover_orphans()
+
+    def maybe_reload_config(self) -> bool:
+        """Re-read the config when config.yaml / tuning.yaml / notion.yaml changed on disk. The runner loaded it once at
+        start: `worktree_links` (project bacc228, 21:04) never reached runners that had re-exec'd at 20:02, so T-110 and
+        T-112 ran without the demo clips (Q-286, Q-288, Q-289), and retro's tuning.yaml waited for a restart too.
+        Fields that only shape the next run are swapped in place; a change to agents, hosts, the board or the repo
+        restarts the runner (at once when idle, by draining when busy). A config that does not load is ignored
+        (logged once) and the old one stays."""
+        from .config import RESTART_KEYS, config_changes, config_signature, load_config
+        path = getattr(self.cfg, "path", None)
+        sig = config_signature(path)
+        if sig is None:
+            return False
+        if self._config_sig is None:
+            self._config_sig = sig
+            return False
+        if sig == self._config_sig or sig == self._config_bad_sig:
+            return False
+        try:
+            new = load_config(path)
+        except Exception as e:  # noqa: BLE001 - ConfigError, a YAML syntax error, a half-written file
+            self._config_bad_sig = sig
+            self.log(f"config changed but does not load ({type(e).__name__}: {str(e)[:160]}); keeping the old one")
+            return False
+        self._config_sig, self._config_bad_sig = sig, None
+        changed = config_changes(self.cfg, new)
+        if not changed:
+            return False
+        structural = [k for k in changed if k in RESTART_KEYS]
+        if structural:
+            if self.draining:
+                return False
+            self.log(f"config changed ({', '.join(structural)}): restarting this runner to apply it")
+            if not any(self.active.values()):
+                self.heartbeat(force=True)
+                from . import selfupdate
+                selfupdate.restart_self()
+            else:
+                self.request_restart()
+            return True
+        self.cfg = new
+        self.log(f"config reloaded ({', '.join(changed)}); the next runs use it")
+        return True
 
     def maybe_self_update(self, now) -> None:
         """Nothing in flight: pull swarm-control if main moved and restart on the new code. Runs in flight: never
@@ -918,6 +976,11 @@ class Runner:
                     cut = (f"\n… (cut at {CARRY_CAP} characters here; the whole file is in `.swarm-run/`)"
                            if len(text) > CARRY_CAP else "")
                     parts.append(f"From attempt {k}, {label}:\n\n```\n{text[:CARRY_CAP]}\n```{cut}")
+                    if (name.endswith("report.json") and not any("harness_feedback` is already" in x for x in parts)
+                            and _has_feedback(text)):
+                        parts.append(f"Attempt {k}'s `harness_feedback` is already on the board for the orchestrator. "
+                                     "In your report, list only harness notes that are new in this attempt (the "
+                                     "runner drops repeats; Q-288).")
             extra = d / "swarm-run"
             if extra.is_dir():
                 names = sorted(f.relative_to(extra).as_posix() for f in extra.rglob("*") if f.is_file())
@@ -1158,6 +1221,17 @@ class Runner:
                                "text": report.summary or f"{task.id} reported blocked without saying why"}
         if report.question:
             self._file_question(task, report, report.question)
+        if report.harness_feedback:
+            try:
+                earlier = earlier_feedback_lines(self.board.list_questions(), task.id)
+            except Exception as e:  # noqa: BLE001 - filing a repeat beats losing a note
+                earlier = []
+                self.log(f"[{task.id}] could not read earlier harness notes: {e!r}")
+            fresh = [f for f in report.harness_feedback if not repeated_feedback(f, earlier)]
+            if len(fresh) < len(report.harness_feedback):
+                self.log(f"[{task.id}] dropped {len(report.harness_feedback) - len(fresh)} harness note(s) an earlier "
+                         "attempt already filed")
+                report.harness_feedback = fresh
         hf = harness_feedback_question(task, report)
         if hf:
             self._file_question(task, report, hf, context=hf.pop("context"))

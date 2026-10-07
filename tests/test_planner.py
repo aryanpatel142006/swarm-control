@@ -146,3 +146,25 @@ def test_gitignored_files_in_the_main_checkout_are_not_reported_missing(tmp_path
     assert "Not tracked in git" in text and str(checkout / "eval/results/demo_regress_1.json") in text
     assert "Not on main when this task was written: `eval/new.py`" in text
     assert "demo_regress_1.json`. Create" not in text
+
+
+def test_a_new_task_names_open_tasks_that_cite_the_same_file():
+    """Q-288: T-110 ('gpu_up.sh report …') and T-111 ('scripts/gpu_up.sh deps + node choice') were open together with
+    no dependency and both rewrote gpu_up.sh's srun lines; the retro's shared-file finding repeats every round."""
+    from swarm.models import Status, Task
+    from swarm.policy import apply_task_lint, open_task_collisions
+    t111 = Task(id="T-111", title="Project-side items", status=Status.RUNNING,
+                description="gpu_up deps + node choice + CPUs in `scripts/gpu_up.sh`; session_score fallbacks")
+    done = Task(id="T-100", title="old", status=Status.DONE, description="edits scripts/gpu_up.sh")
+    reads = Task(id="T-105", title="eval", status=Status.READY,
+                 description="read eval/results/demo_regress_1.json and eval/fixtures/demo/x/manifest.json")
+    dep = Task(id="T-106", title="after", status=Status.READY, depends_on=["T-110"], description="scripts/gpu_up.sh")
+    t110 = Task(id="T-110", title="GPU path", description="(1) make gpu_up.sh report the git rev; table into docs/DEMO.md",
+                acceptance="verify_fast passes; demo reads eval/results/demo_regress_1.json")
+    hits = open_task_collisions(t110, [t111, done, reads, dep])
+    assert [(o.id, files) for o, files in hits] == [("T-111", ["scripts/gpu_up.sh"])]
+    notes = apply_task_lint(t110, None, [t111, done, reads, dep])
+    assert any("T-111 (`scripts/gpu_up.sh`)" in n for n in notes) and "Harness notes" in t110.description
+    # a glob scope counts as naming every file under it
+    owner = Task(id="T-120", title="docs owner", status=Status.READY, scope=["docs/**"])
+    assert [o.id for o, _ in open_task_collisions(Task(id="", title="x", description="fix docs/DEMO.md"), [owner])] == ["T-120"]

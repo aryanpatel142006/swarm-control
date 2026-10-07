@@ -293,3 +293,22 @@ def test_answer_refuses_an_id_two_questions_share(project_dir, monkeypatch):
     assert {q.kind: q.answer for q in board.list_questions()} == {"harness": "", "fyi": "done"}
     r = runner.invoke(app, base + ["--all"])
     assert r.exit_code == 0 and all(q.answer == "done" for q in board.list_questions())
+
+
+def test_add_names_an_open_task_that_cites_the_same_file(project_dir):
+    cfgp = str(project_dir / ".swarm" / "config.yaml")
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import Status, Task
+    board = InMemoryBoard()
+    board.create_task(Task(id="", title="deps", status=Status.READY, description="node choice in scripts/gpu_up.sh"))
+    import swarm.cli as cli
+    orig = cli.make_board
+    cli.make_board = lambda cfg, memory: board
+    try:
+        r = runner.invoke(app, ["--config", cfgp, "--memory", "add", "GPU path", "--type", "infra",
+                                "--description", "make gpu_up.sh report the git rev"])
+    finally:
+        cli.make_board = orig
+    assert r.exit_code == 0, r.output
+    assert "T-001 is open and names scripts/gpu_up.sh" in r.output and "--depends T-001" in r.output
+    assert "Harness notes" in board.get_task("T-002").description

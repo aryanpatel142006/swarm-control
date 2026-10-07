@@ -217,6 +217,37 @@ def _str_list(value, key: str) -> list[str] | None:
     return list(value)
 
 
+# Changes to these need a fresh process (another board, other agents or slots); the rest is re-read in place.
+RESTART_KEYS = ("path", "repo_root", "project", "repo", "main_branch", "worktree_root", "hosts", "agents", "notion")
+
+
+def config_signature(path: Path | str | None) -> str | None:
+    """A hash of config.yaml and the overlays load_config merges over it (tuning.yaml, notion.yaml); None when the
+    config cannot be read. Long-running processes compare it to notice an edited config (field note 97)."""
+    import hashlib
+    if not path:
+        return None
+    path = Path(path)
+    h = hashlib.sha256()
+    try:
+        h.update(path.read_bytes())
+    except OSError:
+        return None
+    for extra in ("tuning.yaml", "notion.yaml"):
+        f = path.parent / extra
+        try:
+            h.update(b"\0" + extra.encode() + b"\0" + f.read_bytes())
+        except OSError:
+            continue
+    return h.hexdigest()
+
+
+def config_changes(old: "Config", new: "Config") -> list[str]:
+    """Names of the Config fields that differ between two loads."""
+    from dataclasses import fields
+    return [f.name for f in fields(old) if getattr(old, f.name, None) != getattr(new, f.name, None)]
+
+
 def load_config(path: Path | str) -> Config:
     path = Path(path).resolve()
     raw = yaml.safe_load(path.read_text()) or {}

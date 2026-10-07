@@ -38,6 +38,22 @@ class Evidence:
     models_by_agent: dict[str, dict[str, str]] = field(default_factory=dict)   # agent -> tier -> model
     known_skills: set[str] | None = None       # skills that exist (project + plugins); None: accept any
     known_mcp: set[str] | None = None          # MCP servers the config can start; None: accept any
+    defaults: dict[str, list[str]] = field(default_factory=dict)   # "skills_by_type.<type>" -> tools already default
+    ledger_rows: list[dict] | None = None      # set by scoped(): the ledger rows of one milestone's tasks
+
+
+def scoped(ev: Evidence, milestone: str | None) -> Evidence:
+    """The evidence of one milestone's tasks. A retro runs when a milestone completes; with all-time evidence every
+    retro on the selective-hearing board (M4..M9, Oct 6) re-reported the same five findings, M0's T-002 included."""
+    if not milestone:
+        return ev
+    ids = {t.id for t in ev.tasks if t.milestone == milestone}
+    rows = [r for r in (ev.ledger_rows if ev.ledger_rows is not None else ev.ledger._rows()) if r.get("task") in ids]
+    return Evidence(tasks=[t for t in ev.tasks if t.id in ids], ledger=ev.ledger, board=ev.board, ledger_rows=rows,
+                    files_by_task={k: v for k, v in ev.files_by_task.items() if k in ids},
+                    tools_by_task={k: v for k, v in ev.tools_by_task.items() if k in ids},
+                    agents=ev.agents, models_by_agent=ev.models_by_agent, known_skills=ev.known_skills,
+                    known_mcp=ev.known_mcp, defaults=ev.defaults)
 
 
 def _tier_of(models: dict[str, str], model: str) -> str | None:
@@ -61,7 +77,8 @@ def _next_model(models: dict[str, str], model: str) -> str | None:
 def findings_from(ev: Evidence) -> list[Finding]:
     out: list[Finding] = []
     tasks = {t.id: t for t in ev.tasks}
-    rows = [r for r in ev.ledger._rows() if not ev.board or r.get("board") == ev.board]
+    rows = [r for r in (ev.ledger_rows if ev.ledger_rows is not None else ev.ledger._rows())
+            if not ev.board or r.get("board") == ev.board]
 
     # 1. a cheap model that keeps ending at the turn limit / timeout on a task type: raise that type's floor
     failed = Counter()
@@ -92,18 +109,27 @@ def findings_from(ev: Evidence) -> list[Finding]:
         types = sorted({t.type for t in small})
         out.append(Finding("undersized",
                            "Sized S but needed several attempts: " + ", ".join(f"{t.id} ({t.type}, {t.attempts} attempts)" for t in small)
-                           + f". Plan {'/'.join(types)} work that talks to an API or needs a browser check as M, not S."))
+                           + f". Plan {'/'.join(types)} work like these as M, not S (S has the smallest turn and time budget)."))
 
     # 3. one file edited by several tasks: conflicts and extra review rounds
     owners: dict[str, set[str]] = defaultdict(set)
     for tid, files in ev.files_by_task.items():
         for f in files:
             owners[f].add(tid)
-    shared = {f: ids for f, ids in owners.items() if len(ids) >= 3 or (len(ids) >= 2 and (f.startswith("docs/") or f.endswith(".md")))}
+    # the lesson is "one owner per milestone", so count owners within a milestone, not across the whole board
+    by_ms: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for f, ids in owners.items():
+        for tid in ids:
+            by_ms[(tasks[tid].milestone if tid in tasks else "", f)].add(tid)
+    shared = {k: ids for k, ids in by_ms.items()
+              if len(ids) >= 3 or (len(ids) >= 2 and (k[1].startswith("docs/") or k[1].endswith(".md")))}
     if shared:
-        parts = [f"{f} by {', '.join(sorted(ids))}" for f, ids in sorted(shared.items(), key=lambda kv: -len(kv[1]))]
-        out.append(Finding("shared-file", "Edited by several tasks: " + "; ".join(parts[:5])
-                           + ". Give each shared doc one owning task per milestone; others read it only."))
+        ranked = sorted(shared.items(), key=lambda kv: (-len(kv[1]), kv[0][1]))
+        parts = [f"{f} by {', '.join(sorted(ids))}" + (f" ({ms})" if ms else "") for (ms, f), ids in ranked]
+        out.append(Finding("shared-file", "Edited by several tasks of one milestone: " + "; ".join(parts[:5])
+                           + (f" and {len(parts) - 5} more" if len(parts) > 5 else "")
+                           + ". Give each shared file one owning task per milestone (or a dependency chain); others "
+                             "read it only. `swarm add` and the planner now name open tasks that cite the same file."))
 
     # 4. a tool that helped on two or more tasks of a type becomes that type's default
     helped: dict[tuple[str, str, str], set[str]] = defaultdict(set)
@@ -120,16 +146,19 @@ def findings_from(ev: Evidence) -> list[Finding]:
                 continue
             helped[(t.type, kind, name)].add(tid)
     patch: dict[str, list[str]] = {}
-    texts = []
+    by_type: dict[str, list[str]] = defaultdict(list)
     for (ttype, kind, name), ids in sorted(helped.items()):
         if len(ids) < 2:
             continue
-        key = f"{'mcp_by_type' if kind == 'mcp' else 'skills_by_type'}.{ttype}+"
-        patch.setdefault(key, []).append(name)
-        texts.append(f"{name} ({kind}) helped on {', '.join(sorted(ids))}")
+        key = f"{'mcp_by_type' if kind == 'mcp' else 'skills_by_type'}.{ttype}"
+        if name in ev.defaults.get(key, []):
+            continue   # already a default: re-announcing it every retro buried the new ones (Oct 6, five repeats)
+        patch.setdefault(key + "+", []).append(name)
+        by_type[ttype].append(f"{name} ({kind}; {', '.join(sorted(ids))})")
     if patch:
-        out.append(Finding("tool-default", "Tools that earned their place: " + "; ".join(texts)
-                           + ". Now default for those task types.", patch))
+        out.append(Finding("tool-default", "New defaults by task type: "
+                           + "; ".join(f"{ttype}: {', '.join(items)}" for ttype, items in sorted(by_type.items()))
+                           + ".", patch))
 
     # 5. review-heavy tasks: reported, never auto-changed
     heavy = [t for t in ev.tasks if t.review_rounds >= 3]
@@ -234,8 +263,10 @@ def tools_by_task_from_logs(wt: Path) -> dict[str, list[dict]]:
     return out
 
 
-def run_retro(cfg, board, ws, *, ledger: Ledger, log=print, dry_run: bool = False, now: datetime | None = None) -> list[Finding]:
-    """Collect evidence, derive findings, write LESSONS.md + tuning.yaml + a report, commit and push to main."""
+def run_retro(cfg, board, ws, *, ledger: Ledger, log=print, dry_run: bool = False, now: datetime | None = None,
+              milestone: str | None = None) -> list[Finding]:
+    """Collect evidence, derive findings, write LESSONS.md + tuning.yaml + a report, commit and push to main. With
+    `milestone` (serve passes the milestone that just completed) only that milestone's tasks count."""
     now = now or datetime.now(timezone.utc)
     wt = ws.main_worktree()
     board_id = (cfg.notion.tasks_ds or "")[:8]
@@ -251,8 +282,17 @@ def run_retro(cfg, board, ws, *, ledger: Ledger, log=print, dry_run: bool = Fals
                   files_by_task=files_by_task_from_git(ws, wt, ws._main_ref()),
                   tools_by_task=tools_by_task_from_logs(wt),
                   agents={a.name: a.provider for a in cfg.agents.values()},
-                  models_by_agent={a.name: dict(a.models) for a in cfg.agents.values()})
+                  models_by_agent={a.name: dict(a.models) for a in cfg.agents.values()},
+                  defaults={**{f"skills_by_type.{k}": list(v) for k, v in cfg.skills_by_type.items()},
+                            **{f"mcp_by_type.{k}": list(v) for k, v in cfg.mcp_by_type.items()}})
+    ev = scoped(ev, milestone)
+    if milestone and not ev.tasks:
+        log(f"retro: no tasks in milestone {milestone}")
+        return []
     findings = findings_from(ev)
+    for f in findings:
+        if milestone:
+            f.text = f"{milestone}: {f.text}"
     stamp = now.strftime("%Y-%m-%d %H:%M UTC")
     for f in findings:
         log(f"retro [{f.rule}] {f.text}" + (f" → {f.patch}" if f.patch else ""))
@@ -272,11 +312,12 @@ def run_retro(cfg, board, ws, *, ledger: Ledger, log=print, dry_run: bool = Fals
             patched.append(f.rule)
     report = wt / "docs" / "retro" / f"{now.strftime('%Y-%m-%d-%H%M')}.md"
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(f"# Retro · {stamp}\n\nBoard `{board_id or '-'}`, {len(ev.tasks)} tasks, "
+    report.write_text(f"# Retro · {stamp}" + (f" · {milestone}" if milestone else "")
+                      + f"\n\nBoard `{board_id or '-'}`, {len(ev.tasks)} tasks, "
                       f"{sum(1 for t in ev.tasks if t.status is Status.DONE)} done.\n\n"
                       + "\n".join(f"- **{f.rule}**: {f.text}" + (f"\n  - applied: `{f.patch}`" if f.rule in patched else "")
                                   for f in findings) + "\n")
-    subject = f"swarm retro: {len(findings)} findings ({', '.join(f.rule for f in findings)})"
+    subject = f"swarm retro{' ' + milestone if milestone else ''}: {len(findings)} findings ({', '.join(f.rule for f in findings)})"
     if not ws.commit_all(wt, subject):
         log("retro: nothing new to commit")
         return findings

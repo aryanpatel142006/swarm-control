@@ -1457,3 +1457,72 @@ def test_link_ignored_never_leaves_a_link_git_would_commit(git_repo, tmp_path):
     _git(git_repo, "worktree", "add", "-q", "-b", "tmp-x", str(wt))
     # .gitignore is not committed, so the worktree does not ignore data/big.bin: the link must not stay
     assert ws.link_ignored(wt, ["data"]) == [] and not (wt / "data" / "big.bin").exists()
+
+
+def test_an_edited_config_reaches_a_running_runner_without_a_restart(cfg, git_repo, tmp_path, monkeypatch):
+    """Field note 97: project bacc228 added `worktree_links` at 21:04; runners that had re-exec'd at 20:02 kept the
+    config they loaded and ran T-110/T-112 without the demo clips (Q-286, Q-288, Q-289)."""
+    import yaml
+    from swarm import selfupdate
+    restarts = []
+    monkeypatch.setattr(selfupdate, "restart_self", lambda: restarts.append(1))
+    logs = []
+    r, board = make_runner(cfg, git_repo, tmp_path, FakeAdapter())
+    r.log = logs.append
+    assert r.maybe_reload_config() is False                     # nothing changed since load
+    raw = yaml.safe_load(cfg.path.read_text())
+    raw["worktree_links"] = ["eval/fixtures/demo"]
+    cfg.path.write_text(yaml.safe_dump(raw))
+    assert r.maybe_reload_config() is True
+    assert r.cfg.worktree_links == ["eval/fixtures/demo"] and not restarts
+    assert any("config reloaded (worktree_links)" in m for m in logs)
+    # retro's overlay counts too
+    (cfg.path.parent / "tuning.yaml").write_text(yaml.safe_dump({"skills_by_type": {"backend": ["hearing-stack"]}}))
+    assert r.maybe_reload_config() is True and r.cfg.skills_by_type["backend"] == ["hearing-stack"]
+    # a half-written config is ignored, logged once, and the old one stays
+    cfg.path.write_text("agents: [unclosed\n")
+    assert r.maybe_reload_config() is False and r.maybe_reload_config() is False
+    assert sum("does not load" in m for m in logs) == 1 and r.cfg.worktree_links == ["eval/fixtures/demo"]
+    # agents or hosts change: idle → restart now; busy → drain
+    raw["agents"]["claude-a"]["parallel"] = 3
+    cfg.path.write_text(yaml.safe_dump(raw))
+    r.active["claude-a"].add("T-009")
+    assert r.maybe_reload_config() is True and r.draining and not restarts
+    raw["agents"]["claude-a"]["parallel"] = 1
+    cfg.path.write_text(yaml.safe_dump(raw))
+    r.draining = False
+    r.active["claude-a"].clear()
+    assert r.maybe_reload_config() is True and restarts == [1]
+
+
+def test_a_resumed_attempt_does_not_refile_the_previous_attempts_harness_notes(cfg, git_repo, tmp_path):
+    """Q-286/Q-288: T-110's attempt 2 re-filed two of attempt 1's three harness notes, reworded, as a new question."""
+    first = [{"what": "The task text said the Mac Enrolled leak on demo-mf-easy is −21 to −25 dB. No Mac run in "
+                      "eval/results shows that: whole-run is −7.9 to −9.7 dB, enrolled phase −18.8 dB.",
+              "suggestion": "quote the run id"},
+             {"what": "demo_regress.sh defaults --clip to the worktree's eval/fixtures/demo, which is gitignored and "
+                      "missing in worktrees, so my first locked GPU run failed with rc=2."}]
+    second = [{"what": "The task text says the Mac Enrolled leak on demo-mf-easy is −21 to −25 dB; no Mac run in "
+                       "eval/results shows that (whole run −7.9 to −9.7 dB, enrolled phase −18.8 dB)."},
+              {"what": "demo_regress defaults --clip to the worktree's eval/fixtures/demo, which is gitignored and "
+                       "missing in worktrees. Attempt 1's first locked GPU run failed with rc=2."},
+              {"what": "T-111 (main) and T-110 both edited the same srun/launch lines in scripts/gpu_up.sh in the same "
+                       "milestone, which caused this attempt's merge conflict."}]
+    adapter = FakeAdapter(files={"src/a.py": "x\n"},
+                          structured={"status": "done", "summary": "s", "harness_feedback": first})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)
+    adapter.structured = {"status": "done", "summary": "s2", "harness_feedback": second}
+    adapter.files = {"src/a.py": "y\n"}
+    again = board.get_task(t.id)
+    again.status = Status.CHANGES_REQUESTED
+    board.update_task(again, ["status"])
+    r.run_task(board.get_task(t.id))
+    notes = [q for q in board.list_questions() if q.kind == "harness"]
+    assert len(notes) == 2
+    assert notes[0].text.startswith(f"[harness] {t.id}: 2 notes")
+    assert notes[1].text.startswith(f"[harness] {t.id}: 1 note ") and "gpu_up.sh" in notes[1].context
+    assert "Mac Enrolled" not in notes[1].context
+    # the resumed prompt says the earlier notes are filed already
+    assert "harness_feedback` is already on the board" in adapter.prompts[1]

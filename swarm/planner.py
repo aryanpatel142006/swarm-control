@@ -148,6 +148,7 @@ class Planner:
         done = {t.id for t in self.board.list_tasks(status=[Status.DONE])}
         ctx = context_from_board(self.board, self.cfg)
         exists = main_exists(self.ws)
+        open_tasks = [t for t in self.board.list_tasks() if t.status not in (Status.DONE, Status.CUT)]
         created = []
         for p, tid in zip(proposals, ids):
             deps = [by_title.get(d, d) for d in p.get("depends_on", [])]
@@ -156,7 +157,7 @@ class Planner:
                         type=p["type"], importance=p["importance"], size=p["size"], milestone=p["milestone"],
                         priority=p.get("priority", 100), depends_on=deps, scope=p.get("scope", []),
                         flags=[f"host:{p['host']}"] if p.get("host") else [])
-            for n in apply_task_lint(task, exists):
+            for n in apply_task_lint(task, exists, open_tasks):
                 self.log(f"[{tid}] lint: {n}")
             ready = all(d in done for d in deps)
             task.status = Status.READY if ready else Status.BACKLOG
@@ -164,5 +165,6 @@ class Planner:
             ctx.queue_depth[task.agent] = ctx.queue_depth.get(task.agent, 0) + (1 if ready else 0)
             ctx.scopes_by_agent.setdefault(task.agent, []).extend(task.scope)
             created.append(self.board.create_task(task))
+            open_tasks.append(created[-1])
             self.log(f"[{tid}] {task.status.value} → {task.agent}/{task.model}: {task.title}")
         return created

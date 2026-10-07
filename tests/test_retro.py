@@ -173,3 +173,29 @@ def test_tool_defaults_only_promote_real_skills_and_known_mcp_servers(tmp_path):
                   known_skills={"test-driven-development", "frontend-design"}, known_mcp={"context7", "playwright"})
     f = {x.rule: x for x in findings_from(ev)}
     assert f["tool-default"].patch == {"skills_by_type.backend+": ["test-driven-development"], "mcp_by_type.backend+": ["context7"]}
+
+
+def test_a_milestone_retro_counts_only_that_milestone_and_skips_tools_already_default(tmp_path):
+    """Oct 6: every milestone retro (M4..M9) re-reported the same five all-time findings (M0's T-002 among them)
+    and re-announced tools tuning.yaml already made default."""
+    from swarm.retro import scoped
+    tasks = [Task(id="T-002", title="old", type="infra", size="S", status=Status.DONE, attempts=4, milestone="M0"),
+             Task(id="T-110", title="gpu", type="infra", size="M", status=Status.DONE, attempts=2, milestone="M9"),
+             Task(id="T-111", title="deps", type="infra", size="S", status=Status.DONE, attempts=1, milestone="M9"),
+             Task(id="T-009", title="docs", type="docs", size="S", status=Status.DONE, attempts=1, milestone="M0"),
+             Task(id="T-024", title="docs2", type="docs", size="S", status=Status.DONE, attempts=1, milestone="M1")]
+    tools = {tid: [{"name": "hearing-stack", "kind": "skill", "helped": True},
+                   {"name": "systematic-debugging", "kind": "skill", "helped": True}] for tid in ("T-110", "T-111")}
+    ev = Evidence(tasks=tasks, ledger=Ledger(tmp_path / "u.jsonl", board="b"), board="b",
+                  files_by_task={"T-110": ["docs/DEPLOY.md", "scripts/gpu_up.sh"], "T-111": ["docs/DEPLOY.md"],
+                                 "T-009": ["docs/BENCHMARKS.md"], "T-024": ["docs/BENCHMARKS.md"]},
+                  tools_by_task=tools, agents={"claude-a": "claude"},
+                  defaults={"skills_by_type.infra": ["hearing-stack"]})
+    whole = {f.rule: f for f in findings_from(ev)}
+    assert "T-002" in whole["undersized"].text
+    # BENCHMARKS.md by T-009 (M0) and T-024 (M1) is two milestones, one owner each: not a shared-file finding
+    assert "BENCHMARKS" not in whole["shared-file"].text and "docs/DEPLOY.md by T-110, T-111 (M9)" in whole["shared-file"].text
+    m9 = {f.rule: f for f in findings_from(scoped(ev, "M9"))}
+    assert "undersized" not in m9
+    assert m9["tool-default"].patch == {"skills_by_type.infra+": ["systematic-debugging"]}
+    assert "hearing-stack" not in m9["tool-default"].text and m9["tool-default"].text.startswith("New defaults by task type: infra:")

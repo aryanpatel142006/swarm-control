@@ -211,13 +211,16 @@ def usage(since: str = typer.Option(None, "--since", help="only runs after this 
 
 
 @app.command()
-def retro(dry_run: bool = typer.Option(False, "--dry-run", help="print the findings; write and commit nothing")):
+def retro(dry_run: bool = typer.Option(False, "--dry-run", help="print the findings; write and commit nothing"),
+          milestone: str = typer.Option("", "--milestone", help="only this milestone's tasks (serve does this when "
+                                                                 "a milestone completes); default: the whole board")):
     """Learn from this board: lessons into docs/LESSONS.md, safe config changes into .swarm/tuning.yaml, report in docs/retro/."""
     from .retro import run_retro
     from .usage import Ledger, default_ledger_path
     cfg = _cfg()
     ledger = Ledger(default_ledger_path(cfg.project), board=(cfg.notion.tasks_ds or "")[:8])
-    found = run_retro(cfg, make_board(cfg, state.memory), _workspace(cfg), ledger=ledger, log=console.print, dry_run=dry_run)
+    found = run_retro(cfg, make_board(cfg, state.memory), _workspace(cfg), ledger=ledger, log=console.print, dry_run=dry_run,
+                      milestone=milestone or None)
     console.print(f"{len(found)} findings" + (" (dry run)" if dry_run else ""))
 
 
@@ -368,9 +371,13 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
     t = Task(id="", title=title, description=description, acceptance=acceptance, type=type, importance=importance,
              size=size, milestone=milestone, depends_on=list(depends), scope=list(scope), priority=priority,
              flags=[f"host:{host}"] if host else [])
-    from .policy import apply_task_lint, main_exists
-    for n in apply_task_lint(t, None if state.memory else main_exists(_workspace(_cfg()))):
+    from .policy import apply_task_lint, main_exists, open_task_collisions
+    open_tasks = [o for o in board.list_tasks() if o.status not in (Status.DONE, Status.CUT)]
+    for n in apply_task_lint(t, None if state.memory else main_exists(_workspace(_cfg())), open_tasks):
         console.print(f"lint: {n}")
+    for other, files in open_task_collisions(t, open_tasks):
+        console.print(f"[yellow]lint: {other.id} is open and names {', '.join(files)}: add `--depends {other.id}` "
+                      "or put the edit in one task (one owner per shared file at a time; Q-288)[/yellow]")
     from .policy import shell_expansion_hints
     for n in shell_expansion_hints(f"{title}\n{description}\n{acceptance}"):
         console.print(f"[yellow]lint: {n}[/yellow]")

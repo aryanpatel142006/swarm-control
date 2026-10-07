@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .models import Report, Task, utcnow
@@ -119,6 +120,33 @@ def harness_feedback_question(task: Task, r: Report) -> dict | None:
             f" — {r.harness_feedback[0]['what']}",
             "options": [], "proceeding_with": "orchestrator triages: fix harness / tune project / update skill",
             "context": "\n".join(lines)}
+
+
+def _words(text: str) -> set[str]:
+    return set(re.sub(r"\W+", " ", (text or "").lower()).split())
+
+
+def repeated_feedback(item: dict, earlier: list[str], *, threshold: float = 0.8) -> bool:
+    """True when a harness note says what an earlier note for the same task already said. A resumed attempt reads
+    the previous report and re-files its harness_feedback reworded ("said" → "says", one clause dropped): T-110's
+    attempt 2 opened Q-288 with two of Q-286's three notes. Word overlap over the shorter note, not equality."""
+    words = _words(item.get("what", ""))
+    if len(words) < 5:
+        return False
+    for line in earlier:
+        other = _words(line.split(" → ", 1)[0])
+        if len(other) >= 5 and len(words & other) / min(len(words), len(other)) >= threshold:
+            return True
+    return False
+
+
+def earlier_feedback_lines(questions, task_id: str) -> list[str]:
+    """The `- what → suggestion` lines of every harness note already filed for this task (open or answered)."""
+    out = []
+    for q in questions:
+        if q.kind == "harness" and q.task_id == task_id and q.text.startswith("[harness]"):
+            out += [ln[2:] for ln in (q.context or "").splitlines() if ln.startswith("- ")]
+    return out
 
 
 def _tools(raw) -> list[dict]:

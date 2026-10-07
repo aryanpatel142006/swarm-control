@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from .config import Config
-from .models import Task
+from .models import Status, Task
 
 FORCE_REVIEW_FLAGS = ("report_missing", "out_of_scope", "docs_touched")
 
@@ -87,9 +87,55 @@ def complete_scope(scope: list[str], description: str, acceptance: str,
     return scope, notes
 
 
-def apply_task_lint(task: Task, exists=None) -> list[str]:
-    """Complete a new task's scope and append the notes to its description (Planner.apply and `swarm add`)."""
+_BARE_FILE = re.compile(r"(?<![\w./~:$-])([\w-][\w.-]*\.(?:sh|py|js|mjs|ts|tsx|jsx|md|yaml|yml|toml|css|html|ini|cfg))"
+                        r"(?![\w/*])")
+# Paths under these directories are inputs and outputs (results, fixtures, recordings), not files a task edits.
+_DATA_DIRS = {"results", "fixtures", "data", "sessions", "runs", "models", "weights", "decisions", "debt"}
+
+
+def named_files(task: Task) -> tuple[set[str], set[str]]:
+    """(repo paths, bare file names) a task's literal scope entries and text name. Bare names count because
+    orchestrator-written text says `gpu_up.sh` as often as `scripts/gpu_up.sh` (T-110)."""
+    text = f"{task.title}\n{task.description}\n{task.acceptance}"
+    paths = {g for g in task.scope if "*" not in g and "?" not in g} | set(mentioned_paths(text))
+    paths = {p for p in paths if not (set(p.split("/")[:-1]) & _DATA_DIRS)}
+    bare = {m.group(1) for m in _BARE_FILE.finditer(text)} | {p.rsplit("/", 1)[-1] for p in paths}
+    return paths, bare
+
+
+def open_task_collisions(task: Task, others: list[Task]) -> list[tuple[Task, list[str]]]:
+    """Open tasks (not Done/Cut) that name a file this task names, with no dependency either way. Two open tasks on
+    one file collide at merge time: T-110 and T-111 both edited scripts/gpu_up.sh's srun lines in M9 (Q-288), and
+    the retro's shared-file finding lists the same docs every round."""
+    paths, bare = named_files(task)
+    out = []
+    for o in others:
+        if o.id == task.id or o.status in (Status.DONE, Status.CUT):
+            continue
+        if o.id in task.depends_on or (task.id and task.id in o.depends_on):
+            continue
+        opaths, obare = named_files(o)
+        globs = [g for g in o.scope if "*" in g or "?" in g]
+        hits = {p for p in paths if p in opaths or p.rsplit("/", 1)[-1] in obare or (globs and in_scope(p, globs))}
+        hits |= {p for p in opaths if p.rsplit("/", 1)[-1] in bare}
+        named = {h.rsplit("/", 1)[-1] for h in hits}
+        hits |= {b for b in bare & obare if b not in named}
+        if hits:
+            out.append((o, sorted(hits)))
+    return out
+
+
+def apply_task_lint(task: Task, exists=None, open_tasks: list[Task] | None = None) -> list[str]:
+    """Complete a new task's scope and append the notes to its description (Planner.apply and `swarm add`). With
+    `open_tasks`, a file another open task also names is reported, for the worker and for whoever adds the task."""
     task.scope, notes = complete_scope(task.scope, task.description, task.acceptance, exists)
+    hits = open_task_collisions(task, open_tasks or [])
+    if hits:
+        listed = "; ".join(f"{o.id} ({', '.join(f'`{f}`' for f in files[:4])})" for o, files in hits[:4])
+        more = f" and {len(hits) - 4} more" if len(hits) > 4 else ""
+        notes.append(f"Open tasks that name the same files, with no dependency either way: {listed}{more}. If you edit "
+                     "them, whichever task merges second meets the other's edits: re-read them after the harness "
+                     "merges main.")
     if notes:
         task.description = (task.description.rstrip() + "\n\nHarness notes:\n" + "\n".join(f"- {n}" for n in notes)).strip()
     return notes

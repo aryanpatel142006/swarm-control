@@ -274,7 +274,7 @@ def test_serve_runs_a_retro_once_when_a_milestone_completes(cfg, git_repo, tmp_p
     srv, board, clock = make(cfg, git_repo, tmp_path)
     srv.retro_state = tmp_path / "retro.json"
     calls = []
-    srv.retro = lambda: calls.append(clock["now"]) or []
+    srv.retro = lambda ms=None: calls.append(clock["now"]) or []
     t1 = board.create_task(Task(id="", title="a", status=Status.RUNNING, agent="claude-a", milestone="M1"))
     t2 = board.create_task(Task(id="", title="b", status=Status.DONE, agent="claude-a", milestone="M1"))
     board.create_task(Task(id="", title="c", status=Status.READY, agent="claude-a", milestone="M2"))
@@ -601,3 +601,16 @@ def test_redistribute_on_return_never_moves_work_onto_a_cooling_agent(cfg, git_r
                                 cooldown_until=now + timedelta(minutes=5)))    # back online, but limited
     assert srv.redistribute_on_return() == 0
     assert board.get_task(t.id).agent == "claude-a"
+
+
+def test_serve_says_once_that_an_edited_config_needs_a_serve_restart(cfg):
+    from swarm.board.memory import InMemoryBoard
+    from swarm.serve import Server
+    logs = []
+    srv = Server(cfg, InMemoryBoard(), ws=None, reviewer=None, merger=None, log=logs.append)
+    srv.warn_config_changed()
+    assert not logs
+    (cfg.path.parent / "tuning.yaml").write_text("skills_by_type: {backend: [x]}\n")
+    srv.warn_config_changed()
+    srv.warn_config_changed()
+    assert len(logs) == 1 and "restart serve" in logs[0]
