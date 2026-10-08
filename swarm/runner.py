@@ -23,8 +23,9 @@ from .models import QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Questi
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
-from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, earlier_feedback_lines, harness_feedback_question,
-                     parse_report, repeated_feedback, report_to_markdown)
+from .report import (REPORT_SCHEMA, debts_markdown, decisions_markdown, earlier_feedback_lines, earlier_questions,
+                     earlier_questions_note, harness_feedback_question, parse_report, repeated_feedback,
+                     repeated_question, report_to_markdown)
 from .usage import Ledger
 from .workspace import Workspace, automerge_note, merge_conflict_instructions
 
@@ -914,12 +915,18 @@ class Runner:
                            + ". A background job still running when you stop is lost: bound long evaluations to fit, "
                            "start them early, and record their command, PID and output path in `.swarm-run/notes.md`.")
             self._restore_carry(task.id, attempt, wt)
+            try:
+                questions_note = earlier_questions_note(earlier_questions(self.board.list_questions(), task.id))
+            except Exception as e:  # noqa: BLE001 - the run goes ahead without the earlier answers
+                questions_note = ""
+                self.log(f"[{task.id}] could not read the task's earlier questions: {e!r}")
             prompt = compile_prompt(task, self.cfg, rules_text=self.rules_text, deps_summaries=deps,
                                     structured_output_supported=structured, mcp=mcp, skills=skills,
                                     skill_tool=agent_cfg.provider == "claude", conflicts_note=conflicts_note,
                                     previous_notes=self._previous_carry(task.id, attempt, wt), limits_line=limits_line,
                                     doc_root=wt, branch_log=self._branch_log(wt) if reuse else "",
-                                    references_note=references_note, automerged_note=automerged_note)
+                                    references_note=references_note, automerged_note=automerged_note,
+                                    questions_note=questions_note)
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=turns,
@@ -1496,14 +1503,21 @@ class Runner:
         if report.status == "blocked" and not report.question:
             report.question = {"kind": "blocking", "options": [], "proceeding_with": "",
                                "text": report.summary or f"{task.id} reported blocked without saying why"}
-        if report.question:
-            self._file_question(task, report, report.question)
-        if report.harness_feedback:
+        filed: list | None = None
+        if report.question or report.harness_feedback:
             try:
-                earlier = earlier_feedback_lines(self.board.list_questions(), task.id)
-            except Exception as e:  # noqa: BLE001 - filing a repeat beats losing a note
-                earlier = []
-                self.log(f"[{task.id}] could not read earlier harness notes: {e!r}")
+                filed = self.board.list_questions()
+            except Exception as e:  # noqa: BLE001 - filing a repeat beats losing a question or a note
+                self.log(f"[{task.id}] could not read the task's earlier questions: {e!r}")
+        if report.question:
+            again = repeated_question(report.question, earlier_questions(filed or [], task.id))
+            if again is not None:
+                self.log(f"[{task.id}] question not filed again: it repeats {again.id} "
+                         f"({'answered' if again.answer.strip() else again.status.lower()})")
+            else:
+                self._file_question(task, report, report.question)
+        if report.harness_feedback:
+            earlier = earlier_feedback_lines(filed or [], task.id)
             fresh = [f for f in report.harness_feedback if not repeated_feedback(f, earlier)]
             if len(fresh) < len(report.harness_feedback):
                 self.log(f"[{task.id}] dropped {len(report.harness_feedback) - len(fresh)} harness note(s) an earlier "

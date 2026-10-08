@@ -93,7 +93,7 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
                    structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = (),
                    skill_tool: bool = True, conflicts_note: str = "", previous_notes: str = "",
                    limits_line: str = "", doc_root: Path | None = None, branch_log: str = "",
-                   references_note: str = "", automerged_note: str = "") -> str:
+                   references_note: str = "", automerged_note: str = "", questions_note: str = "") -> str:
     import platform
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
@@ -120,6 +120,12 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
                   automerged_note.strip()]
     if task.feedback.strip():
         parts += ["", "## Feedback and messages for this task (address every item)", "", task.feedback.strip()]
+    if questions_note.strip():
+        # an fyi answered after the attempt that asked it was never seen, and the next attempt asked again (Q-315)
+        parts += ["", "## Questions this task already asked, with the answers so far", "",
+                  "Earlier attempts filed these. Do not ask them again (the runner drops a repeat). An answer is the "
+                  "orchestrator's decision: do what it asks for in this attempt, and say in your report how you "
+                  "applied it.", "", questions_note.strip()]
     if branch_log.strip():
         # a resumed run read docs quoted from main and concluded its own doc work was undone (Q-180)
         parts += ["", "## Work already on this branch", "",

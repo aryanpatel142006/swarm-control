@@ -146,6 +146,27 @@ def test_gitignored_files_in_the_main_checkout_are_not_reported_missing(tmp_path
     assert "Not tracked in git" in text and str(checkout / "eval/results/demo_regress_1.json") in text
     assert "Not on main when this task was written: `eval/new.py`" in text
     assert "demo_regress_1.json`. Create" not in text
+    assert "same name elsewhere" not in text
+
+
+def test_a_missing_path_names_the_file_of_the_same_name_on_main(tmp_path):
+    """Q-304: T-118's text said eval/demo_regress.py; the script is scripts/demo_regress.py."""
+    from swarm.policy import complete_scope, main_exists
+    main_wt = tmp_path / "mainwt"
+    (main_wt / "scripts").mkdir(parents=True)
+    (main_wt / "scripts" / "demo_regress.py").write_text("")
+    (main_wt / "scripts" / "other.py").write_text("")
+
+    class WS:
+        repo_root = tmp_path / "repo"
+
+        def main_worktree(self):
+            return main_wt
+    _, notes = complete_scope([], "add a column to eval/demo_regress.py and eval/brand_new.py", "",
+                              main_exists(WS()))
+    text = "\n".join(notes)
+    assert "`eval/demo_regress.py` (main has `scripts/demo_regress.py`)" in text
+    assert "`eval/brand_new.py`." in text and "same name elsewhere on main" in text
 
 
 def test_a_new_task_names_open_tasks_that_cite_the_same_file():

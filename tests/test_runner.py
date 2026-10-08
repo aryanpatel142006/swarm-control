@@ -1758,3 +1758,66 @@ def test_the_worktree_pid_file_is_written_while_the_cli_runs_and_never_carried(c
     assert seen["rec"]["pid"] == 434343
     from swarm.runner import CARRY_SKIP
     assert "cli.pid" in CARRY_SKIP
+
+
+Q313 = ("Name Call matches the name fuzzily so that Whisper's misspellings count: 'Ariane', 'Arian' and 'Ryan' all "
+        "trigger for 'Aryan'. A room where someone named Ryan talks will trigger it.")
+Q315 = ("Name Call matches the name fuzzily so that Whisper's misspellings count: 'Ariane', 'Arian' and 'Ryan' all "
+        "trigger for 'Aryan'. Someone named Ryan talking in the room will trigger it.")
+
+
+def test_an_attempt_sees_earlier_answers_and_a_repeated_fyi_is_not_filed_again(cfg, git_repo, tmp_path):
+    """T-120 (Oct 7): attempt 2 re-asked attempt 1's fyi as Q-315 because Q-313's answer (add an exclude list and
+    hotwords) had not reached its prompt, then merged before the answer landed."""
+    from swarm.models import Question
+    adapter = FakeAdapter(files={"src/a.py": "x"},
+                          structured={"status": "done", "summary": "s",
+                                      "question": {"kind": "fyi", "text": Q315, "proceeding_with": "keep fuzzy"}})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    other = ready_task(board, title="Other")
+    board.create_question(Question(id="", text=Q313, kind="fyi", task_id=t.id, proceeding_with="keep fuzzy",
+                                   status="Applied", answer="Keep fuzzy, add control.name.exclude and hotwords."))
+    board.create_question(Question(id="", text="Which port?", kind="fyi", task_id=other.id, answer="8080 please"))
+    board.create_question(Question(id="", text="[harness] a note", kind="harness", task_id=t.id, answer="fixed"))
+    assert r.run_task(t).status is Status.MERGE_READY
+    prompt = adapter.prompts[0]
+    assert "## Questions this task already asked, with the answers so far" in prompt
+    assert "control.name.exclude and hotwords" in prompt and "You proceeded with: keep fuzzy" in prompt
+    assert "8080 please" not in prompt and "[harness] a note" not in prompt
+    assert [q.kind for q in board.list_questions() if q.task_id == t.id].count("fyi") == 1
+
+
+def test_an_unanswered_question_is_listed_as_open_and_a_new_question_is_still_filed(cfg, git_repo, tmp_path):
+    from swarm.models import Question
+    adapter = FakeAdapter(files={"src/a.py": "x"},
+                          structured={"status": "done", "summary": "s",
+                                      "question": {"kind": "fyi", "text": "The reference clip is 48 kHz but the "
+                                                   "fixtures are 16 kHz; I resampled the reference once at load.",
+                                                   "proceeding_with": "resample at load"}})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    board.create_question(Question(id="", text=Q313, kind="fyi", task_id=t.id, proceeding_with="keep fuzzy"))
+    r.run_task(t)
+    assert "Not answered yet" in adapter.prompts[0]
+    assert len([q for q in board.list_questions() if q.task_id == t.id]) == 2
+
+
+def test_a_repeated_blocking_question_waits_on_the_open_one_and_an_answered_one_is_asked_again(cfg, git_repo, tmp_path):
+    from swarm.models import Question
+    text = "The acceptance needs the A100 but the iLab job is down and srun rejects the request; wait or cut?"
+    adapter = FakeAdapter(files={"src/a.py": "x"},
+                          structured={"status": "blocked", "summary": "s",
+                                      "question": {"kind": "blocking", "text": text, "options": ["wait", "cut"]}})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    first = board.create_question(Question(id="", text=text, kind="blocking", task_id=t.id))
+    assert r.run_task(t).status is Status.BLOCKED
+    assert [q.id for q in board.list_questions() if q.task_id == t.id] == [first.id]
+    stored = board.questions[first.id]
+    stored.status, stored.answer = "Applied", "wait"
+    t2 = board.get_task(t.id)
+    t2.status = Status.READY
+    board.update_task(t2, ["status"])
+    assert r.run_task(board.get_task(t.id)).status is Status.BLOCKED
+    assert len([q for q in board.list_questions() if q.task_id == t.id]) == 2

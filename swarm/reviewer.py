@@ -16,7 +16,7 @@ from .failover import ReviewerState, reviewer_state
 from .feedback import clip_middle, failing_step_line, verify_feedback
 from .models import QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
-from .report import REVIEW_SCHEMA
+from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
 from .runner import RATE_LIMIT_COOLDOWN_MIN, STRUCTURED_PROVIDERS, USAGE_LIMIT_COOLDOWN_H
 from .workspace import CmdResult, Workspace
 
@@ -48,12 +48,16 @@ def parse_verdict(structured: dict | None, worktree: Path) -> Verdict:
                    [f for f in (data.get("findings") or []) if isinstance(f, dict)])
 
 
-def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: str) -> str:
+def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: str, questions_note: str = "") -> str:
+    asked = (["## Questions the worker asked, with the orchestrator's answers so far", "",
+              "An answer that asks for a change is part of the acceptance: request changes when the diff does not "
+              "make it (T-120 merged before Q-313's answer reached it).", "", questions_note.strip(), ""]
+             if questions_note.strip() else [])
     parts = [f"# Review of {task.id} · {task.title}", "", instructions.strip(), "", "## Task", "",
              f"- Type: {task.type} · Importance: {task.importance} · Scope: {', '.join(task.scope) or 'any'}",
              f"- Flags from the harness: {', '.join(task.flags) or 'none'}", "", "### Description", "",
              task.description.strip() or "(none)", "", "### Acceptance criteria", "",
-             task.acceptance.strip() or "(none given)", "", "## Verify output (full suite)", "", "```",
+             task.acceptance.strip() or "(none given)", "", *asked, "## Verify output (full suite)", "", "```",
              verify_tail.strip() or "(no verify script)", "```", "", "## Diff against main", "", "```diff",
              diff[:DIFF_CAP] + ("\n[diff truncated]" if len(diff) > DIFF_CAP else ""), "```", "",
              "## Verdict contract", "", "Your final answer MUST be a JSON object matching:", "", "```json",
@@ -186,7 +190,7 @@ class Reviewer:
             diff = self.ws.git(wt, "diff", f"{self.ws.remote}/{self.cfg.main_branch}...HEAD", check=False).out
             tail = full.tail(1500) if full else ""
             prompt = build_review_prompt(task, diff, (verify_note + "\n\n" + tail).strip() if verify_note else tail,
-                                         self.prompt_text)
+                                         self.prompt_text, self._questions_note(task))
             pf = wt / ".swarm-run" / "review_prompt.md"
             pf.write_text(prompt)
             tried: set[str] = set()
@@ -212,6 +216,13 @@ class Reviewer:
                 return parse_verdict(result.structured_output, wt)
         finally:
             self.ws.dispose(wt)
+
+    def _questions_note(self, task: Task) -> str:
+        try:
+            return earlier_questions_note(earlier_questions(self.board.list_questions(), task.id))
+        except Exception as e:  # noqa: BLE001 - a review without the answers beats no review
+            self.log(f"[{task.id}] could not read the task's questions: {e!r}")
+            return ""
 
     def _run_model(self, task: Task, agent: str, model: str, pf: Path, wt: Path):
         role = self.cfg.reviewer

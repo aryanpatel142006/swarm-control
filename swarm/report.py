@@ -136,28 +136,29 @@ def _identifier(word: str) -> bool:
     return "_" in word or (any(c.isdigit() for c in word) and any(c.isalpha() for c in word))
 
 
+def says_the_same(text: str, other_text: str, *, threshold: float = 0.8, loose: float = 0.6) -> bool:
+    """True when two worker-written texts say the same thing, reworded. Content-word overlap over the shorter text
+    (stopwords dropped): at least `threshold`, or at least `loose` when the two also share an identifier (a config
+    key, an env var) or six content words. Texts under four content words never match."""
+    words = _words(text) - _STOPWORDS
+    other = _words(other_text) - _STOPWORDS
+    if len(words) < 4 or len(other) < 4:
+        return False
+    shared = words & other
+    ratio = len(shared) / min(len(words), len(other))
+    if ratio >= threshold:
+        return True
+    return ratio >= loose and (any(_identifier(w) for w in shared) or len(shared) >= 6)
+
+
 def repeated_feedback(item: dict, earlier: list[str], *, threshold: float = 0.8, loose: float = 0.6) -> bool:
     """True when a harness note says what an earlier note for the same task already said. A resumed attempt reads
     the previous report and re-files its harness_feedback reworded ("said" → "says", one clause dropped): T-110's
-    attempt 2 opened Q-288 with two of Q-286's three notes. Content-word overlap over the shorter note (stopwords
-    dropped): at least `threshold`, or at least `loose` when the two also share an identifier (a config key, an env
-    var) or six content words. T-115's attempts re-filed "documents ILAB_CPUS … (srun --cpus-per-task) as working"
-    (0.82 without stopwords), "needs HEARING_HQ_BACKEND=remote" (0.73) and the S-sizing note (0.62, eight shared
-    words) as Q-295, Q-297 and Q-300 (Oct 6)."""
-    words = _words(item.get("what", "")) - _STOPWORDS
-    if len(words) < 4:
-        return False
-    for line in earlier:
-        other = _words(line.split(" → ", 1)[0]) - _STOPWORDS
-        if len(other) < 4:
-            continue
-        shared = words & other
-        ratio = len(shared) / min(len(words), len(other))
-        if ratio >= threshold:
-            return True
-        if ratio >= loose and (any(_identifier(w) for w in shared) or len(shared) >= 6):
-            return True
-    return False
+    attempt 2 opened Q-288 with two of Q-286's three notes. T-115's attempts re-filed "documents ILAB_CPUS …
+    (srun --cpus-per-task) as working" (0.82 without stopwords), "needs HEARING_HQ_BACKEND=remote" (0.73) and the
+    S-sizing note (0.62, eight shared words) as Q-295, Q-297 and Q-300 (Oct 6)."""
+    what = item.get("what", "")
+    return any(says_the_same(what, line.split(" → ", 1)[0], threshold=threshold, loose=loose) for line in earlier)
 
 
 def earlier_feedback_lines(questions, task_id: str) -> list[str]:
@@ -167,6 +168,64 @@ def earlier_feedback_lines(questions, task_id: str) -> list[str]:
         if q.kind == "harness" and q.task_id == task_id and q.text.startswith("[harness]"):
             out += [ln[2:] for ln in (q.context or "").splitlines() if ln.startswith("- ")]
     return out
+
+
+ASKED_KINDS = ("blocking", "fyi")
+
+
+def _qnum(q) -> int:
+    m = re.search(r"(\d+)$", q.id or "")
+    return int(m.group(1)) if m else 0
+
+
+def earlier_questions(questions, task_id: str) -> list:
+    """The blocking and fyi questions already filed for this task (open or answered), oldest first."""
+    return sorted((q for q in questions if q.task_id == task_id and q.kind in ASKED_KINDS and (q.text or "").strip()),
+                  key=_qnum)
+
+
+def repeated_question(q: dict, earlier: list) -> "object | None":
+    """The earlier question on the same task that this report's question repeats, or None. A resumed or
+    re-reviewed attempt re-asked its fyi before the orchestrator's answer reached it (Q-313/Q-315 on T-120,
+    Q-306/Q-308 on T-116, Q-285/Q-287 on T-110). An fyi repeats any earlier fyi or blocking question that says the
+    same; a blocking question repeats only an open one (its answer still unblocks the task): re-asking one that
+    was answered means the answer did not settle it, so it is filed again."""
+    text = (q or {}).get("text", "")
+    kind = (q or {}).get("kind", "blocking")
+    for e in earlier:
+        if kind == "blocking" and (e.kind != "blocking" or e.status != "Open"):
+            continue
+        if says_the_same(text, e.text):
+            return e
+    return None
+
+
+def earlier_questions_note(questions: list, cap: int = 4000) -> str:
+    """Prompt text listing this task's earlier questions with their answers so far, newest answer included, so an
+    attempt neither re-asks them nor misses an answer that asked for a change (T-120 merged before Q-313's answer
+    reached it)."""
+    if not questions:
+        return ""
+    lines = []
+    for q in questions:
+        head = f"- {q.id} ({q.kind}): {_clip(q.text, 500)}"
+        if q.proceeding_with:
+            head += f" You proceeded with: {_clip(q.proceeding_with, 300)}"
+        if q.answer.strip():
+            head += f"\n  **Answer:** {_clip(q.answer, 1200)}"
+        else:
+            head += "\n  Not answered yet: keep what you proceeded with unless new facts change it."
+        lines.append(head)
+    dropped = 0
+    while len(lines) > 1 and len("\n".join(lines)) > cap:
+        lines.pop(0)
+        dropped += 1
+    return "\n".join(([f"({dropped} older question(s) omitted)"] if dropped else []) + lines)
+
+
+def _clip(text: str, n: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
 def _tools(raw) -> list[dict]:

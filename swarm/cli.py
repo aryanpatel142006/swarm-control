@@ -527,10 +527,15 @@ def run(agent: str = typer.Option(None, "--agent", help="only this agent"),
             raise typer.Exit()
         first = tasks[0]
         provider = r.agents[first.agent].provider if first.agent in r.agents else "claude"
+        from .report import earlier_questions, earlier_questions_note
+        try:
+            asked = earlier_questions_note(earlier_questions(r.board.list_questions(), first.id))
+        except Exception:  # noqa: BLE001 - a dry run without the earlier answers is still useful
+            asked = ""
         console.print(compile_prompt(first, _cfg(), rules_text=load_rules(), deps_summaries={},
                                      structured_output_supported=True,
                                      skills=_cfg().skills_for(first.type, first.importance),
-                                     skill_tool=provider == "claude"))
+                                     skill_tool=provider == "claude", questions_note=asked))
         raise typer.Exit()
     r.loop(once=once)
 

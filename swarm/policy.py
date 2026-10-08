@@ -82,8 +82,16 @@ def complete_scope(scope: list[str], description: str, acceptance: str,
                          + ", ".join(f"`{p}` at `{a}`" for p, a in local)
                          + ". Read them at those absolute paths (or through the project's env dirs).")
         if missing:
-            notes.append("Not on main when this task was written: " + ", ".join(f"`{p}`" for p in missing)
-                         + ". Create them if this task produces them; if another task does, check it merged first.")
+            same_name = getattr(exists, "same_name", None)
+            named, moved = [], []
+            for p in missing:
+                alts = [a for a in (same_name(p) if same_name else []) if a != p]
+                named.append(f"`{p}`" + (f" (main has {', '.join(f'`{a}`' for a in alts[:3])})" if alts else ""))
+                moved += alts[:1]
+            notes.append("Not on main when this task was written: " + ", ".join(named)
+                         + ". Create them if this task produces them; if another task does, check it merged first."
+                         + (" A file of the same name elsewhere on main is usually the one the text means: check it "
+                            "before creating a new one (Q-304)." if moved else ""))
     return scope, notes
 
 
@@ -157,7 +165,30 @@ def main_exists(ws):
         if str(root) and (root / p).exists():
             return str(root / p)
         return False
+    files: list[str] = []
+
+    def same_name(p: str) -> list[str]:
+        """Tracked files on main with the same file name as `p`: T-118's text said eval/demo_regress.py for
+        scripts/demo_regress.py (Q-304)."""
+        if not files:
+            files.extend(_tracked_files(wt))
+        name = p.rsplit("/", 1)[-1]
+        return sorted(f for f in files if f.rsplit("/", 1)[-1] == name)
+    exists.same_name = same_name
     return exists
+
+
+def _tracked_files(root: Path) -> list[str]:
+    import subprocess
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            return out.stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    skip = {".git", "node_modules", ".venv", "__pycache__"}
+    return [str(f.relative_to(root)) for f in root.rglob("*")
+            if f.is_file() and not skip & set(f.relative_to(root).parts)]
 
 
 _ROOT_PATH = re.compile(r"(?:^|(?<=[\s'\"(`=]))(/[\w.<>{}@+-]+)((?:/[\w.<>{}@+-]+)*\.[A-Za-z0-9]{1,6})?(?=$|[\s'\"),`;:]|\.(?:\s|$))",

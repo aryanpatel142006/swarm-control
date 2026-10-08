@@ -322,3 +322,14 @@ def test_flaky_note_without_a_test_id_names_the_failing_step_and_keeps_the_tail(
     q = [q for q in board.list_questions() if q.kind == "harness"][0]
     assert "no test id; failing step: demo replay regressed or failed" in q.text
     assert "demo replay regressed or failed" in q.context and len(q.context) <= 1900
+
+
+def test_review_prompt_lists_the_tasks_questions_and_answers():
+    """T-120 merged before Q-313's answer (add an exclude list) reached it; the reviewer should check it."""
+    from swarm.models import Task
+    from swarm.reviewer import build_review_prompt
+    t = Task(id="T-120", title="Name Call", importance="high")
+    p = build_review_prompt(t, "diff", "ok", "INSTR", "- Q-313 (fyi): fuzzy?\n  **Answer:** add control.name.exclude")
+    assert "Questions the worker asked" in p and "control.name.exclude" in p
+    assert p.index("control.name.exclude") < p.index("## Verify output")
+    assert "Questions the worker asked" not in build_review_prompt(t, "diff", "ok", "INSTR")

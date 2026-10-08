@@ -135,3 +135,49 @@ def test_reworded_notes_from_earlier_attempts_count_as_repeats_and_other_notes_d
                 "gpu_up.sh ilab always closes the tunnel forward in the shared state dir, so a second job for an A/B "
                 "kills the live job's tunnel."):
         assert not repeated_feedback({"what": new}, earlier), new
+
+
+def test_repeated_questions_match_reworded_pairs_and_not_different_questions():
+    """Q-313/Q-315 (T-120), Q-306/Q-308 (T-116), Q-285/Q-287 (T-110): the same fyi asked on consecutive attempts."""
+    from swarm.models import Question
+    from swarm.report import earlier_questions, earlier_questions_note, repeated_question, says_the_same
+    pairs = [
+        ("Name Call matches the name fuzzily so that Whisper's misspellings count: 'Ariane', 'Arian' and 'Ryan' all "
+         "trigger for 'Aryan'. A room where someone named Ryan talks will trigger it.",
+         "Name Call matches the name fuzzily so that Whisper's misspellings count: 'Ariane', 'Arian' and 'Ryan' all "
+         "trigger for 'Aryan'. Someone named Ryan talking in the room will trigger it."),
+        ("Idle ladder tiers are now suspended by default on both the Mac and remote ladders. Tiers needing `healthy` "
+         "(tse) and remote tiers always run. The dfn_ll cold-start bridge on the A100 is still off until a GPU A/B "
+         "is run.",
+         "Idle ladder tiers are now suspended by default on both the Mac and the remote ladders. Tse (`healthy`) "
+         "tiers and remote tiers always run. The dfn_ll cold-start bridge on the A100 stays off until a GPU A/B is "
+         "run."),
+        ("The acceptance compares GPU leak to a Mac '−21 to −25 dB', which no Mac run on demo-mf-easy shows. Mac "
+         "whole-run leak is −8 to −10 dB and its enrolled phase is −18.8 dB. I compared enrolled phase to enrolled "
+         "phase.",
+         "The acceptance compares GPU leak with a Mac '−21 to −25 dB' that no Mac run on demo-mf-easy shows. Mac "
+         "whole-run leak is −8 to −10 dB and its enrolled phase is −18.8 dB, so I compared enrolled phase to "
+         "enrolled phase."),
+    ]
+    for a, b in pairs:
+        assert says_the_same(a, b) and says_the_same(b, a)
+    assert not says_the_same(pairs[0][0], pairs[1][0]) and not says_the_same(pairs[1][0], pairs[2][0])
+    assert not says_the_same("Which port should the judge page use?", "Which port should the API use?")
+
+    fyi = Question(id="Q-313", text=pairs[0][0], kind="fyi", task_id="T-120", status="Applied", answer="add exclude")
+    blocking_open = Question(id="Q-320", text=pairs[1][0], kind="blocking", task_id="T-120")
+    blocking_done = Question(id="Q-321", text=pairs[2][0], kind="blocking", task_id="T-120", status="Applied",
+                             answer="enrolled")
+    noise = [Question(id="Q-9", text=pairs[0][0], kind="fyi", task_id="T-999"),
+             Question(id="Q-10", text="[harness] " + pairs[0][0], kind="harness", task_id="T-120")]
+    earlier = earlier_questions([blocking_done, blocking_open, fyi] + noise, "T-120")
+    assert [q.id for q in earlier] == ["Q-313", "Q-320", "Q-321"]
+    assert repeated_question({"kind": "fyi", "text": pairs[0][1]}, earlier).id == "Q-313"
+    assert repeated_question({"kind": "fyi", "text": pairs[2][1]}, earlier).id == "Q-321"
+    assert repeated_question({"kind": "blocking", "text": pairs[1][1]}, earlier).id == "Q-320"
+    assert repeated_question({"kind": "blocking", "text": pairs[2][1]}, earlier) is None    # answered: ask again
+    assert repeated_question({"kind": "blocking", "text": pairs[0][1]}, earlier) is None    # only an fyi matched
+    note = earlier_questions_note(earlier)
+    assert "**Answer:** add exclude" in note and "Not answered yet" in note
+    short = earlier_questions_note(earlier, cap=400)
+    assert short.startswith("(") and "Q-321" in short and "Q-313" not in short
