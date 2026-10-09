@@ -11,7 +11,7 @@ from typing import Callable
 
 from .board.base import Board
 from .config import Config
-from .models import AgentRow, Question, Status, Task, usage_limited, utcnow
+from .models import IMPORTANCES, AgentRow, Question, Status, Task, usage_limited, utcnow
 from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
 from .status import render_headline, render_status
 from .workspace import Workspace
@@ -421,16 +421,25 @@ class Server:
             n += 1
         return n
 
+    @staticmethod
+    def _by_importance(tasks: list[Task]) -> list[Task]:
+        """Critical first, then priority, then id: the reviewer and the merger take the work the
+        demo waits on before the rest (Oct 9 2026: T-155, critical, waited behind two high tasks)."""
+        def key(t: Task):
+            rank = IMPORTANCES.index(t.importance) if t.importance in IMPORTANCES else IMPORTANCES.index("normal")
+            return (rank, t.priority if t.priority is not None else 99, t.id)
+        return sorted(tasks, key=key)
+
     def review_pending(self) -> int:
         n = 0
-        for t in self.board.list_tasks(status=[Status.REVIEW])[: self.review_batch]:
+        for t in self._by_importance(self.board.list_tasks(status=[Status.REVIEW]))[: self.review_batch]:
             self.reviewer.process(t)
             n += 1
         return n
 
     def merge_pending(self) -> int:
         n = 0
-        for t in self.board.list_tasks(status=[Status.MERGE_READY]):
+        for t in self._by_importance(self.board.list_tasks(status=[Status.MERGE_READY])):
             if self.merger.merge(t):
                 n += 1
                 self.promote()

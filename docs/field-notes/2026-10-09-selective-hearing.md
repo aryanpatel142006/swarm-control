@@ -1,0 +1,8 @@
+# Field notes · selective-hearing · 2026-10-09
+
+## 20:05 UTC · after the laptop restart (orchestrator session restarted on Fable)
+- Harness notes backlog: 19 `[harness]` fyi questions (Q-324…Q-417) stayed Open across the crunch because each needs a hand answer; all came from tasks now Done/Cut. Batch-answered them with a one-line triage each (below). Idea: `swarm answer --all-harness-done "text"` for notes whose task is closed.
+- Q-417 (T-155): a bug task cut from a live session log should quote `tiers.reason` / per-tier eligibility at the failure instant, not only the tier names. Applied to T-156 (quoted the raw telemetry keys). Idea: `tools/session_states.py` (HACKRU2026/tools) prints state changes; a `swarm add --from-session <events.jsonl> --at <t>` could paste the snapshot.
+- Q-362 (T-129): remote-side code merges leave the GPU server stale; no task may resync it (only Aryan runs gpu_up). Rule for M12: check `/health git_rev` against main before dispatching A100 measurement tasks, and put the gpu_up command in the task's Harness notes. Claude Code workers' background verify died at the 10-min default background timeout while queued on swarm-lock: rule 18 should say `timeout: 2400000`.
+- T-156 found from events.jsonl: GPU-backed judge sessions report tier=audio-only / no remote extras (RemoteStage._report never reaches the session telemetry). Nobody noticed in two live tests because the pill said "iLab GPU". Measured-claims rule needs the telemetry to be truthful on the demo path, not only in replays.
+- after_restart.sh (HACKRU2026/tools) worked as a SessionStart hook; the only manual step is the ControlMaster (password + Aryan). Aryan pushed hard to have the orchestrator use his password; declined per the credentials rule.

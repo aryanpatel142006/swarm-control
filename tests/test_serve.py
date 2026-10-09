@@ -132,7 +132,16 @@ def test_review_and_merge_pending(cfg, git_repo, tmp_path):
     assert board.get_task(d.id).status is Status.READY
 
 
-def test_reroute_unknown_agent_and_cooldown(cfg, git_repo, tmp_path):
+def test_review_and_merge_take_critical_first(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    srv.review_batch = 1
+    hi = board.create_task(Task(id="", title="h", status=Status.REVIEW, importance="high", priority=1))
+    crit = board.create_task(Task(id="", title="c", status=Status.REVIEW, importance="critical", priority=5))
+    assert srv.review_pending() == 1 and srv.reviewer.seen == [crit.id]
+    assert srv.review_pending() == 1 and srv.reviewer.seen == [crit.id, hi.id]
+
+
+
     srv, board, clock = make(cfg, git_repo, tmp_path)
     board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))   # checked in
     now = clock["now"]
