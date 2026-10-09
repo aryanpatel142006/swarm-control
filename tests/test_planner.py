@@ -189,3 +189,112 @@ def test_a_new_task_names_open_tasks_that_cite_the_same_file():
     # a glob scope counts as naming every file under it
     owner = Task(id="T-120", title="docs owner", status=Status.READY, scope=["docs/**"])
     assert [o.id for o, _ in open_task_collisions(Task(id="", title="x", description="fix docs/DEMO.md"), [owner])] == ["T-120"]
+
+
+# ---- named-option lint (Q-478) ----
+def _git(cwd, *args):
+    import subprocess
+    subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True,
+                   capture_output=True)
+
+
+def _option_repo(tmp_path):
+    """A main with `HEARING_OLD=`, `--old-flag` and a doc under docs/decisions; a remote branch task/T-149 that adds
+    `ILAB_PROFILES` and `--quiet-mode`."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs" / "decisions").mkdir(parents=True)
+    (repo / "scripts" / "demo.sh").write_text('HEARING_OLD="${HEARING_OLD:-1}"\nrun --old-flag --old-flag-v2\n')
+    (repo / "docs" / "decisions" / "d.md").write_text("we may add ONLY_IN_DECISIONS=1 and --only-in-decisions\n")
+    _git(repo.parent, "init", "-q", "-b", "main", str(repo))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "checkout", "-q", "-b", "task/T-149")
+    (repo / "scripts" / "gpu_up.sh").write_text('echo "${ILAB_PROFILES}"; run --quiet-mode\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "T-149")
+    _git(repo, "update-ref", "refs/remotes/origin/task/T-149", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "branch", "-q", "-D", "task/T-149")
+    return repo
+
+
+def test_named_options_finds_env_vars_and_long_flags():
+    from swarm.policy import named_options
+    text = ("Run with HEARING_X=1 and $ILAB_PROFILES under ${OTHER_VAR}; pass --quiet-mode, not -q. "
+            "cd $HOME; swarm add --force; use a--b and PATH= too. HEARING_X=2")
+    assert named_options(text) == ["HEARING_X", "ILAB_PROFILES", "OTHER_VAR", "--quiet-mode"]
+
+
+def test_option_lint_reports_absent_options_and_the_branch_that_provides_them(tmp_path):
+    from swarm.policy import main_exists
+    repo = _option_repo(tmp_path)
+
+    class WS:
+        repo_root = repo
+        remote = "origin"
+
+        def main_worktree(self):
+            return repo
+    exists = main_exists(WS())
+    text = ("Set HEARING_OLD=0 and $ILAB_PROFILES with --old-flag, --quiet-mode, --nowhere-flag, "
+            "NOWHERE_VAR=1, ONLY_IN_DECISIONS=1, --only-in-decisions and --old (a prefix of --old-flag).")
+    lines = exists.option_lint(text, {"T-149"})
+    assert sorted(lines) == sorted([
+        "ILAB_PROFILES is not on main (provided by T-149, not merged)",
+        "--quiet-mode is not on main (provided by T-149, not merged)",
+        "--nowhere-flag is not on main", "NOWHERE_VAR is not on main", "ONLY_IN_DECISIONS is not on main",
+        "--only-in-decisions is not on main", "--old is not on main"])
+    # a branch whose task is not open does not count as a provider
+    assert "ILAB_PROFILES is not on main" in exists.option_lint(text, {"T-1"})
+    assert not any("provided by" in l for l in exists.option_lint(text, {"T-1"}))
+
+
+def test_option_lint_goes_into_the_harness_notes(tmp_path):
+    from swarm.policy import apply_task_lint, main_exists
+    repo = _option_repo(tmp_path)
+
+    class WS:
+        repo_root = repo
+
+        def main_worktree(self):
+            return repo
+    t149 = Task(id="T-149", title="engine", description="", acceptance="", type="backend", importance="normal",
+                size="S", milestone="M1", status=Status.RUNNING)
+    t = Task(id="T-160", title="measure", description="Run with ILAB_PROFILES=/x and --old-flag.", acceptance="",
+             type="backend", importance="normal", size="S", milestone="M1")
+    notes = apply_task_lint(t, main_exists(WS()), [t149])
+    assert "ILAB_PROFILES is not on main (provided by T-149, not merged)" in notes
+    assert not any("--old-flag" in n for n in notes)
+    assert "Harness notes:" in t.description and "- ILAB_PROFILES is not on main (provided by T-149, not merged)" in t.description
+
+
+def test_option_lint_skips_when_there_is_no_git(tmp_path):
+    from swarm.policy import main_exists, option_lint_lines
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "a.sh").write_text("")
+    assert option_lint_lines(plain, plain, "Use FOO_BAR=1 and --baz") == []
+
+    class WS:
+        repo_root = plain
+
+        def main_worktree(self):
+            return plain
+    assert main_exists(WS()).option_lint("Use FOO_BAR=1", None) == []
+
+
+def test_option_lint_caps_the_branches_it_searches(tmp_path, monkeypatch):
+    from swarm import policy
+    repo = _option_repo(tmp_path)
+    for i in range(30):
+        _git(repo, "update-ref", f"refs/remotes/origin/task/T-{200 + i}", "main")
+    calls = []
+    real = policy._present_tokens
+
+    def spy(root, tokens, ref=""):
+        calls.append(ref)
+        return real(root, tokens, ref)
+    monkeypatch.setattr(policy, "_present_tokens", spy)
+    policy.option_lint_lines(repo, repo, "Use NOWHERE_VAR=1")
+    assert len([c for c in calls if c]) == policy.OPTION_LINT_MAX_BRANCHES

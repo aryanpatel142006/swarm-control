@@ -133,10 +133,99 @@ def open_task_collisions(task: Task, others: list[Task]) -> list[tuple[Task, lis
     return out
 
 
+# ----- named options: env vars and long flags the task text names (Q-478) -----
+_ENV_ASSIGN = re.compile(r"(?<![\w$])([A-Z][A-Z0-9_]{3,})=")
+_ENV_REF = re.compile(r"\$\{?([A-Z][A-Z0-9_]{3,})\}?")
+_LONG_FLAG = re.compile(r"(?<![\w-])(--[a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?![\w-])")
+# Variables every shell has, and flags of the harness and of git: never "named options" of the project.
+_SYSTEM_ENV = {"HOME", "PATH", "USER", "PWD", "SHELL", "TMPDIR", "TERM", "LANG", "EDITOR", "OLDPWD", "LOGNAME"}
+_COMMON_FLAGS = {"--help", "--version", "--force", "--no-verify", "--ff-only", "--rebase", "--exclusive", "--depends",
+                 "--agent", "--type", "--milestone", "--size", "--importance", "--priority", "--description",
+                 "--acceptance", "--minutes", "--ignore-hold", "--exclusive-max-minutes", "--scope", "--host"}
+OPTION_LINT_MAX_TOKENS = 12
+OPTION_LINT_MAX_BRANCHES = 20
+
+
+def named_options(text: str) -> list[str]:
+    """Env var names (`NAME=` or `$NAME`) and long flags (`--word`) in task text, in order, without duplicates."""
+    found: list[tuple[int, str]] = []
+    for rx in (_ENV_ASSIGN, _ENV_REF):
+        found += [(m.start(), m.group(1)) for m in rx.finditer(text or "") if m.group(1) not in _SYSTEM_ENV]
+    found += [(m.start(), m.group(1)) for m in _LONG_FLAG.finditer(text or "") if m.group(1) not in _COMMON_FLAGS]
+    return list(dict.fromkeys(tok for _, tok in sorted(found)))[:OPTION_LINT_MAX_TOKENS]
+
+
+def _option_regex(token: str) -> tuple[str, str]:
+    """(ERE for `git grep -E -o`, Python regex that finds the token in what it printed): whole names only, so
+    `--foo` is not found inside `--foo-bar` and `FOO_BAR` is not found inside `MY_FOO_BAR`."""
+    t = re.escape(token)
+    if token.startswith("--"):
+        cls = "A-Za-z0-9_-"
+        return f"(^|[^{cls}]){t}($|[^{cls}])", rf"(?<![\w-]){t}(?![\w-])"
+    return f"(^|[^A-Za-z0-9_]){t}($|[^A-Za-z0-9_])", rf"(?<!\w){t}(?!\w)"
+
+
+def _present_tokens(root: Path, tokens: list[str], ref: str = "") -> set[str] | None:
+    """Which of `tokens` appear in the tree at `root` (the working tree, or `ref`), docs/decisions excluded.
+    None when git cannot answer (no repo, no such ref)."""
+    import subprocess
+    cmd = ["git", "-C", str(root), "grep", "-h", "-o", "-I", "-E"]
+    for t in tokens:
+        cmd += ["-e", _option_regex(t)[0]]
+    cmd += ([ref] if ref else []) + ["--", ".", ":(exclude)docs/decisions"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode not in (0, 1):
+        return None
+    return {t for t in tokens if re.search(_option_regex(t)[1], r.stdout)}
+
+
+def option_lint_lines(root: Path, wt: Path, text: str, open_ids: set[str] | None = None,
+                      remote: str = "origin") -> list[str]:
+    """`<token> is not on main` for each env var or long flag the text names that no file on main mentions, plus
+    `(provided by T-x, not merged)` when an open task branch has it. `wt` is a checkout of main, `root` the
+    repository (for the branch refs). Advice: any git failure gives no lines."""
+    import subprocess
+    tokens = named_options(text)
+    if not tokens or not (Path(wt) / ".git").exists() and not (Path(root) / ".git").exists():
+        return []
+    present = _present_tokens(Path(wt), tokens)
+    if present is None:
+        return []
+    missing = [t for t in tokens if t not in present]
+    providers: dict[str, list[str]] = {t: [] for t in missing}
+    if missing:
+        try:
+            r = subprocess.run(["git", "-C", str(root), "for-each-ref", "--sort=-committerdate",
+                                "--format=%(refname)", f"refs/remotes/{remote}/task/T-*"],
+                               capture_output=True, text=True, timeout=30)
+            refs = r.stdout.split() if r.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError):
+            refs = []
+        if open_ids is not None:
+            refs = [f for f in refs if f.rsplit("/", 1)[-1] in open_ids]
+        for ref in refs[:OPTION_LINT_MAX_BRANCHES]:
+            tid = ref.rsplit("/", 1)[-1]
+            have = _present_tokens(Path(root), missing, ref) or set()
+            for t in have:
+                providers[t].append(tid)
+    out = []
+    for t in missing:
+        out.append(f"{t} is not on main" + (f" (provided by {', '.join(providers[t])}, not merged)"
+                                           if providers[t] else ""))
+    return out
+
+
 def apply_task_lint(task: Task, exists=None, open_tasks: list[Task] | None = None) -> list[str]:
     """Complete a new task's scope and append the notes to its description (Planner.apply and `swarm add`). With
     `open_tasks`, a file another open task also names is reported, for the worker and for whoever adds the task."""
     task.scope, notes = complete_scope(task.scope, task.description, task.acceptance, exists)
+    options = getattr(exists, "option_lint", None)
+    if options is not None:
+        ids = {o.id for o in open_tasks} if open_tasks is not None else None
+        notes += options(f"{task.description}\n{task.acceptance}", ids)
     hits = open_task_collisions(task, open_tasks or [])
     if hits:
         listed = "; ".join(f"{o.id} ({', '.join(f'`{f}`' for f in files[:4])})" for o, files in hits[:4])
@@ -175,6 +264,8 @@ def main_exists(ws):
         name = p.rsplit("/", 1)[-1]
         return sorted(f for f in files if f.rsplit("/", 1)[-1] == name)
     exists.same_name = same_name
+    exists.option_lint = lambda text, open_ids=None: option_lint_lines(
+        root, wt, text, open_ids, getattr(ws, "remote", "origin"))
     return exists
 
 

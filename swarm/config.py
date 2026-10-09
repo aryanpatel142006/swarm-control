@@ -34,6 +34,9 @@ class VerifyConfig:
     # fnmatch globs (on the basename; a leading "/" = repo top level only) for scratch files a task adds. They are
     # reported to the reviewer, never blocked (Q-439). None = defaults, [] turns it off.
     scratch_patterns: list[str] | None = None
+    # A normal verify queued behind `swarm-lock --exclusive` measurements for longer than this proceeds without a
+    # slot and says so (swarm/hostlock.py, Q-478). 0 = wait for as long as the exclusive holders run.
+    exclusive_max_minutes: float = 25.0
 
 
 @dataclass
@@ -373,7 +376,8 @@ def load_config(path: Path | str) -> Config:
                             placeholder_files=_str_list(verify_raw.get("placeholder_files"),
                                                         "verify.placeholder_files"),
                             stray_files=_str_list(verify_raw.get("stray_files"), "verify.stray_files"),
-                            scratch_patterns=_str_list(verify_raw.get("scratch_patterns"), "verify.scratch_patterns")),
+                            scratch_patterns=_str_list(verify_raw.get("scratch_patterns"), "verify.scratch_patterns"),
+                            exclusive_max_minutes=max(0.0, float(verify_raw.get("exclusive_max_minutes", 25)))),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),

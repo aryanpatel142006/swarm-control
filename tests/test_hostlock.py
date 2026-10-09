@@ -308,3 +308,99 @@ def test_status_shows_the_hold_line(cfg, tmp_path, monkeypatch):
     assert line.startswith("HOLD: live test until ") and line.endswith(" UTC (measurements and verifies wait)")
     hostlock.clear_hold(tmp_path / "locks")
     assert "HOLD:" not in render_status(*args)
+
+
+# ---- exclusive hold cap (Q-478) ----
+CAP_MIN = 0.2 / 60          # 0.2 s
+
+
+def test_waiter_behind_an_exclusive_holder_proceeds_after_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARM_TASK_ID", "T-meas")
+    d = tmp_path / "locks"
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    logs = []
+    with verify_slot(d, 2, exclusive=True, label="measurement: replay"):
+        monkeypatch.setenv("SWARM_TASK_ID", "T-35min")
+        t0 = time.monotonic()
+        with verify_slot(d, 2, wait_s=30, poll_s=0.05, log=logs.append, exclusive_cap_min=CAP_MIN) as held:
+            waited = time.monotonic() - t0
+            assert held is True                    # proceeds (nested wrappers run straight through)
+    assert 0.2 <= waited < 5
+    line = "exclusive hold by T-meas exceeded 0.00333333 min; proceeding — that measurement may be perturbed"
+    cap_logs = [m for m in logs if "exceeded" in m]
+    assert len(cap_logs) == 1 and cap_logs[0].endswith(line.split("T-meas ", 1)[1]) and "T-meas" in cap_logs[0]
+    assert not any("no verify slot" in m for m in logs)
+    notes = hostlock.task_perturbed_notes(d, "T-meas")
+    assert len(notes) == 1 and notes[0].startswith("exclusive hold by T-meas exceeded ")
+    assert notes[0].endswith("min; proceeding — that measurement may be perturbed")
+
+
+def test_exact_line_for_a_25_minute_cap():
+    line = hostlock.exclusive_cap_line({"task": "T-9"}, 25)
+    assert line == "exclusive hold by T-9 exceeded 25 min; proceeding — that measurement may be perturbed"
+
+
+def test_waiter_before_the_cap_keeps_waiting_and_gets_the_slot_after(tmp_path, monkeypatch):
+    d = tmp_path / "locks"
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    got = []
+
+    def waiter():
+        with verify_slot(d, 2, wait_s=30, poll_s=0.02, exclusive_cap_min=5) as held:
+            got.append((held, hostlock.holders(d, 2)))
+
+    with verify_slot(d, 2, exclusive=True):
+        th = threading.Thread(target=waiter)
+        th.start()
+        time.sleep(0.4)
+        assert got == []                           # well under the 5 min cap: still queued
+    th.join(5)
+    assert got and got[0][0] is True and [h for h in got[0][1] if h.get("exclusive")] == []
+    assert hostlock.task_perturbed_notes(d, "") == []
+
+
+def test_cap_counts_only_time_behind_exclusive_holders(tmp_path, monkeypatch):
+    """Slots busy with ordinary verifies are not the cap's business: the waiter times out as before."""
+    d = tmp_path / "locks"
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    logs = []
+    with verify_slot(d, 1):
+        with verify_slot(d, 1, wait_s=0.5, poll_s=0.05, log=logs.append, exclusive_cap_min=CAP_MIN) as held:
+            assert held is False
+    assert not any("exceeded" in m for m in logs) and any("without one" in m for m in logs)
+
+
+def test_live_test_hold_is_not_affected_by_the_cap(tmp_path, monkeypatch):
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    monkeypatch.delenv(hostlock.HOLD_BYPASS_ENV, raising=False)
+    d = tmp_path / "locks"
+    hostlock.write_hold(d, "live test", 30, by="laptop-a")
+    got, logs = [], []
+
+    def waiter():
+        with verify_slot(d, 2, wait_s=30, poll_s=0.02, honor_hold=True, log=logs.append,
+                         exclusive_cap_min=CAP_MIN) as held:
+            got.append(held)
+
+    th = threading.Thread(target=waiter)
+    th.start()
+    time.sleep(0.6)                                # three times the cap: the hold still holds it
+    assert got == [] and any("live test hold" in m for m in logs) and not any("exceeded" in m for m in logs)
+    assert hostlock.clear_hold(d)
+    th.join(5)
+    assert got == [True]                           # and the cap clock only started after the hold ended
+
+
+def test_cap_from_env_and_flag_in_the_wrapper(tmp_path):
+    env = worker_lock_env("demo-cap", 2, 12.5)
+    assert env[hostlock.EXCL_CAP_ENV] == "12.5"
+    assert hostlock.EXCL_CAP_ENV not in worker_lock_env("demo-cap", 2)
+
+
+def test_config_reads_exclusive_max_minutes(project_dir, sample_config_dict):
+    import yaml
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.verify.exclusive_max_minutes == 25
+    sample_config_dict["verify"] = {**(sample_config_dict.get("verify") or {}), "exclusive_max_minutes": 10}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    assert load_config(project_dir / ".swarm" / "config.yaml").verify.exclusive_max_minutes == 10

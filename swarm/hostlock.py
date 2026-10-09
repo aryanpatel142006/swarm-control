@@ -32,6 +32,13 @@ until, by); while it exists `swarm-lock` (exclusive and shared) waits before tak
 the reason and the until-time. It ends by itself at `until` (default 60 min), and `swarm release` removes it.
 `--ignore-hold` or `SWARM_HOLD_BYPASS=1` skips the wait (the humans' own tooling).
 
+Exclusive hold cap (Q-478: a 35-minute task's verify_fast waited 1801 s behind other tasks' exclusive measurements):
+`verify.exclusive_max_minutes` (default 25; env SWARM_VERIFY_EXCLUSIVE_MAX_MIN, `--exclusive-max-minutes`). A normal
+waiter that has been queued behind exclusive holders for longer than that proceeds without a slot (all of them are
+taken) and says so: `exclusive hold by <holder> exceeded <N> min; proceeding - that measurement may be perturbed`.
+The same line goes to `waits/<holder task>/perturbed.log`, which the runner appends to the measurement task's
+harness notes. The live-test hold is not affected: it is waited out before the clock starts and has no cap.
+
 CLI: `python -m swarm.hostlock [--exclusive] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's);
 `swarm-lock --snippet` prints the re-exec lines a project's verify script needs to take part (Q-224).
 """
@@ -53,6 +60,9 @@ from typing import Callable, Iterator
 DIR_ENV = "SWARM_VERIFY_LOCK_DIR"
 SLOTS_ENV = "SWARM_VERIFY_SLOTS"
 HELD_ENV = "SWARM_VERIFY_SLOT_HELD"
+EXCL_CAP_ENV = "SWARM_VERIFY_EXCLUSIVE_MAX_MIN"
+DEFAULT_EXCL_CAP_MIN = 25.0            # a waiter queued behind exclusive holders this long proceeds (Q-478)
+PERTURBED_LOG = "perturbed.log"        # in waits/<holder task>/: the cap lines, for the measurement task's report
 CMD_ENV = "SWARM_VERIFY_LOCK"          # absolute path of the `swarm-lock` wrapper script
 DEFAULT_SLOTS = 2
 DEFAULT_WAIT_S = 1800                  # after this a verify runs without a slot (logged) rather than never
@@ -227,20 +237,52 @@ def task_wait_seconds(directory: Path | str, task_id: str, now: float | None = N
     return total
 
 
+def exclusive_cap_line(holder: dict, minutes: float) -> str:
+    who = holder.get("task") or "harness"
+    return (f"exclusive hold by {who} exceeded {minutes:g} min; proceeding \u2014 that measurement may be perturbed")
+
+
+def _note_perturbed(directory: Path, holder: dict, line: str) -> None:
+    """Write the cap line into the holder's wait log (waits/<holder task>/perturbed.log)."""
+    try:
+        d = directory / WAITS_DIR / (holder.get("task") or "_harness")
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / PERTURBED_LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def task_perturbed_notes(directory: Path | str, task_id: str) -> list[str]:
+    """The lines other tasks wrote because they ran past this task's exclusive hold (for its harness notes)."""
+    try:
+        text = (Path(directory) / WAITS_DIR / task_id / PERTURBED_LOG).read_text()
+    except OSError:
+        return []
+    return list(dict.fromkeys(l.strip() for l in text.splitlines() if l.strip()))
+
+
 def clear_task_waits(directory: Path | str, task_id: str) -> None:
     import shutil
     shutil.rmtree(Path(directory) / WAITS_DIR / task_id, ignore_errors=True)
+
+
+class _ExclusiveCapExceeded(TimeoutError):
+    """The wait behind exclusive holders passed `exclusive_cap_min`: proceed without a slot (already logged)."""
 
 
 @contextlib.contextmanager
 def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive: bool = False,
                 wait_s: float = DEFAULT_WAIT_S, poll_s: float = 1.0, log: Callable[[str], None] | None = None,
                 sleep: Callable[[float], None] = time.sleep, label: str = "verify",
-                record: Path | None = None, honor_hold: bool = False) -> Iterator[bool]:
+                record: Path | None = None, honor_hold: bool = False,
+                exclusive_cap_min: float | None = None) -> Iterator[bool]:
     """Hold one slot (or all of them with exclusive=True). Yields True when held, False when the wait ran out and
     the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once. `record` is a file
     the wait is written to (the runner adds a worker's waits back to its wall-clock limit). `honor_hold`: first wait
-    while a live-test hold exists (`swarm hold`), unless SWARM_HOLD_BYPASS=1; that wait does not use up `wait_s`."""
+    while a live-test hold exists (`swarm hold`), unless SWARM_HOLD_BYPASS=1; that wait does not use up `wait_s`.
+    `exclusive_cap_min`: a non-exclusive waiter that has been queued behind exclusive holders for longer than this
+    proceeds without a slot (yields True, so nested wrappers do not wait again) and logs it; the holder's wait log gets the same line (Q-478)."""
     if os.environ.get(HELD_ENV):
         yield True
         return
@@ -256,6 +298,8 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
     started = time.monotonic()
     me = _me(label, exclusive)
     pending = directory / f"{PENDING_PREFIX}{os.getpid()}"
+    cap_s = None if exclusive_cap_min is None or exclusive_cap_min <= 0 else exclusive_cap_min * 60
+    behind = {"s": 0.0, "last": time.monotonic()}
     state = {"announced": False, "last_report": 0.0, "waiting": False, "since": 0.0, "last_record": 0.0}
 
     def waiting(reason: str) -> None:
@@ -273,6 +317,24 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 prefix += " The time this waits is added back to your run's time limit (up to half of it)."
             log(f"{label}: {prefix}")
             state["announced"], state["last_report"] = True, nowm
+
+    def check_exclusive_cap() -> None:
+        """Count the time spent while an exclusive holder is on the machine; past the cap, proceed (Q-478)."""
+        nowm = time.monotonic()
+        dt, behind["last"] = nowm - behind["last"], nowm
+        if cap_s is None:
+            return
+        excl = [h for h in holders(directory, slots) if h.get("exclusive")]
+        if not excl:
+            return
+        behind["s"] += dt
+        if behind["s"] > cap_s:
+            line = exclusive_cap_line(excl[0], cap_s / 60)
+            if log:
+                log(f"{label}: {line}")
+            for h in excl:
+                _note_perturbed(directory, h, line)
+            raise _ExclusiveCapExceeded(line)
 
     def own_task_note(entries: list[dict]) -> str:
         mine = [h for h in entries if me["task"] and h.get("task") == me["task"] and h.get("exclusive")]
@@ -306,6 +368,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
             with contextlib.suppress(OSError):
                 pending.unlink()
         else:
+            behind["last"] = time.monotonic()
             while True:
                 queued = pending_exclusive(directory)
                 if not queued:
@@ -322,6 +385,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                         break
                 if time.monotonic() > deadline:
                     raise TimeoutError
+                check_exclusive_cap()
                 if queued:
                     waiting(f"a measurement is waiting for the machine ({describe(queued)}); this verify runs after "
                             f"it.{own_task_note(queued)}")
@@ -335,8 +399,9 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
         if record is not None and state["waiting"]:
             _write_json(record, {"pid": os.getpid(), "waited_s": time.monotonic() - started, "label": label})
         yield True
-    except TimeoutError:
-        if log:
+    except TimeoutError as e:
+        capped = isinstance(e, _ExclusiveCapExceeded)
+        if log and not capped:
             log(f"{label}: no verify slot after {int(wait_s)} s; running without one")
         for fd in fds:
             os.close(fd)
@@ -345,7 +410,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
             pending.unlink()
         if record is not None:
             _write_json(record, {"pid": os.getpid(), "waited_s": time.monotonic() - started, "label": label})
-        yield False
+        yield capped      # past the exclusive cap: True, so wrapped verifies inside run straight through
     finally:
         if exclusive:
             with contextlib.suppress(OSError):
@@ -378,7 +443,7 @@ def write_wrapper(bin_dir: Path, python: str | None = None) -> Path:
     return path
 
 
-def worker_lock_env(project: str, slots: int) -> dict[str, str]:
+def worker_lock_env(project: str, slots: int, exclusive_cap_min: float | None = None) -> dict[str, str]:
     """Environment a worker CLI gets so its verify scripts (and `swarm-lock`) share the harness's slots."""
     directory = lock_dir(project)
     try:
@@ -386,8 +451,11 @@ def worker_lock_env(project: str, slots: int) -> dict[str, str]:
         wrapper = write_wrapper(directory.parent / "bin")
     except OSError:
         return {}
-    return {DIR_ENV: str(directory), SLOTS_ENV: str(slots), CMD_ENV: str(wrapper),
-            "PATH": os.pathsep.join([str(wrapper.parent), os.environ.get("PATH", "")])}
+    env = {DIR_ENV: str(directory), SLOTS_ENV: str(slots), CMD_ENV: str(wrapper),
+           "PATH": os.pathsep.join([str(wrapper.parent), os.environ.get("PATH", "")])}
+    if exclusive_cap_min is not None:
+        env[EXCL_CAP_ENV] = f"{exclusive_cap_min:g}"
+    return env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -396,6 +464,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dir", default=os.environ.get(DIR_ENV, ""))
     ap.add_argument("--slots", type=int, default=int(os.environ.get(SLOTS_ENV) or DEFAULT_SLOTS))
     ap.add_argument("--wait", type=float, default=DEFAULT_WAIT_S, help="seconds to wait before running anyway")
+    ap.add_argument("--exclusive-max-minutes", type=float,
+                    default=float(os.environ.get(EXCL_CAP_ENV) or DEFAULT_EXCL_CAP_MIN),
+                    help="a normal verify queued behind exclusive holders this long proceeds (0 = never)")
     ap.add_argument("--ignore-hold", action="store_true",
                     help="do not wait for a live-test hold (`swarm hold`); SWARM_HOLD_BYPASS=1 does the same")
     ap.add_argument("--snippet", action="store_true",
@@ -423,7 +494,8 @@ def main(argv: list[str] | None = None) -> int:
             record = None
     label = ("measurement" if a.exclusive else "verify") + f": {' '.join(cmd)[:80]}"
     with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
-                     record=record, honor_hold=not a.ignore_hold) as held:
+                     record=record, honor_hold=not a.ignore_hold,
+                     exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes) as held:
         waited = time.monotonic() - started
         if waited >= 5:
             log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"

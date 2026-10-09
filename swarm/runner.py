@@ -102,7 +102,7 @@ def worker_env(wt: Path, task: Task, cfg: Config | None = None, host: str | None
         env.update(cfg.project_env())
         from .hostlock import worker_lock_env
         slots = cfg.hosts[host].max_parallel_verify if host in cfg.hosts else 2
-        env.update(worker_lock_env(cfg.project, slots))
+        env.update(worker_lock_env(cfg.project, slots, cfg.verify.exclusive_max_minutes))
     env.update({"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
                 "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)})
     return env
@@ -1516,6 +1516,7 @@ class Runner:
         strays = self._stray_files(wt, changed) if changed and verify_ok is not False and not markers else []
 
         lint_notes = self._scope_lint(task, wt, changed, report) if changed and not markers else []
+        lint_notes += self._perturbed_notes(task)
 
         pr_url, push_error = task.pr_url, ""
         if changed:
@@ -1611,6 +1612,16 @@ class Runner:
             return scope_lint_lines(scratch, outside)
         except Exception as e:  # noqa: BLE001
             self.log(f"[{task.id}] scope lint skipped: {e!r}")
+            return []
+
+    def _perturbed_notes(self, task: Task) -> list[str]:
+        """Lines other tasks wrote because they ran past this task's `swarm-lock --exclusive` hold (Q-478): the
+        measurement may have been perturbed. Never raises."""
+        try:
+            from .hostlock import lock_dir, task_perturbed_notes
+            return task_perturbed_notes(lock_dir(self.cfg.project), task.id)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[{task.id}] perturbed-notes skipped: {e!r}")
             return []
 
     def _stray_files(self, wt: Path, changed: list[str]) -> list[str]:
