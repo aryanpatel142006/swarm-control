@@ -31,6 +31,9 @@ class VerifyConfig:
     placeholder_files: list[str] | None = None
     # Regexes for backup/merge leftovers a task must not add (`*.md-e`, `*.orig`, …; Q-198). [] turns it off.
     stray_files: list[str] | None = None
+    # fnmatch globs (on the basename; a leading "/" = repo top level only) for scratch files a task adds. They are
+    # reported to the reviewer, never blocked (Q-439). None = defaults, [] turns it off.
+    scratch_patterns: list[str] | None = None
 
 
 @dataclass
@@ -369,7 +372,8 @@ def load_config(path: Path | str) -> Config:
                             placeholders=_str_list(verify_raw.get("placeholders"), "verify.placeholders"),
                             placeholder_files=_str_list(verify_raw.get("placeholder_files"),
                                                         "verify.placeholder_files"),
-                            stray_files=_str_list(verify_raw.get("stray_files"), "verify.stray_files")),
+                            stray_files=_str_list(verify_raw.get("stray_files"), "verify.stray_files"),
+                            scratch_patterns=_str_list(verify_raw.get("scratch_patterns"), "verify.scratch_patterns")),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),

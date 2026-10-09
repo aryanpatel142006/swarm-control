@@ -224,6 +224,14 @@ class Workspace:
         uncommitted = [line[3:].strip() for line in status if line.strip()]
         return sorted(set(committed) | set(uncommitted))
 
+    def added_files(self, path: Path) -> list[str]:
+        """Files this branch adds relative to main (committed, staged or untracked)."""
+        committed = self.git(path, "diff", "--name-only", "--diff-filter=A", f"{self._main_ref()}...HEAD",
+                             check=False).out.split()
+        status = self.git(path, "status", "--porcelain", "--untracked-files=all", check=False).out.splitlines()
+        new = [line[3:].strip() for line in status if line[:2] in ("??", "A ", "AM")]
+        return sorted(set(committed) | set(new))
+
     def added_lines(self, path: Path) -> dict[str, list[tuple[int, str]]]:
         """Lines this branch adds relative to main, by file: {path: [(line number, text)]} (committed work only)."""
         r = self.git(path, "diff", "-U0", "--no-color", "--no-ext-diff", f"{self._main_ref()}...HEAD", check=False)

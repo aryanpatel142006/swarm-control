@@ -14,7 +14,7 @@ from .adapters.base import RunSpec
 from .board.base import Board
 from .config import Config
 from .failover import ReviewerState, reviewer_state
-from .feedback import clip_middle, failing_step_line, verify_feedback
+from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
 from .models import QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
@@ -54,11 +54,15 @@ def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: s
               "An answer that asks for a change is part of the acceptance: request changes when the diff does not "
               "make it (T-120 merged before Q-313's answer reached it).", "", questions_note.strip(), ""]
              if questions_note.strip() else [])
+    lint = ([f"## {HARNESS_NOTE_MARK[:-1]}", "", task.feedback.strip()[len(HARNESS_NOTE_MARK):].strip(), "",
+             "Scratch files should be removed; an edit outside the scope is acceptable only when the diff shows the "
+             "acceptance needs it. Say so in a finding when it is not.", ""]
+            if task.feedback.startswith(HARNESS_NOTE_MARK) else [])
     parts = [f"# Review of {task.id} · {task.title}", "", instructions.strip(), "", "## Task", "",
              f"- Type: {task.type} · Importance: {task.importance} · Scope: {', '.join(task.scope) or 'any'}",
              f"- Flags from the harness: {', '.join(task.flags) or 'none'}", "", "### Description", "",
              task.description.strip() or "(none)", "", "### Acceptance criteria", "",
-             task.acceptance.strip() or "(none given)", "", *asked, "## Verify output (full suite)", "", "```",
+             task.acceptance.strip() or "(none given)", "", *lint, *asked, "## Verify output (full suite)", "", "```",
              verify_tail.strip() or "(no verify script)", "```", "", "## Diff against main", "", "```diff",
              diff[:DIFF_CAP] + ("\n[diff truncated]" if len(diff) > DIFF_CAP else ""), "```", "",
              "## Verdict contract", "", "Your final answer MUST be a JSON object matching:", "", "```json",

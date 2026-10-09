@@ -247,7 +247,7 @@ def _tool_line(t: dict) -> str:
 
 
 def report_to_markdown(r: Report, *, attempt: int, verify_ok: bool | None, verify_tail: str,
-                       pr_url: str, flags: list[str]) -> str:
+                       pr_url: str, flags: list[str], harness_notes: list[str] = ()) -> str:
     lines = [f"**Attempt {attempt}** · status `{r.status}`" + (" · *synthesized*" if r.synthesized else "")]
     if pr_url:
         lines.append(f"PR: {pr_url}")
@@ -275,6 +275,8 @@ def report_to_markdown(r: Report, *, attempt: int, verify_ok: bool | None, verif
         lines += ["", f"Question ({r.question['kind']}): {r.question['text']}"]
     if r.notes_for_reviewer:
         lines += ["", "Notes for reviewer: " + r.notes_for_reviewer]
+    if harness_notes:
+        lines += ["", "Harness notes (not blocking):"] + [f"- {n}" for n in harness_notes]
     return "\n".join(lines)
 
 

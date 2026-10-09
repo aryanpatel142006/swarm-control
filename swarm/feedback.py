@@ -298,3 +298,53 @@ def stray_feedback(files: list[str]) -> str:
     return ("This branch adds backup or merge leftovers that must not be committed: " + ", ".join(files)
             + ". Remove them with `git rm --cached <file>` and delete the file (on macOS `sed -i -e` writes a "
             "`<file>-e` backup: use `sed -i '' …` or Python), then verify again.")
+
+
+# ----- scratch files and out-of-scope edits (Q-439) -----
+# A worker committed scratch.py, patch_judge_*.js and an unrelated rewrite of eval/pipeline_eval.py, and nothing
+# in the post-run checks said so. Neither list blocks the publish; both go to the report, the reviewer and the board.
+# Patterns are fnmatch globs on the file's basename; a leading "/" limits one to the repo top level.
+DEFAULT_SCRATCH_PATTERNS = ["scratch*", "*patch*.js", "*.orig", "*.rej", "tmp*", "test_tmp*", "debug*", "/*.py"]
+HARNESS_NOTE_MARK = "Harness notes (not blocking):"
+
+
+def scratch_files(added: list[str], patterns: list[str], scope: list[str] = ()) -> list[str]:
+    """New files whose name looks like scratch work. A file the task's scope names is intended, so it is skipped
+    (an empty scope names nothing)."""
+    from fnmatch import fnmatchcase
+    from .policy import in_scope
+    out = []
+    for f in added:
+        base = f.rsplit("/", 1)[-1]
+        hit = any((("/" not in f and fnmatchcase(f, p[1:])) if p.startswith("/") else fnmatchcase(base, p))
+                  for p in patterns)
+        if hit and not (scope and in_scope(f, list(scope))):
+            out.append(f)
+    return out
+
+
+def out_of_scope_edits(changed: list[str], scope: list[str], *, named_in: str = "", exempt: tuple = (),
+                       skip: list[str] = ()) -> list[str]:
+    """Changed files outside the task's scope that no text names (description, acceptance, the worker's notes)."""
+    from .policy import in_scope
+    if not scope:
+        return []
+    text = named_in or ""
+    return [f for f in changed if not in_scope(f, list(scope)) and not f.startswith(exempt) and f not in skip
+            and f not in text and f.rsplit("/", 1)[-1] not in text]
+
+
+def scope_lint_lines(scratch: list[str], outside: list[str], limit: int = 20) -> list[str]:
+    def cap(files: list[str]) -> str:
+        return ", ".join(files[:limit]) + (f" … and {len(files) - limit} more" if len(files) > limit else "")
+    lines = []
+    if scratch:
+        lines.append(f"scratch files committed: {cap(scratch)}")
+    if outside:
+        lines.append(f"out-of-scope edits: {cap(outside)} (outside the task's scope and not named in its description, "
+                     "acceptance or the worker's notes_for_reviewer as `outside scope: <file> because <criterion>`)")
+    return lines
+
+
+def scope_lint_feedback(lines: list[str]) -> str:
+    return (HARNESS_NOTE_MARK + "\n" + "\n".join(f"- {l}" for l in lines)) if lines else ""

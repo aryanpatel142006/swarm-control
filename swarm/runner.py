@@ -14,8 +14,10 @@ from typing import Callable
 
 from .adapters import get_adapter
 from .adapters.base import RunSpec
-from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, DEFAULT_STRAY_PATTERNS, fenced_lines,
-                       placeholder_feedback, placeholder_hits, reconcile_sync_feedback, stray_feedback, stray_files,
+from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, DEFAULT_SCRATCH_PATTERNS,
+                       DEFAULT_STRAY_PATTERNS, fenced_lines,
+                       placeholder_feedback, placeholder_hits, scope_lint_feedback, scope_lint_lines,
+                       scratch_files, out_of_scope_edits, reconcile_sync_feedback, stray_feedback, stray_files,
                        verify_feedback)
 from .board.base import Board, claim_task
 from .config import Config, config_signature
@@ -1473,6 +1475,8 @@ class Runner:
         placeholders = self._placeholder_hits(wt) if changed and verify_ok is not False and not markers else []
         strays = self._stray_files(wt, changed) if changed and verify_ok is not False and not markers else []
 
+        lint_notes = self._scope_lint(task, wt, changed, report) if changed and not markers else []
+
         pr_url, push_error = task.pr_url, ""
         if changed:
             self.ws.commit_all(wt, f"{task.id}: {(report.summary or 'work in progress')[:60]}")
@@ -1480,7 +1484,7 @@ class Runner:
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if push.ok:
                 body = report_to_markdown(report, attempt=attempt, verify_ok=verify_ok, verify_tail=verify_tail,
-                                          pr_url="", flags=flags)
+                                          pr_url="", flags=flags, harness_notes=lint_notes)
                 try:
                     pr_url = self.ws.pr_create_or_update(task.branch, task.title_with_id(), body) or pr_url
                 except RuntimeError as e:
@@ -1491,7 +1495,7 @@ class Runner:
         task.pr_url = pr_url
 
         md = report_to_markdown(report, attempt=attempt, verify_ok=verify_ok, verify_tail=verify_tail,
-                                pr_url=pr_url, flags=flags)
+                                pr_url=pr_url, flags=flags, harness_notes=lint_notes)
         try:
             notes_file = wt / ".swarm-run" / "notes.md"
             notes = notes_file.read_text(errors="replace").strip() if notes_file.is_file() else ""
@@ -1532,6 +1536,8 @@ class Runner:
 
         status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error, markers, placeholders,
                               strays)
+        if lint_notes and status in (Status.REVIEW, Status.MERGE_READY):
+            task.feedback = scope_lint_feedback(lint_notes)   # the reviewer's prompt and the board show it (Q-439)
         if not self.publish_outcome(task, status):
             return Outcome(task, report, result, verify_ok, self.board.get_task(task.id).status)
         self.log(f"[{task.id}] → {status.value}")
@@ -1551,6 +1557,21 @@ class Runner:
         task.status = status
         self.board.update_task(task, PUBLISH_FIELDS)
         return True
+
+    def _scope_lint(self, task: Task, wt: Path, changed: list[str], report: Report) -> list[str]:
+        """Non-blocking notes for the reviewer: scratch files the task added, and edits outside its scope that
+        nothing names. Never raises: a lint must not lose a run's result."""
+        try:
+            patterns = self.cfg.verify.scratch_patterns
+            patterns = DEFAULT_SCRATCH_PATTERNS if patterns is None else patterns
+            scratch = scratch_files(self.ws.added_files(wt), patterns, task.scope) if patterns else []
+            outside = out_of_scope_edits(changed, task.scope, exempt=HARNESS_PATHS, skip=scratch,
+                                         named_in="\n".join([task.description, task.acceptance,
+                                                             report.notes_for_reviewer]))
+            return scope_lint_lines(scratch, outside)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[{task.id}] scope lint skipped: {e!r}")
+            return []
 
     def _stray_files(self, wt: Path, changed: list[str]) -> list[str]:
         patterns = self.cfg.verify.stray_files
