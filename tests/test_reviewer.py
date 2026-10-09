@@ -185,7 +185,7 @@ def test_verify_full_failing_on_main_too_is_not_the_tasks(cfg, git_repo, tmp_pat
     board.update_task(stored, ["status"])
     rev.process(board.get_task(t.id))
     assert len([q for q in board.list_questions() if q.kind == "harness"]) == 1
-    assert not (rev.ws.worktree_root / "_main-verify").exists()
+    assert not list(rev.ws.worktree_root.glob("_main-verify*"))
 
 
 def test_verify_full_failing_only_on_the_branch_goes_back(cfg, git_repo, tmp_path):

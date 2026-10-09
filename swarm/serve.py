@@ -86,6 +86,11 @@ class Server:
         self._waiting_logged: dict[str, str] = {}   # task id -> "HH:MM UTC" already logged as waiting on cooldowns
         self._slow_thread: threading.Thread | None = None
         self._slow_summary = {"reviewed": 0, "merged": 0}
+        # reviewer.parallel > 1: one thread per review in flight (task id -> thread), and when each finished
+        self._review_lock = threading.Lock()
+        self._review_threads: dict[str, threading.Thread] = {}
+        self._review_done: dict[str, tuple] = {}   # task id -> (status the review left it in, when)
+        self._review_logged: tuple[str, ...] = ()
         from .config import config_signature
         self._config_sig = config_signature(getattr(cfg, "path", None))   # config files serve started with
         self._config_warned: str | None = None
@@ -430,12 +435,82 @@ class Server:
             return (rank, t.priority if t.priority is not None else 99, t.id)
         return sorted(tasks, key=key)
 
+    # a finished review's status change may not show in the next board query yet (Notion is eventually consistent):
+    # a task the review moved out of Review is not started again for this long while the board still says Review
+    REVIEW_SETTLE_S = 120
+
+    def review_parallel(self) -> int:
+        role = getattr(self.cfg, "reviewer", None)
+        try:
+            return max(1, int(getattr(role, "parallel", 1) or 1))
+        except (TypeError, ValueError):
+            return 1
+
     def review_pending(self) -> int:
-        n = 0
-        for t in self._by_importance(self.board.list_tasks(status=[Status.REVIEW]))[: self.review_batch]:
-            self.reviewer.process(t)
-            n += 1
-        return n
+        if self.review_parallel() <= 1:   # one review after another on this thread (the behaviour before Oct 9)
+            n = 0
+            for t in self._by_importance(self.board.list_tasks(status=[Status.REVIEW]))[: self.review_batch]:
+                self.reviewer.process(t)
+                n += 1
+            return n
+        return self._start_reviews()
+
+    def reviews_in_flight(self) -> list[str]:
+        with self._review_lock:
+            return sorted(k for k, th in self._review_threads.items() if th.is_alive())
+
+    def _start_reviews(self) -> int:
+        """Start up to reviewer.parallel reviews, each in its own thread, critical first; never one already running
+        and never a task whose finished review the board has not caught up with. Returns how many started.
+        (Oct 9 2026: six tasks stacked up in Review, one at a time; the one the demo waited on sat 25 min.)"""
+        parallel, now = self.review_parallel(), self.now()
+        started: list[str] = []
+        with self._review_lock:
+            self._review_threads = {k: th for k, th in self._review_threads.items() if th.is_alive()}
+            free = parallel - len(self._review_threads)
+            if free > 0:
+                for t in self._by_importance(self.board.list_tasks(status=[Status.REVIEW])):
+                    if free <= 0:
+                        break
+                    if t.id in self._review_threads:
+                        continue
+                    done = self._review_done.get(t.id)
+                    if done and done[0] not in (None, Status.REVIEW) \
+                            and (now - done[1]).total_seconds() < self.REVIEW_SETTLE_S:
+                        continue
+                    th = threading.Thread(target=self._review_one, args=(t,), daemon=True, name=f"review-{t.id}")
+                    self._review_threads[t.id] = th
+                    started.append(t.id)
+                    free -= 1
+                    th.start()
+            inflight = tuple(sorted(self._review_threads))
+        if inflight != self._review_logged:
+            self._review_logged = inflight
+            if inflight:
+                self.log(f"reviewing {', '.join(inflight)} ({len(inflight)}/{parallel} in flight)")
+        return len(started)
+
+    def _review_one(self, t: Task) -> None:
+        status = None
+        try:
+            out = self.reviewer.process(t)
+            status = getattr(out, "status", None)
+        except Exception as e:  # noqa: BLE001 - one failing review must not stop the others or serve
+            if "transport" in repr(e):
+                self._transport_failed_at = self.now()
+            self.log(f"serve step reviewed failed: [{t.id}] {e!r}")
+        finally:
+            with self._review_lock:
+                self._review_done[t.id] = (status, self.now())
+                if self._review_threads.get(t.id) is threading.current_thread():
+                    del self._review_threads[t.id]
+
+    def join_reviews(self, timeout: float | None = None) -> None:
+        """Wait for the reviews in flight (`swarm serve --once`, tests)."""
+        with self._review_lock:
+            threads = list(self._review_threads.values())
+        for th in threads:
+            th.join(timeout)
 
     def merge_pending(self) -> int:
         n = 0

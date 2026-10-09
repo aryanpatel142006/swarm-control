@@ -564,7 +564,9 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
                  log=console.print, host=state.host or "serve", background=not once)
     if once:
         srv.acquire_lock()
-        console.print(srv.tick())
+        summary = srv.tick()
+        srv.join_reviews()   # reviewer.parallel > 1 reviews in threads; --once waits for them
+        console.print(summary)
         return
     srv.loop()
 

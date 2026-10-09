@@ -156,6 +156,26 @@ tasks move straight to another agent with capacity. Override any task with `swar
 </details>
 
 <details>
+<summary><b>Reviewer</b></summary>
+
+`reviewer:` names the agent (and model, effort) that reviews every task in Review after its full verify passes;
+`fallback_agents` take over while it is rate limited. `swarm serve` reviews critical work first and, by default, one
+task at a time. `parallel: 2` lets it run two reviews at once, each in its own thread and worktree (the serve log
+prints `reviewing T-x, T-y (2/2 in flight)` when the set changes):
+
+```yaml
+reviewer:
+  agent: claude-a2
+  model: opus
+  parallel: 2      # reviews at once; default 1
+```
+
+Every review runs `verify_full`, so `parallel` multiplies verify load on the reviewer's host. The host's verify slots
+(`hosts.<host>.max_parallel_verify`, shared with that laptop's workers through `swarm-lock`) still cap how many run at
+once; raise `parallel` only when the host has slots to spare. Restart `swarm serve` to apply it.
+</details>
+
+<details>
 <summary><b>Toolbox: plugins, skills and MCP servers per task</b></summary>
 
 Workers get the tools their task type needs and nothing else, on every CLI:

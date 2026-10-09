@@ -74,6 +74,9 @@ class RoleConfig:
     # reviewer only: who reviews while `agent` is rate/usage limited (swarm/failover.py). None = every other agent
     # of the same provider on the same host; [] = no failover (reviews wait for the reset)
     fallback_agents: list[str] | None = None
+    # reviewer only: reviews `swarm serve` runs at once, each in its own thread (1 = one after another, as before).
+    # Every review runs verify_full, so this multiplies verify load on the reviewer's host (its verify slots cap it).
+    parallel: int = 1
 
 
 @dataclass
@@ -187,8 +190,14 @@ def _role(raw, agents: dict[str, AgentConfig], key: str) -> RoleConfig | None:
         if unknown:
             raise ConfigError(f"{key}.fallback_agents names {', '.join(unknown)}, not configured agents")
         fallback = [str(a) for a in fallback]
+    try:
+        parallel = int(raw.get("parallel", 1) or 1)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{key}.parallel must be a whole number, got {raw.get('parallel')!r}") from None
+    if parallel < 1:
+        raise ConfigError(f"{key}.parallel must be 1 or more, got {parallel}")
     return RoleConfig(agent=raw["agent"], model=str(raw.get("model", "")), effort=raw.get("effort"),
-                      fallback_agents=fallback)
+                      fallback_agents=fallback, parallel=parallel)
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:

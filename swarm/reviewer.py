@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -121,8 +122,20 @@ class Reviewer:
         self.now = now
         self.limits: dict[str, datetime] = {}   # reviewer candidates out of quota, until (UTC)
         self._active: str | None = None         # the reviewer used last, to log the return to the primary
-        self.last_agent: str | None = None
         self._defer_logged: dict[str, datetime] = {}
+        # serve may run several reviews at once (reviewer.parallel): the limits, the active reviewer and the defer log
+        # are shared and guarded by this lock; the agent that reviewed a task is per thread (apply reads it after
+        # review in the same thread). Worktrees are per task and fetches are serialized in Workspace.
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    @property
+    def last_agent(self) -> str | None:
+        return getattr(self._local, "last_agent", None)
+
+    @last_agent.setter
+    def last_agent(self, value: str | None) -> None:
+        self._local.last_agent = value
 
     # ----- which account reviews (swarm/failover.py) -----
     def state(self) -> ReviewerState:
@@ -132,11 +145,12 @@ class Reviewer:
         except Exception as e:   # noqa: BLE001 - the board being slow must not stop a review
             self.log(f"reviewer: agent rows unavailable ({e!r}); using the in-memory limits only")
             rows = []
-        st = reviewer_state(self.cfg, rows, self.now(), self.limits)
-        if st.active and self._active and st.active != self._active and st.active == st.primary:
-            self.log(f"reviewer back to {st.primary} (its limit reset; {self._active} stands down)")
-        if st.active:
-            self._active = st.active
+        with self._lock:
+            st = reviewer_state(self.cfg, rows, self.now(), dict(self.limits))
+            if st.active and self._active and st.active != self._active and st.active == st.primary:
+                self.log(f"reviewer back to {st.primary} (its limit reset; {self._active} stands down)")
+            if st.active:
+                self._active = st.active
         return st
 
     def _exhausted(self, st: ReviewerState) -> Verdict:
@@ -152,7 +166,8 @@ class Reviewer:
         reset = result.reset_at if result.reset_at and result.reset_at > now else None
         until = reset or now + (timedelta(hours=USAGE_LIMIT_COOLDOWN_H) if usage
                                 else timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN))
-        self.limits[agent] = until
+        with self._lock:
+            self.limits[agent] = until
         if usage:
             try:
                 a = self.cfg.agents[agent]
@@ -279,7 +294,7 @@ class Reviewer:
 
     def _verify_full_on_main(self, task: Task) -> CmdResult | None:
         try:
-            wt = self.ws.provision_detached("_main-verify")
+            wt = self.ws.provision_detached(f"_main-verify-{task.id}")   # two reviews may check main at once
         except RuntimeError as e:
             self.log(f"[{task.id}] could not check verify_full on main: {e}")
             return None
@@ -311,9 +326,12 @@ class Reviewer:
     def apply(self, task: Task, v: Verdict) -> Task:
         round_no = task.review_rounds + 1
         if v.verdict == "defer":          # leave it in Review; serve picks it up on a later tick
-            now, last = self.now(), self._defer_logged.get(task.id + v.summary)
-            if last is None or now - last > timedelta(minutes=10):   # not two lines per task every 30 s for hours
-                self._defer_logged[task.id + v.summary] = now
+            with self._lock:
+                now, last = self.now(), self._defer_logged.get(task.id + v.summary)
+                fresh = last is None or now - last > timedelta(minutes=10)   # not two lines per task every 30 s
+                if fresh:
+                    self._defer_logged[task.id + v.summary] = now
+            if fresh:
                 self.log(f"[{task.id}] review deferred: {v.summary[:160]}")
             return task
         md = f"**Verdict:** `{v.verdict}`\n\n{v.summary}\n\n" + "\n".join(
@@ -340,4 +358,5 @@ class Reviewer:
         return task
 
     def process(self, task: Task) -> Task:
+        self.last_agent = None   # this thread's review sets it; never another task's agent (reviewer.parallel)
         return self.apply(task, self.review(task))
