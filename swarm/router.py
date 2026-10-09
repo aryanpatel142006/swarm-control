@@ -7,7 +7,7 @@ from datetime import datetime
 from .config import AgentConfig, Config
 from .models import IMPORTANCES, AgentRow, Status, Task, usage_limited, utcnow
 
-PROVIDER_COST_RANK = {"generic": 0, "gemini": 1, "antigravity": 1, "grok": 2, "codex": 3, "claude": 4}
+PROVIDER_COST_RANK = {"generic": 0, "gemini": 1, "antigravity": 1, "grok": 2, "perplexity": 2, "codex": 3, "claude": 4}
 
 
 @dataclass

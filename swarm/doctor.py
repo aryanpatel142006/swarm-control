@@ -11,7 +11,16 @@ from .config import Config
 from .models import utcnow
 from .workspace import run_cmd
 
-CLI_BINARY = {"claude": "claude", "codex": "codex", "antigravity": "agy", "gemini": "gemini", "grok": "grok"}
+CLI_BINARY = {"claude": "claude", "codex": "codex", "antigravity": "agy", "gemini": "gemini", "grok": "grok",
+              "perplexity": "perplexity"}   # perplexity: unverified default; an agent's `cli` overrides it
+
+
+def cli_binary(agent) -> str:
+    """The executable an agent runs: its configured `cli` (first word) when set, else the provider's default."""
+    cli = (getattr(agent, "cli", None) or "").strip()
+    if cli:
+        return cli.split()[0]
+    return CLI_BINARY.get(agent.provider, "")
 
 
 @dataclass
@@ -55,13 +64,15 @@ def run_checks(cfg: Config, host: str | None, *, offline: bool = False, notion_t
             exe = (a.command_template or "").split()[0] if a.command_template else ""
             checks.append(Check(f"cli:{a.name} (generic)", bool(exe and (which(exe) or Path(exe).exists())), exe))
             continue
-        binary = CLI_BINARY[a.provider]
-        path = which(binary)
+        binary = cli_binary(a)
+        path = which(binary) or (binary if "/" in binary and Path(binary).exists() else None)
         detail = path or f"{binary} not found on PATH"
         if path and not offline:
             r = run([binary, "--version"], cwd=cfg.repo_root, timeout=30)
             text = (r.out or r.err).strip()
             detail = text.splitlines()[0] if text else path
+        if a.provider == "perplexity" and not (a.cli and a.args_template):
+            detail += " [unverified default command: confirm with `swarm doctor --smoke " + a.name + "`]"
         checks.append(Check(f"cli:{a.name} ({a.provider})", bool(path),
                             detail + (" [experimental adapter]" if a.experimental else "")))
     wanted = list(dict.fromkeys(list(cfg.plugins_required)
@@ -136,7 +147,7 @@ def models_note(agent, cli_version: str) -> str:
 
 
 def cli_version(agent, *, which=shutil.which, run=run_cmd, cwd: Path | None = None) -> str:
-    binary = CLI_BINARY.get(agent.provider, "")
+    binary = cli_binary(agent)
     if not binary or not which(binary):
         return ""
     r = run([binary, "--version"], cwd=cwd or Path.cwd(), timeout=30)

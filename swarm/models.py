@@ -27,7 +27,7 @@ TASK_TYPES = [
 IMPORTANCES = ["critical", "high", "normal", "low"]
 SIZES = ["S", "M", "L"]
 TIERS = ["best", "high", "mid", "low"]
-PROVIDERS = ["claude", "codex", "antigravity", "gemini", "grok", "generic"]
+PROVIDERS = ["claude", "codex", "antigravity", "gemini", "grok", "perplexity", "generic"]
 REVIEW_POLICIES = ["all", "high_and_above", "critical_only", "none"]
 
 

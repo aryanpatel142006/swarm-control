@@ -54,6 +54,11 @@ class AgentConfig:
     sandbox: str | None = None
     experimental: bool = False
     command_template: str | None = None
+    # perplexity (swarm/adapters/perplexity.py): CLI binary, argv template ({prompt_file} {model} {cwd}) and the
+    # auto-approve flags; None = the adapter's (unverified) defaults
+    cli: str | None = None
+    args_template: str | None = None
+    approve_args: list[str] | None = None
     extra_args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)      # extra environment for the CLI (e.g. CLAUDE_CONFIG_DIR for a 2nd account)
     mcp: list[str] = field(default_factory=list)          # MCP server names this agent always gets
@@ -290,12 +295,29 @@ def load_config(path: Path | str) -> Config:
         strengths = {t: int((a.get("strengths") or {}).get(t, 3)) for t in TASK_TYPES}
         if provider == "generic" and not a.get("command_template"):
             raise ConfigError(f"agents.{name}: generic provider requires command_template")
+        if a.get("cli") is not None and not str(a.get("cli")).strip():
+            raise ConfigError(f"agents.{name}.cli must be a non-empty command")
+        if a.get("args_template") is not None:
+            from .adapters.perplexity import PLACEHOLDERS, template_fields
+            try:
+                unknown = template_fields(str(a["args_template"])) - PLACEHOLDERS
+            except ValueError as e:
+                raise ConfigError(f"agents.{name}.args_template: {e}") from e
+            if unknown:
+                raise ConfigError(f"agents.{name}.args_template: unknown placeholder(s) {sorted(unknown)}; "
+                                  f"use {{prompt_file}} {{model}} {{cwd}}")
+        if a.get("approve_args") is not None and not isinstance(a.get("approve_args"), list):
+            raise ConfigError(f"agents.{name}.approve_args must be a list of arguments")
         agents[name] = AgentConfig(
             name=name, provider=provider, host=host, parallel=int(a.get("parallel", 1)),
             models=models, effort=dict(a.get("effort") or {}), strengths=strengths,
             soft_cap_5h_usd=a.get("soft_cap_5h_usd"), sandbox=a.get("sandbox"),
             experimental=bool(a.get("experimental", False)),
-            command_template=a.get("command_template"), extra_args=list(a.get("extra_args") or []),
+            command_template=a.get("command_template"),
+            cli=str(a["cli"]).strip() if a.get("cli") is not None else None,
+            args_template=str(a["args_template"]) if a.get("args_template") is not None else None,
+            approve_args=[str(x) for x in a["approve_args"]] if a.get("approve_args") is not None else None,
+            extra_args=list(a.get("extra_args") or []),
             env={str(k): str(v) for k, v in (a.get("env") or {}).items()},
             mcp=[str(m) for m in (a.get("mcp") or [])],
         )

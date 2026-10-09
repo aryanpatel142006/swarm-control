@@ -91,6 +91,8 @@ class Server:
         self._review_threads: dict[str, threading.Thread] = {}
         self._review_done: dict[str, tuple] = {}   # task id -> (status the review left it in, when)
         self._review_logged: tuple[str, ...] = ()
+        self._busy_ids: set[str] = set()            # reviewed or merged right now on the slow thread (parallel=1)
+        self._conflict_checked: dict[str, tuple[str, str]] = {}   # task id -> (branch tip, main tip) found clean
         from .config import config_signature
         self._config_sig = config_signature(getattr(cfg, "path", None))   # config files serve started with
         self._config_warned: str | None = None
@@ -450,7 +452,13 @@ class Server:
         if self.review_parallel() <= 1:   # one review after another on this thread (the behaviour before Oct 9)
             n = 0
             for t in self._by_importance(self.board.list_tasks(status=[Status.REVIEW]))[: self.review_batch]:
-                self.reviewer.process(t)
+                with self._review_lock:
+                    self._busy_ids.add(t.id)
+                try:
+                    self.reviewer.process(t)
+                finally:
+                    with self._review_lock:
+                        self._busy_ids.discard(t.id)
                 n += 1
             return n
         return self._start_reviews()
@@ -515,9 +523,102 @@ class Server:
     def merge_pending(self) -> int:
         n = 0
         for t in self._by_importance(self.board.list_tasks(status=[Status.MERGE_READY])):
-            if self.merger.merge(t):
+            with self._review_lock:
+                self._busy_ids.add(t.id)
+            try:
+                merged = self.merger.merge(t)
+            finally:
+                with self._review_lock:
+                    self._busy_ids.discard(t.id)
+            if merged:
                 n += 1
                 self.promote()
+        return n
+
+    # ----- merge conflicts caught before a review is spent (Oct 9 2026: T-150 sat in Review with its PR already
+    # CONFLICTING; review, approve, a failed merge and a send-back would have cost ~10 min) -----
+    def _busy(self) -> set[str]:
+        """Tasks some round is working on right now: a review or merge in flight here, or a runner that still lists
+        the task on its agent row (it has not finished publishing)."""
+        with self._review_lock:
+            busy = set(self._busy_ids) | {k for k, th in self._review_threads.items() if th.is_alive()}
+        for row in self.board.list_agents():
+            busy |= {x.strip() for x in (row.current_task or "").split(",") if x.strip()}
+        return busy
+
+    def _merge_conflicts(self, t: Task, tip: str) -> list[str] | None:
+        """Files the branch tip conflicts with main in ([] = merges cleanly, None = could not tell). A local
+        `git merge-tree --write-tree` on the fetched refs; GitHub's mergeable flag when that fails and a PR exists."""
+        main_ref = f"{self.ws.remote}/{self.cfg.main_branch}"
+        r = self.ws.git(self.ws.repo_root, "merge-tree", "--write-tree", "--name-only", "--no-messages",
+                        main_ref, tip, check=False)
+        if r.code == 0:
+            return []
+        if r.code == 1:
+            files = sorted({ln.strip() for ln in r.out.splitlines()[1:] if ln.strip()})
+            return files or ["(git named no file)"]
+        if not t.pr_url:
+            return None
+        mergeable = str(self.ws.pr_info(t.pr_url).get("mergeable") or "UNKNOWN").upper()
+        if mergeable == "CONFLICTING":
+            return ["(file list unavailable: GitHub reports the PR as CONFLICTING)"]
+        return [] if mergeable == "MERGEABLE" else None
+
+    def _main_commits_since_base(self, tip: str, files: list[str], cap: int = 8) -> list[str]:
+        main_ref = f"{self.ws.remote}/{self.cfg.main_branch}"
+        base = self.ws.git(self.ws.repo_root, "merge-base", main_ref, tip, check=False).out.strip()
+        if not base:
+            return []
+        paths = [f for f in files if not f.startswith("(")]
+        out = ""
+        if paths:
+            out = self.ws.git(self.ws.repo_root, "log", "--format=%h %s", f"-{cap}", f"{base}..{main_ref}", "--",
+                              *paths, check=False).out
+        if not out.strip():
+            out = self.ws.git(self.ws.repo_root, "log", "--format=%h %s", f"-{cap}", f"{base}..{main_ref}",
+                              check=False).out
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+    def check_conflicts(self) -> int:
+        """Every Review / Merge Ready task whose branch no longer merges cleanly with main goes back to its worker
+        as Changes Requested (claim cleared, the files and main's commits in the feedback) before a review is spent
+        on it. The runner merges main in before the next run and leaves the markers for the worker. Skips a task a
+        review, merge or runner is working on right now."""
+        tasks = self.board.list_tasks(status=[Status.REVIEW, Status.MERGE_READY])
+        if not tasks:
+            return 0
+        busy = self._busy()
+        todo = [t for t in self._by_importance(tasks) if t.id not in busy]
+        if not todo:
+            return 0
+        self.ws.fetch()
+        main_ref = f"{self.ws.remote}/{self.cfg.main_branch}"
+        main_tip = self.ws.git(self.ws.repo_root, "rev-parse", main_ref, check=False).out.strip()
+        n = 0
+        for t in todo:
+            r = self.ws.git(self.ws.repo_root, "rev-parse", "--verify", "--quiet", f"{self.ws.remote}/{t.branch}",
+                            check=False)
+            tip = r.out.strip() if r.ok else ""
+            if not tip or not main_tip or self._conflict_checked.get(t.id) == (tip, main_tip):
+                continue
+            files = self._merge_conflicts(t, tip)
+            if files is None:
+                continue
+            if not files:
+                self._conflict_checked[t.id] = (tip, main_tip)
+                continue
+            fresh = self.board.get_task(t.id)
+            if fresh is None or fresh.status not in (Status.REVIEW, Status.MERGE_READY) or t.id in self._busy():
+                continue
+            from .merge import conflict_feedback
+            block = ("Caught by serve before review. "
+                     + conflict_feedback(files, self._main_commits_since_base(tip, files), self.cfg.main_branch))
+            fresh.status, fresh.claim_nonce = Status.CHANGES_REQUESTED, ""
+            fresh.feedback = "\n\n".join(x for x in (fresh.feedback.strip(), block) if x)[:6000]
+            fresh.flags = list(dict.fromkeys(fresh.flags + ["resume"]))
+            self.board.update_task(fresh, ["status", "claim_nonce", "feedback", "flags"])
+            self.log(f"[{t.id}] conflict with main ({', '.join(files)}) → changes requested")
+            n += 1
         return n
 
     def reroute(self) -> int:
@@ -682,6 +783,7 @@ class Server:
         self._step(summary, "retried", self.retry_failed)
         self._step(summary, "relayed", self.relay)
         self._step(summary, "promoted", self.promote)
+        self._step(summary, "conflicts", self.check_conflicts)   # before a review is spent on a branch that conflicts
         if self.background:
             # review + merge can take many minutes; keep the fast steps flowing on the main thread
             if self._slow_thread is None or not self._slow_thread.is_alive():

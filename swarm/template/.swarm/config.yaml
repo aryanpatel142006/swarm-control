@@ -47,7 +47,7 @@ task_limits:   # worker turns never go below 60/100/150 for medium/high/xhigh ef
 
 hosts:   # max_parallel_verify: verify runs at once on that machine (default 2); the rest wait for a slot
   laptop-a: { max_parallel: { claude: 3, codex: 3, gemini: 1, antigravity: 2, grok: 1, generic: 2 }, max_parallel_verify: 2 }
-  laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, generic: 2 }, max_parallel_verify: 2 }
+  laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, perplexity: 1, generic: 2 }, max_parallel_verify: 2 }
 
 routing:
   importance_to_tier: { critical: best, high: high, normal: mid, low: low }
@@ -160,6 +160,17 @@ agents:
     strengths: { frontend: 3, backend: 3, realtime: 2, ml_audio: 3, ml_vision: 4, ml_fusion: 3,
                  eval: 4, tests: 3, docs: 4, research: 4, bugfix: 3, integration: 2, infra: 3 }
     experimental: true            # headless flags are third-party sourced; `swarm doctor --smoke agy-b` must pass
+  # perplexity-b:                 # Perplexity agent CLI. Binary, flags and model ids are UNVERIFIED placeholders: set
+  #   provider: perplexity        # cli / args_template / approve_args to the real command, then
+  #   host: laptop-b              # `swarm doctor --smoke perplexity-b` must pass (README "Perplexity").
+  #   parallel: 1
+  #   cli: perplexity
+  #   args_template: "-p --prompt-file {prompt_file} --model {model} --cwd {cwd} --output-format json"
+  #   approve_args: ["--yes"]     # dropped on read-only runs (review, plan)
+  #   models: { best: sonar-pro, high: sonar-pro, mid: sonar, low: sonar }
+  #   strengths: { frontend: 2, backend: 3, realtime: 2, ml_audio: 2, ml_vision: 2, ml_fusion: 2,
+  #                eval: 3, tests: 3, docs: 4, research: 5, bugfix: 2, integration: 2, infra: 2 }
+  #   experimental: true
 
 reviewer:                          # a different model family than most authors
   agent: codex-a

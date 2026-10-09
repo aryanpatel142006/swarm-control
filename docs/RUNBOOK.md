@@ -9,6 +9,7 @@
 5. Instantiate the project: `swarm template ../<project> && cd ../<project> && git init && gh repo create ...` Edit `.swarm/config.yaml` (agents, hosts, models). Commit and push.
 6. `swarm init --parent-page <id>` once; commit `.swarm/notion.yaml`.
 7. Gemini laptop (optional third agent): `brew install gemini-cli`, run `gemini` once in Terminal and log in with Google, then `swarm doctor --smoke gemini-a`; expect Flash only and a small quota (the harness cools it down and reroutes when it runs out).
+7b. Perplexity agent (optional, `provider: perplexity`): add the config block from the README's "Perplexity" section (teammate joining), set `cli`/`args_template`/`approve_args` to the real command (the defaults are unverified), then `swarm doctor --smoke perplexity-b`.
 8. `swarm tools --install` on both laptops (installs the plugins in config and Playwright's Chromium). A Codex laptop also registers the MCP servers named in config once: `codex mcp add context7 -- npx -y @upstash/context7-mcp` and `codex mcp add playwright -- npx @playwright/mcp@latest --headless --isolated`, then `enabled = false` on each in `~/.codex/config.toml` (the runner enables them per run). Then `swarm doctor` on both laptops, then `swarm doctor --smoke <agent>` for every agent you will use. An agent whose smoke fails is disabled: remove it from config or fix the CLI.
 8. Both laptops: plug in power and disable sleep (System Settings → Battery → Options → Prevent automatic sleeping on power adapter). `caffeinate -dims` in front of every swarm command is the belt to that suspender.
 

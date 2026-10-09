@@ -106,7 +106,7 @@ TYPE_COLORS = {"frontend": "yellow", "backend": "yellow", "realtime": "yellow", 
                "tests": "pink", "bugfix": "pink", "docs": "green", "research": "green"}
 AGENT_STATUS_COLORS = {"idle": "gray", "running": "green", "cooldown": "yellow", "offline": "red", "removed": "brown"}
 PROVIDER_COLORS = {"claude": "orange", "codex": "green", "antigravity": "blue", "gemini": "blue", "grok": "gray",
-                   "generic": "gray", "serve": "purple"}
+                   "perplexity": "pink", "generic": "gray", "serve": "purple"}
 KIND_COLORS = {"blocking": "red", "fyi": "blue", "harness": "purple", "relay": "gray"}
 IMPACT_COLORS = {"high": "red", "medium": "orange", "low": "gray"}
 QSTATUS_COLORS = {"Open": "red", "Applied": "green"}
@@ -307,7 +307,7 @@ AGENTS_SCHEMA = {   # column order is what people see first: name, status, heart
     "Status": _sel(["idle", "running", "cooldown", "offline"], AGENT_STATUS_COLORS),
     "Last Heartbeat": {"date": {}}, "Cooldown Until": {"date": {}}, "Current Task": {"rich_text": {}},
     "Cost 5h USD": {"number": {"format": "number"}},
-    "Provider": _sel(["claude", "codex", "antigravity", "gemini", "grok", "generic", "serve"], PROVIDER_COLORS),
+    "Provider": _sel(["claude", "codex", "antigravity", "gemini", "grok", "perplexity", "generic", "serve"], PROVIDER_COLORS),
     "Host": {"rich_text": {}},
     "Runs": {"number": {"format": "number"}}, "Tokens In": {"number": {"format": "number"}},
     "Tokens Out": {"number": {"format": "number"}}, "Cost USD": {"number": {"format": "number"}},

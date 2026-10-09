@@ -6,9 +6,11 @@ from .codex import CodexAdapter
 from .gemini import GeminiAdapter
 from .generic import GenericAdapter
 from .grok import GrokAdapter
+from .perplexity import PerplexityAdapter
 
 _REGISTRY = {"claude": ClaudeAdapter, "codex": CodexAdapter, "antigravity": AntigravityAdapter,
-             "gemini": GeminiAdapter, "grok": GrokAdapter, "generic": GenericAdapter}
+             "gemini": GeminiAdapter, "grok": GrokAdapter,
+             "perplexity": PerplexityAdapter, "generic": GenericAdapter}
 
 
 def get_adapter(agent_cfg: AgentConfig) -> Adapter:

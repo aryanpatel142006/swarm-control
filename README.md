@@ -67,7 +67,10 @@ And an unattended overnight practice run (`swarm night`), before the real projec
    `verify_fast.sh`, pushes, opens a PR and posts a structured report to the card.
 4. **`swarm serve` on one laptop** reaps stale work, retries failures one model tier up, reviews important work with a
    different model family, rebases and merges, promotes tasks whose dependencies merged, reroutes around rate limits,
-   and keeps a live status page on the board.
+   and keeps a live status page on the board. Every tick, before it spends a review, it checks that each Review and
+   Merge Ready branch still merges cleanly with main (`git merge-tree` on the fetched refs, GitHub's mergeable flag as
+   a fallback); one that conflicts goes straight back to its worker as Changes Requested with the files and main's
+   commits in the feedback, and the runner merges main in and leaves the markers for the worker to resolve.
 5. **Humans steer from Notion.** Blocked agents ask in a Questions table; you answer there (or `swarm answer`) and the
    task resumes on its branch with your answer in the prompt. You can drag cards to reassign or reprioritise.
 
@@ -86,7 +89,7 @@ orchestrator.
 ## Quick start
 
 Requirements: Python 3.11+, `git`, the GitHub CLI `gh` (logged in), a Notion internal-integration token, and the agent
-CLIs you want to use (`claude`, `codex`, `gemini`, `agy`, `grok`, or anything else through the generic adapter).
+CLIs you want to use (`claude`, `codex`, `gemini`, `agy`, `grok`, Perplexity's agent CLI, or anything else through the generic adapter).
 
 ```bash
 git clone https://github.com/aryanpatel142006/swarm-control.git && cd swarm-control
@@ -117,6 +120,33 @@ swarm status                                       # any time
 4. `caffeinate -dims swarm run` and leave it. Only one laptop runs `swarm serve`.
 
 Idle runners keep themselves current: they fetch this repo, fast-forward and restart, so nobody has to pull by hand.
+
+#### Perplexity
+
+`provider: perplexity` runs the Perplexity agent CLI headless in the task worktree
+([`swarm/adapters/perplexity.py`](swarm/adapters/perplexity.py)). **The binary name, flags and model ids below are
+unverified placeholders**: we have not seen the real CLI. Put its real command in `cli`, `args_template` (placeholders
+`{prompt_file}`, `{model}`, `{cwd}`; leave out `{prompt_file}` and the prompt is piped on stdin) and `approve_args`
+(the auto-approve flags, dropped on read-only review/plan runs), then run `swarm doctor --smoke perplexity-b`; it must
+pass before the agent takes tasks. The CLI must exit 0 when done and write `.swarm-run/report.json` (the worker prompt
+asks for it). Keep any API key in the shell profile, never in config.
+
+```yaml
+hosts:
+  laptop-b: { max_parallel: { claude: 2, codex: 3, antigravity: 2, perplexity: 1, generic: 2 } }   # keep your existing keys, add perplexity: 1
+agents:
+  perplexity-b:
+    provider: perplexity
+    host: laptop-b
+    parallel: 1
+    cli: perplexity                                   # unverified: the real binary
+    args_template: "-p --prompt-file {prompt_file} --model {model} --cwd {cwd} --output-format json"   # unverified
+    approve_args: ["--yes"]                           # unverified
+    models: { best: sonar-pro, high: sonar-pro, mid: sonar, low: sonar }   # unverified ids
+    strengths: { frontend: 2, backend: 3, realtime: 2, ml_audio: 2, ml_vision: 2, ml_fusion: 2,
+                 eval: 3, tests: 3, docs: 4, research: 5, bugfix: 2, integration: 2, infra: 2 }
+    experimental: true
+```
 
 ## Commands
 
@@ -207,7 +237,7 @@ the suite is green. Keep the laptop plugged in with the lid open; `swarm doctor`
 Use `provider: generic` with a `command_template` such as
 `mycli --prompt-file {prompt_file} --model {model} --cwd {cwd}`. The model must write its report to
 `.swarm-run/report.json`. For a first-class adapter, subclass `swarm.adapters.base.Adapter`
-(see [`swarm/adapters/`](swarm/adapters/) for Claude, Codex, Gemini, Antigravity and Grok).
+(see [`swarm/adapters/`](swarm/adapters/) for Claude, Codex, Gemini, Antigravity, Grok and Perplexity).
 </details>
 
 <details>
@@ -231,7 +261,7 @@ swarm/
 ├── relay.py             questions and answers between agents and humans
 ├── retro.py, night.py   self-improvement and unattended practice cycles
 ├── usage.py             token and cost ledger, caps and cooldowns
-├── adapters/            claude, codex, gemini, antigravity, grok, generic
+├── adapters/            claude, codex, gemini, antigravity, grok, perplexity, generic
 ├── board/               Notion (and an in-memory board for tests)
 └── template/            what `swarm template` scaffolds
 docs/
