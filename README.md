@@ -162,8 +162,13 @@ agents:
 | `swarm answer` / `tell` | Answer a blocked task; send a note to a task's next attempt |
 | `swarm add` / `assign` / `split` / `cut` / `reroute` | Edit the plan from the terminal |
 | `swarm handoff` / `restart` | Move a task between agents; drain and restart a runner safely |
+| `swarm hold "<reason>" [--minutes N]` / `swarm release` | Live test hold: `swarm-lock` waits (exclusive and shared) until released or the hold expires |
 | `swarm retro` / `night` | Run a retro now; run unattended practice cycles |
 | `swarm tools` / `agents-sync` | Show and install plugins, skills, MCP servers; sync the Agents table with config |
+
+### Live test hold
+
+Before a human live test, the orchestrator runs `swarm hold "live test" --minutes 30`. While `~/.swarm/<project>/locks/HOLD` exists, every `swarm-lock` call (exclusive measurements and shared verifies) waits and logs the reason and until-time, so no measurement or verify runs on that laptop or replays against the shared remote GPU during the test (selective-hearing, Oct 9: a worker's replay overran the live session's tier). The hold ends by itself at its until-time (default 60 minutes), `swarm release` ends it early, `swarm status` shows a `HOLD:` line while it is active, and `swarm-lock --ignore-hold` or `SWARM_HOLD_BYPASS=1` skips the wait for the humans' own tooling. It is per machine: run it on each laptop that runs workers.
 
 ## Reference
 

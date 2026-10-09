@@ -43,6 +43,11 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
                                                     sum(1 for t in tasks if t.status is Status.REVIEW))
     if review_line:
         lines.append(review_line)
+    from .hostlock import hold_text, lock_dir, read_hold
+    active_hold = read_hold(lock_dir(cfg.project), now)
+    if active_hold:   # Oct 9 2026: a measurement's GPU replay contaminated a human live test
+        lines.append(f"HOLD: {active_hold.get('reason') or 'live test'} until "
+                     f"{active_hold['until_dt'].strftime('%H:%M')} UTC (measurements and verifies wait)")
     lines.append("")
     lines.append("Milestones:")
     by_ms: dict[str, list[Task]] = {}

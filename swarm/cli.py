@@ -490,6 +490,24 @@ def status():
 
 
 @app.command()
+def hold(reason: str = typer.Argument(..., help='why, e.g. "live test"'),
+         minutes: float = typer.Option(60, "--minutes", help="the hold ends by itself after this long")):
+    """Live test hold: swarm-lock (measurements and verifies) waits, so nothing disturbs a human test."""
+    import socket
+    from .hostlock import hold_text, lock_dir, read_hold, write_hold
+    d = lock_dir(_cfg().project)
+    write_hold(d, reason, minutes, by=state.host or socket.gethostname())
+    console.print(f"HOLD set on this machine: {hold_text(read_hold(d))}. `swarm release` ends it.")
+
+
+@app.command()
+def release():
+    """End the live test hold."""
+    from .hostlock import clear_hold, lock_dir
+    console.print("hold released" if clear_hold(lock_dir(_cfg().project)) else "no hold was set")
+
+
+@app.command()
 def reroute():
     """Re-run routing for Ready tasks whose agent is offline, cooling down, or unknown."""
     from .serve import Server

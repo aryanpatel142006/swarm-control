@@ -221,3 +221,90 @@ def test_snippet_matches_the_template(capsys):
     template = (Path(hostlock.__file__).parent / "template" / "scripts" / "verify_fast.sh").read_text()
     for line in out.splitlines()[1:]:
         assert line in template
+
+
+# ---- live test hold (Oct 9 2026) ----
+
+def _wait_for_hold_release(d, **kw):
+    """Run a lock acquisition in a thread under a hold; returns (thread, got list, logs)."""
+    got, logs = [], []
+
+    def waiter():
+        with verify_slot(d, 2, wait_s=5, poll_s=0.02, honor_hold=True, log=logs.append, **kw) as held:
+            got.append((held, time.monotonic()))
+
+    th = threading.Thread(target=waiter)
+    th.start()
+    return th, got, logs
+
+
+def test_hold_blocks_exclusive_and_shared_until_released(tmp_path, monkeypatch):
+    monkeypatch.delenv(hostlock.HOLD_BYPASS_ENV, raising=False)
+    d = tmp_path / "locks"
+    hostlock.write_hold(d, "live test", 30, by="laptop-a")
+    for exclusive in (True, False):
+        th, got, logs = _wait_for_hold_release(d, exclusive=exclusive)
+        time.sleep(0.3)
+        assert got == [] and any("live test hold" in m and "live test until" in m for m in logs)
+        assert hostlock.clear_hold(d) is True
+        th.join(5)
+        assert got and got[0][0] is True
+        hostlock.write_hold(d, "live test", 30)
+    assert hostlock.clear_hold(d) and not hostlock.clear_hold(d)
+
+
+def test_hold_expires_by_itself(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.delenv(hostlock.HOLD_BYPASS_ENV, raising=False)
+    d = tmp_path / "locks"
+    t0 = datetime.now(timezone.utc)
+    hostlock.write_hold(d, "forgotten", 0.01, now=t0 - timedelta(minutes=5))   # already past its until-time
+    assert hostlock.read_hold(d) is None and not (d / hostlock.HOLD_FILE).exists()
+    hostlock.write_hold(d, "short", 0.05)                                       # 3 s (stamps are whole seconds)
+    t = time.monotonic()
+    with verify_slot(d, 1, wait_s=5, poll_s=0.05, honor_hold=True) as held:
+        assert held is True
+    assert 1.5 < time.monotonic() - t < 5
+    assert hostlock.write_hold(d, "default")["until"] > hostlock.write_hold(d, "x", 1)["until"]   # default 60 min
+
+
+def test_hold_bypass_flag_and_env(tmp_path, monkeypatch):
+    d = tmp_path / "locks"
+    hostlock.write_hold(d, "live test", 30)
+    monkeypatch.setenv(hostlock.HOLD_BYPASS_ENV, "1")
+    t = time.monotonic()
+    with verify_slot(d, 1, wait_s=5, poll_s=0.05, honor_hold=True, exclusive=True) as held:
+        assert held is True
+    assert time.monotonic() - t < 1
+    monkeypatch.delenv(hostlock.HOLD_BYPASS_ENV)
+    env = {**os.environ}
+    env.pop(hostlock.HOLD_BYPASS_ENV, None)
+    base = [sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "1", "--wait", "5"]
+    root = str(Path(__file__).resolve().parent.parent)
+    out = subprocess.run(base + ["--ignore-hold", "--", "echo", "ok"], cwd=root, env=env, capture_output=True,
+                         text=True, timeout=30)
+    assert out.returncode == 0 and out.stdout.strip() == "ok"
+    # without the flag it waits: a short-lived process is still blocked after 1 s
+    p = subprocess.Popen(base + ["--", "echo", "late"], cwd=root, env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+    assert p.poll() is None
+    hostlock.clear_hold(d)
+    stdout, stderr = p.communicate(timeout=15)
+    assert stdout.strip() == "late" and "live test hold" in stderr
+
+
+def test_status_shows_the_hold_line(cfg, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from swarm.board.memory import InMemoryBoard
+    from swarm.status import render_status
+    monkeypatch.setattr(hostlock, "lock_dir", lambda project: tmp_path / "locks")
+    now = datetime.now(timezone.utc)
+    board = InMemoryBoard()
+    args = (cfg, board.list_tasks(), board.list_agents(), board.list_questions(), now)
+    assert "HOLD:" not in render_status(*args)
+    hostlock.write_hold(tmp_path / "locks", "live test", 30)
+    line = next(ln for ln in render_status(*args).splitlines() if ln.startswith("HOLD:"))
+    assert line.startswith("HOLD: live test until ") and line.endswith(" UTC (measurements and verifies wait)")
+    hostlock.clear_hold(tmp_path / "locks")
+    assert "HOLD:" not in render_status(*args)

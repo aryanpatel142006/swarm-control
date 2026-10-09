@@ -26,6 +26,12 @@ worktrees' verify_full without knowing why, inside 20-40 minute runs):
 - a worker's wait is written to `waits/<task>/<pid>-<ns>.json`; the runner adds that time back to the run's
   wall-clock limit (capped), so a queue does not eat the task's budget.
 
+Live test hold (Oct 9 2026: a measurement replayed against the shared remote GPU during a human live test and the
+live session's tier overran, rtf 1.72): `swarm hold "<reason>" [--minutes N]` writes `locks/HOLD` (reason, since,
+until, by); while it exists `swarm-lock` (exclusive and shared) waits before taking any slot, polling, and names
+the reason and the until-time. It ends by itself at `until` (default 60 min), and `swarm release` removes it.
+`--ignore-hold` or `SWARM_HOLD_BYPASS=1` skips the wait (the humans' own tooling).
+
 CLI: `python -m swarm.hostlock [--exclusive] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's);
 `swarm-lock --snippet` prints the re-exec lines a project's verify script needs to take part (Q-224).
 """
@@ -35,10 +41,12 @@ import argparse
 import contextlib
 import fcntl
 import json
+import socket
 import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -48,6 +56,9 @@ HELD_ENV = "SWARM_VERIFY_SLOT_HELD"
 CMD_ENV = "SWARM_VERIFY_LOCK"          # absolute path of the `swarm-lock` wrapper script
 DEFAULT_SLOTS = 2
 DEFAULT_WAIT_S = 1800                  # after this a verify runs without a slot (logged) rather than never
+HOLD_FILE = "HOLD"
+HOLD_BYPASS_ENV = "SWARM_HOLD_BYPASS"
+DEFAULT_HOLD_MINUTES = 60
 PENDING_PREFIX = "exclusive-pending-"
 WAITS_DIR = "waits"
 # A waiter refreshes its record this often: when the worker's shell tool kills a queued `swarm-lock` (a 600 s tool
@@ -151,6 +162,56 @@ def describe(entries: list[dict], now: float | None = None) -> str:
     return ", ".join(bits) or "unknown holders"
 
 
+def _iso(t: datetime) -> str:
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(v: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def write_hold(directory: Path | str, reason: str, minutes: float = DEFAULT_HOLD_MINUTES, *,
+               by: str = "", now: datetime | None = None) -> dict:
+    """Start a live-test hold: measurements and verifies wait until it is released or `minutes` have passed."""
+    now = now or datetime.now(timezone.utc)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    data = {"reason": reason, "since": _iso(now), "until": _iso(now + timedelta(minutes=minutes)),
+            "by": by or socket.gethostname()}
+    (directory / HOLD_FILE).write_text(json.dumps(data))
+    return data
+
+
+def read_hold(directory: Path | str, now: datetime | None = None) -> dict | None:
+    """The active hold, or None. An expired hold is ignored (and removed when possible), so a forgotten one
+    cannot stall the swarm; an unreadable HOLD file counts as no hold."""
+    path = Path(directory) / HOLD_FILE
+    data = _read_json(path)
+    until = _parse_iso(data.get("until")) if data else None
+    if until is None:
+        return None
+    if (now or datetime.now(timezone.utc)) >= until:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return None
+    return {**data, "until_dt": until}
+
+
+def clear_hold(directory: Path | str) -> bool:
+    try:
+        (Path(directory) / HOLD_FILE).unlink()
+        return True
+    except OSError:
+        return False
+
+
+def hold_text(hold: dict) -> str:
+    return f"{hold.get('reason') or 'live test'} until {hold['until_dt'].strftime('%H:%M')} UTC"
+
+
 def task_wait_seconds(directory: Path | str, task_id: str, now: float | None = None) -> float:
     """Seconds this task's processes have spent waiting for slots (finished waits plus ones still waiting)."""
     now = now or time.time()
@@ -175,10 +236,11 @@ def clear_task_waits(directory: Path | str, task_id: str) -> None:
 def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive: bool = False,
                 wait_s: float = DEFAULT_WAIT_S, poll_s: float = 1.0, log: Callable[[str], None] | None = None,
                 sleep: Callable[[float], None] = time.sleep, label: str = "verify",
-                record: Path | None = None) -> Iterator[bool]:
+                record: Path | None = None, honor_hold: bool = False) -> Iterator[bool]:
     """Hold one slot (or all of them with exclusive=True). Yields True when held, False when the wait ran out and
     the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once. `record` is a file
-    the wait is written to (the runner adds a worker's waits back to its wall-clock limit)."""
+    the wait is written to (the runner adds a worker's waits back to its wall-clock limit). `honor_hold`: first wait
+    while a live-test hold exists (`swarm hold`), unless SWARM_HOLD_BYPASS=1; that wait does not use up `wait_s`."""
     if os.environ.get(HELD_ENV):
         yield True
         return
@@ -218,6 +280,12 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 "run verify while your measurement runs (rule 18)." if mine else "")
 
     try:
+        if honor_hold and os.environ.get(HOLD_BYPASS_ENV) != "1":
+            while (hold := read_hold(directory)) is not None:
+                waiting(f"live test hold on this machine and the shared GPU ({hold_text(hold)}); waiting for "
+                        f"`swarm release` or the until-time. A measurement or verify must not disturb a human test.")
+                sleep(poll_s)
+            deadline = time.monotonic() + wait_s       # the slot wait starts after the hold
         if exclusive:
             _write_json(pending, me)
             for i in range(slots):
@@ -328,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dir", default=os.environ.get(DIR_ENV, ""))
     ap.add_argument("--slots", type=int, default=int(os.environ.get(SLOTS_ENV) or DEFAULT_SLOTS))
     ap.add_argument("--wait", type=float, default=DEFAULT_WAIT_S, help="seconds to wait before running anyway")
+    ap.add_argument("--ignore-hold", action="store_true",
+                    help="do not wait for a live-test hold (`swarm hold`); SWARM_HOLD_BYPASS=1 does the same")
     ap.add_argument("--snippet", action="store_true",
                     help="print the lines that make a project's verify script take a slot, and exit")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
@@ -353,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
             record = None
     label = ("measurement" if a.exclusive else "verify") + f": {' '.join(cmd)[:80]}"
     with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
-                     record=record) as held:
+                     record=record, honor_hold=not a.ignore_hold) as held:
         waited = time.monotonic() - started
         if waited >= 5:
             log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"

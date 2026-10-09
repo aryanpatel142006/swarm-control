@@ -107,6 +107,7 @@ Change a tier in `.swarm/config.yaml` → `agents.<name>.models`; running tasks 
 | `swarm assign T-x --agent A [--model M --effort E] [--force]` | override routing; a task already Running on another agent is refused unless `--force` (which stops that run within 30 s and re-queues it) |
 | `swarm cut T-x` / `swarm split T-x [--apply]` | remove / break up |
 | `swarm answer Q-x "text" [--follow-up]` | answer a question |
+| `swarm hold "live test" [--minutes N]` / `swarm release` | measurements and verifies (`swarm-lock`) wait; ends by itself (default 60 min) |
 | `swarm reroute` | move Ready tasks off offline/cooling agents |
 | `swarm logs T-x [--attempt N]` | prompt/stdout/stderr of a run on this laptop |
 | `swarm usage --since 5h` | spend, cache, waste |
@@ -193,3 +194,4 @@ Learned from real runs; newest last. Each is one line: rule (evidence).
 - Before filing a bug from a session log, run `scripts/session_report.py` (or the project's equivalent) and quote its warnings; write a cause only as "possible cause, unverified" (T-156 blamed the HQ switch; the judge page never streamed audio).
 - Idea, not built: show the board row's `created_by` in `swarm status` so the orchestrator can tell who filed an unknown task (T-159, T-160, Oct 9).
 - Orchestrator: delegate everything non-board to sub-agents so a reply to the human is never more than a minute away (four time-estimate requests went unanswered mid-tool-call, Oct 9).
+- Before a human live test, `swarm hold "live test" --minutes 30`; it also keeps remote-GPU replays off the shared server (Oct 9: T-129's replay contaminated a live session). `swarm release` ends it early.
