@@ -23,14 +23,24 @@ def registered_mcp_servers(run=run_cmd) -> set[str]:
     return {str(x.get("name")) for x in (rows or []) if isinstance(x, dict) and x.get("name")}
 
 
-def git_common_dir(cwd: Path) -> str | None:
-    """Absolute path of the repository's shared .git directory, or None outside a git checkout."""
+def _rev_parse_path(cwd: Path, flag: str) -> str | None:
     try:
-        r = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        r = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def git_common_dir(cwd: Path) -> str | None:
+    """Absolute path of the repository's shared .git directory, or None outside a git checkout."""
+    return _rev_parse_path(cwd, "--git-common-dir")
+
+
+def git_dir(cwd: Path) -> str | None:
+    """Absolute path of this checkout's own git dir: <common>/worktrees/<name> for a linked worktree (its index,
+    HEAD and index.lock live there), the common dir itself for the main checkout."""
+    return _rev_parse_path(cwd, "--git-dir")
 
 
 class CodexAdapter(Adapter):
@@ -53,7 +63,13 @@ class CodexAdapter(Adapter):
         common = git_common_dir(spec.cwd)
         if common and sandbox != "danger-full-access":
             argv += ["--add-dir", common]   # a worktree's index and locks live under the main repo's .git
+            gitdir = git_dir(spec.cwd)   # .git/worktrees/<name>, named on its own as well (Q-921, Q-1113)
+            if gitdir and gitdir != common:
+                argv += ["--add-dir", gitdir]
             argv += ["--add-dir", str(Path(common).parent)]   # and the shared .venv lives in the main checkout (Q-003)
+        scratch = (spec.env or {}).get("SWARM_SCRATCH")
+        if scratch and sandbox != "danger-full-access":
+            argv += ["--add-dir", scratch]   # the host's disk-backed TMPDIR (hosts.<name>.scratch_dir, Q-1113)
         if spec.mcp:
             # servers are registered once with `codex mcp add` (enabled = false) and switched on per run;
             # an unregistered name is skipped, never passed: a dangling entry would fail the whole run

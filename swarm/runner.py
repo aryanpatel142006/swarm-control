@@ -108,6 +108,7 @@ def worker_env(wt: Path, task: Task, cfg: Config | None = None, host: str | None
         from .hostlock import worker_lock_env
         slots = cfg.hosts[host].max_parallel_verify if host in cfg.hosts else 2
         env.update(worker_lock_env(cfg.project, slots, cfg.verify.exclusive_max_minutes))
+        env.update(cfg.scratch_env(host))   # disk-backed TMPDIR where /tmp is a small tmpfs (laptop-c, Q-1113)
     env.update({"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
                 "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)})
     return env

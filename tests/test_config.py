@@ -121,3 +121,30 @@ def test_planner_rules_ask_docs_tasks_to_grep_cited_ui_controls():
     from swarm.prompt import PROMPTS_DIR
     text = (PROMPTS_DIR / "planner.md").read_text()
     assert "every control the doc names exists in the UI source" in text
+
+
+def test_host_scratch_dir_exports_tmpdir(project_dir, sample_config_dict, tmp_path):
+    """laptop-c's /tmp is a 3.8 GiB tmpfs and a CPU-executor test needs 5 GiB (Q-1113): a host may name a
+    disk-backed scratch dir, which workers and verify scripts get as TMPDIR and SWARM_SCRATCH."""
+    scratch = tmp_path / "outside" / "scratch"
+    host = next(iter(sample_config_dict["hosts"]))
+    sample_config_dict["hosts"][host]["scratch_dir"] = str(scratch)
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.scratch_env(host) == {"TMPDIR": str(scratch), "SWARM_SCRATCH": str(scratch)}
+    assert scratch.is_dir()   # created on first use
+    other = [h for h in cfg.hosts if h != host]
+    assert all(cfg.scratch_env(h) == {} for h in other) and cfg.scratch_env(None) == {}
+
+
+def test_host_scratch_dir_must_be_absolute_and_outside_git(project_dir, sample_config_dict, tmp_path):
+    host = next(iter(sample_config_dict["hosts"]))
+    sample_config_dict["hosts"][host]["scratch_dir"] = "relative/scratch"
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    with pytest.raises(ConfigError, match="absolute"):
+        load_config(project_dir / ".swarm" / "config.yaml")
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    sample_config_dict["hosts"][host]["scratch_dir"] = str(tmp_path / "repo" / "tmp" / "scratch")
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    with pytest.raises(ConfigError, match="inside the git checkout"):
+        load_config(project_dir / ".swarm" / "config.yaml")

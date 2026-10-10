@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,10 @@ class HostConfig:
     max_parallel: dict[str, int] = field(default_factory=dict)
     # verify runs at once on this machine (swarm/hostlock.py); the rest wait for a slot (Q-175, Q-185, Q-190)
     max_parallel_verify: int = 2
+    # disk-backed scratch for workers and verify scripts on this machine, exported as TMPDIR and SWARM_SCRATCH.
+    # Empty = the system default. laptop-c's /tmp is a 3.8 GiB tmpfs and a test needs 5 GiB (Q-1113). Must lie
+    # outside every git repo: checkout-based scratch broke tests that assume no git parent.
+    scratch_dir: str = ""
 
 
 @dataclass
@@ -168,6 +173,18 @@ class Config:
 
     def project_env(self) -> dict[str, str]:
         return {k: v.replace("{repo_root}", str(self.repo_root)) for k, v in self.env.items()}
+
+    def scratch_env(self, host: str | None) -> dict[str, str]:
+        """TMPDIR and SWARM_SCRATCH for a host with `scratch_dir` (created on first use); {} elsewhere, or when the
+        directory cannot be created (the system temp dir is still better than a failed run)."""
+        h = self.hosts.get(host or "")
+        if h is None or not h.scratch_dir:
+            return {}
+        try:
+            Path(h.scratch_dir).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return {}
+        return {"TMPDIR": h.scratch_dir, "SWARM_SCRATCH": h.scratch_dir}
 
     def mcp_for(self, task_type: str, agent: AgentConfig, importance: str | None = None) -> list[str]:
         """MCP servers a worker run gets: the task type's, the importance tier's, then the agent's own."""
@@ -291,6 +308,20 @@ def config_changes(old: "Config", new: "Config") -> list[str]:
     return [f.name for f in fields(old) if getattr(old, f.name, None) != getattr(new, f.name, None)]
 
 
+def _scratch_dir(host: str, value) -> str:
+    """hosts.<name>.scratch_dir: an absolute path (~ expanded) outside any git checkout, or "" for the default."""
+    if not value:
+        return ""
+    p = Path(os.path.expanduser(str(value)))
+    if not p.is_absolute():
+        raise ConfigError(f"hosts.{host}.scratch_dir must be an absolute path, got '{value}'")
+    for parent in (p, *p.parents):
+        if (parent / ".git").exists():
+            raise ConfigError(f"hosts.{host}.scratch_dir '{value}' is inside the git checkout at {parent}; "
+                              "use a directory outside every repo")
+    return str(p)
+
+
 def load_config(path: Path | str) -> Config:
     path = Path(path).resolve()
     raw = yaml.safe_load(path.read_text()) or {}
@@ -305,7 +336,8 @@ def load_config(path: Path | str) -> Config:
     notion_raw = {**(raw.get("notion") or {}), **notion_raw}
 
     hosts = {name: HostConfig(name=name, max_parallel=dict((h or {}).get("max_parallel", {})),
-                              max_parallel_verify=max(1, int((h or {}).get("max_parallel_verify", 2))))
+                              max_parallel_verify=max(1, int((h or {}).get("max_parallel_verify", 2))),
+                              scratch_dir=_scratch_dir(name, (h or {}).get("scratch_dir")))
              for name, h in (raw.get("hosts") or {}).items()}
 
     agents: dict[str, AgentConfig] = {}

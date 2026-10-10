@@ -84,7 +84,7 @@ def configure_verify_slots(ws, cfg: Config, host: str | None, log=print) -> None
     ws.verify_slot = lambda label, quick_wait_s=None: verify_slot(
         lock_dir(cfg.project), slots, log=log, label=label, exclusive_cap_min=cfg.verify.exclusive_max_minutes,
         quick_cap_s=quick_wait_s)
-    ws.script_env = cfg.project_env()
+    ws.script_env = {**cfg.project_env(), **cfg.scratch_env(host)}
 
 
 def _ledger(cfg: Config):

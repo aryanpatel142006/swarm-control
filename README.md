@@ -214,6 +214,10 @@ reviewer:
 Every review runs `verify_full`, so `parallel` multiplies verify load on the reviewer's host. The host's verify slots
 (`hosts.<host>.max_parallel_verify`, shared with that laptop's workers through `swarm-lock`) still cap how many run at
 once; raise `parallel` only when the host has slots to spare. Restart `swarm serve` to apply it.
+
+A host whose `/tmp` is small (a WSL2 tmpfs) sets `hosts.<host>.scratch_dir` to an absolute, disk-backed path
+outside every git checkout; that host's workers and verify scripts get it as `TMPDIR` and `SWARM_SCRATCH`, and Codex
+is given it as a writable root. Restart that host's runner to apply it.
 </details>
 
 <details>

@@ -149,6 +149,18 @@ def test_codex_adds_git_common_dir_as_writable(git_repo, tmp_path):
     assert "--add-dir" in argv
     added = argv[argv.index("--add-dir") + 1]
     assert added.endswith("/.git") and (git_repo / ".git").resolve() == __import__("pathlib").Path(added).resolve()
+    # the worktree's own git dir (index, HEAD, index.lock) is named too: codex-c found it read-only (Q-921, Q-1113)
+    dirs = [__import__("pathlib").Path(argv[i + 1]).resolve() for i, a in enumerate(argv) if a == "--add-dir"]
+    assert (git_repo / ".git" / "worktrees" / "wt").resolve() in dirs
+
+
+def test_codex_adds_the_host_scratch_dir(tmp_path):
+    """hosts.<name>.scratch_dir reaches the worker as SWARM_SCRATCH/TMPDIR; the sandbox must let it write there."""
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h", sandbox="workspace-write"))
+    argv, _ = a.build_command(spec(tmp_path, env={"SWARM_SCRATCH": "/disk/scratch", "TMPDIR": "/disk/scratch"}))
+    assert argv[argv.index("/disk/scratch") - 1] == "--add-dir"
+    plain, _ = a.build_command(spec(tmp_path))
+    assert "/disk/scratch" not in plain
 
 
 def test_claude_workers_skip_user_mcp_servers(tmp_path):

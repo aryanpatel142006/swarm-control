@@ -726,6 +726,19 @@ def test_worker_env_puts_the_worktree_first_on_pythonpath(cfg, git_repo, tmp_pat
     assert env["SWARM_TASK_ID"] == t.id and env["SWARM_WORKTREE"] == wt
 
 
+def test_worker_env_carries_the_host_scratch_dir(cfg, tmp_path):
+    """Q-1113: a host with scratch_dir gives its workers a disk-backed TMPDIR; other hosts keep the default."""
+    from swarm.models import Task
+    from swarm.runner import worker_env
+    host = next(iter(cfg.hosts))
+    cfg.hosts[host].scratch_dir = str(tmp_path / "scratch")
+    t = Task(id="T-1", title="x")
+    env = worker_env(tmp_path / "wt", t, cfg, host)
+    assert env["TMPDIR"] == env["SWARM_SCRATCH"] == str(tmp_path / "scratch")
+    other = next((h for h in cfg.hosts if h != host), "elsewhere")
+    assert "TMPDIR" not in worker_env(tmp_path / "wt", t, cfg, other)
+
+
 def test_adapter_passes_the_run_env_to_the_cli(tmp_path):
     from swarm.adapters.base import Adapter, RunSpec
 
