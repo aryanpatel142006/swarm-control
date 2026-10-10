@@ -1,3 +1,4 @@
+import copy
 import json
 
 import httpx
@@ -592,3 +593,18 @@ def test_claim_succeeds_on_the_callers_page_when_the_id_is_shared():
     mine = np.page_to_task(store["ds-tasks"]["pb"])
     assert claim_task(board, mine, "claude-a", sleep=lambda s: None)
     assert np.page_to_task(store["ds-tasks"]["pa"]).agent == "codex-b"       # the other page is untouched
+
+
+def test_get_task_with_a_page_id_reads_the_page_not_a_lagging_query():
+    """T-361 (Oct 10 2026): a query returned the row from before the orchestrator's host pin; serve wrote it back."""
+    board, store = _board_with_fake_notion()
+    t = board.create_task(Task(id="", title="pinned", status=Status.BLOCKED, flags=["resume"]))
+    stale = copy.deepcopy(store["ds-tasks"][t.page_id])
+    t.flags = ["resume", "host:laptop-b"]
+    board.update_task(t, ["flags"])
+    real_query = board.c.query
+    board.c.query = lambda ds, filter=None, **kw: [stale if r["id"] == t.page_id else r
+                                                   for r in real_query(ds, filter=filter, **kw)]
+    assert board.get_task(t.id).flags == ["resume"]                                   # the lagging query
+    assert board.get_task(t.id, page_id=t.page_id).flags == ["resume", "host:laptop-b"]
+    assert board.get_task("T-404", page_id=t.page_id) is None                        # page of another id

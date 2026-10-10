@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .adapters import get_adapter
 from .adapters.base import RunSpec
-from .board.base import Board
+from .board.base import Board, fresh_flags
 from .config import Config
 from .failover import ReviewerState, reviewer_state
 from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
@@ -378,6 +378,8 @@ class Reviewer:
                 context=findings_to_feedback(v), options=["cut", "split", "accept as is", "human fix"],
                 impact="high", task_id=task.id,
                 asked_by=self.last_agent or (self.cfg.reviewer.agent if self.cfg.reviewer else "reviewer")))
+        # the review took minutes: rebase the flags on the board's current list (a host pin set meanwhile stays)
+        task.flags = fresh_flags(self.board, task, add=["resume"] if v.verdict == "request_changes" else ())
         self.board.update_task(task, ["status", "feedback", "review_rounds", "flags"])
         self.log(f"[{task.id}] review → {v.verdict}")
         return task

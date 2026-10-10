@@ -95,3 +95,16 @@ Fixed:
 - `doctor.smoke_agent` now runs `git init` on the smoke directory first (`ensure_git_repo`, idempotent).
 
 Not done: no live check from laptop-a, because `codex` is not installed on this Mac. Laptop-c must pull swarm-control and rerun `swarm doctor --smoke codex-c`. Laptop-b only needs to pull if its Codex CLI upgrades to a strict-mode version, but pulling is harmless. Tests: `tests/test_strict_schema.py` (10 tests).
+
+## ~19:25 UTC · T-361 lost its host pin when its question was answered (lost update)
+
+What happened (seen twice): the orchestrator set T-361's flags to `['resume', 'host:laptop-b']`, then answered its blocking question. serve's `relay` unblocked the task from a copy it had looked up by id (a data-source query, which can still return the row from before the pin) and wrote `["feedback", "flags", "status", "claim_nonce"]` back, so the flags became `['resume']` again. The next `rebalance` logged `[T-361] rebalanced antigravity-b -> claude-a` and moved it to laptop-a, which does not have the data.
+
+Fixed:
+- `NotionBoard.get_task(id, page_id=...)` now reads the page itself (`GET /pages/{id}`) and only falls back to the query when that page is gone, trashed or carries another id. Every caller that passes a page id therefore gets the row as it is now.
+- `relay` re-reads the task by page id before choosing a branch (merge question, cut, accept, unblock) and writes from that fresh copy. `retry_failed` does the same per Failed task and skips one that is no longer Failed, so it also routes on the current pin.
+- `fresh_flags(board, task, add=, drop=)` in `swarm/board/base.py` builds a flags write from the board's current list, never from the caller's older copy. It is used by serve's reap, by the merger (`_back`, `_merge_failed`, merged), by the reviewer's verdict write (a review takes minutes), and by the runner's requeue, busy-worktree, setup-failed and rate-limit paths. In the rate-limit path it runs before the reroute, so the reroute sees a pin.
+- Runner publish: the flags start from the fresh read at publish time, and `publish_outcome` keeps every non-transient flag set during verify.
+- `_still_routable` refuses a move when the task's pin changed since the listing, so reroute, rebalance and redistribute decide again on the next tick.
+
+Restart: serve must restart to pick up the relay/reap/retry/rebalance fixes and the Notion page read. The runners (claude-a, claude-a2, laptop-b) need a restart for the runner and reviewer parts. Restart them when idle, never with `pkill`. Tests: `tests/test_lost_update.py` (unblock and merge answers keep a pin set after serve's read, rebalance leaves a task pinned after the listing alone, `fresh_flags`), plus one Notion test where a lagging query hides the pin and the read by page id returns it.

@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import timedelta
 from typing import Callable
 
-from .board.base import Board
+from .board.base import Board, fresh_flags
 from .config import Config
 from .models import AUTH_LOST_NOTE, IMPORTANCES, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, usage_limited, utcnow
 from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
@@ -199,7 +199,7 @@ class Server:
             if alive and (listed or recent):
                 continue
             t.status, t.attempts, t.claim_nonce = Status.READY, t.attempts + 1, ""
-            t.flags = list(dict.fromkeys(t.flags + ["resume"]))
+            t.flags = fresh_flags(self.board, t, add=["resume"])
             t.last_error = "worker heartbeat stale; requeued" if not alive else "worker no longer running it; requeued"
             self.board.update_task(t, ["status", "attempts", "claim_nonce", "flags", "last_error"])
             self.log(f"[{t.id}] reaped from {t.agent}")
@@ -213,6 +213,13 @@ class Server:
         return n
 
     # ----- routing guards -----
+    def _fresh(self, t: Task) -> Task:
+        """The row as it is now, read by its page id; the caller's copy when the read fails."""
+        try:
+            return self.board.get_task(t.id, page_id=t.page_id or None) or t
+        except Exception:   # noqa: BLE001 - a failed read leaves the caller's copy
+            return t
+
     def _still_routable(self, t: Task) -> bool:
         """Re-read the row right before a routing write: the listing may be minutes old (a runner claimed it, the
         reviewer moved it). Ready/Backlog rows move freely; a Changes Requested row may change agent only while no
@@ -223,6 +230,8 @@ class Server:
             return False
         if fresh is None or fresh.agent != t.agent or fresh.status is not t.status:
             return False
+        if fresh.pinned_host != t.pinned_host:
+            return False      # pinned (or unpinned) since the listing: decide again next tick (T-361)
         if fresh.status in ROUTABLE:
             return True
         return fresh.status is Status.CHANGES_REQUESTED and not fresh.claim_nonce
@@ -362,6 +371,9 @@ class Server:
         n = 0
         ctx = context_from_board(self.board, self.cfg, self.now())
         for t in self.board.list_tasks(status=[Status.FAILED]):
+            t = self._fresh(t)      # route and write from the row as it is now, never the listing (T-361)
+            if t.status is not Status.FAILED:
+                continue
             kind, said = self.account_failure(t.last_error)
             if kind:
                 # the account failed, not the task: refund the attempt, cool the agent, resume elsewhere
@@ -416,6 +428,9 @@ class Server:
             if not q.answer.strip():
                 continue
             t = self.board.get_task(q.task_id) if q.task_id else None
+            # re-read by page id right before writing: a lookup by id can return the row as it was before the
+            # orchestrator's last change, and writing `flags` from it dropped T-361's host pin (Oct 10 2026)
+            t = self._fresh(t) if t else None
             if q.kind == "blocking" and t and t.status is Status.BLOCKED and any(f.startswith("merge_failed") for f in t.flags):
                 # a merge that gave up: the human either merged by hand or wants the merge retried
                 if "merged" in q.answer.lower():

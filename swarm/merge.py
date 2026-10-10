@@ -5,7 +5,7 @@ import re
 import time
 from typing import Callable
 
-from .board.base import Board
+from .board.base import Board, fresh_flags
 from .config import Config
 from .feedback import verify_feedback
 from .lightverify import choose_verify
@@ -87,7 +87,7 @@ class Merger:
     def _back(self, task: Task, feedback: str) -> bool:
         task.status = Status.CHANGES_REQUESTED
         task.feedback = feedback[:6000]      # Notion rich text is chunked; a 1900 cut lost the failing step
-        task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+        task.flags = fresh_flags(self.board, task, add=["resume"])
         self.board.update_task(task, ["status", "feedback", "flags"])
         self.log(f"[{task.id}] merge → changes requested")
         return False
@@ -95,7 +95,7 @@ class Merger:
     def _merge_failed(self, task: Task, error: str) -> bool:
         n = merge_failures(task) + 1
         task.last_error = error[:1900]
-        task.flags = list(dict.fromkeys(task.flags + [f"merge_failed_{n}"]))
+        task.flags = fresh_flags(self.board, task, add=[f"merge_failed_{n}"])
         if n >= MAX_MERGE_FAILURES:
             task.status = Status.BLOCKED
             self.board.update_task(task, ["last_error", "flags", "status"])
@@ -150,7 +150,7 @@ class Merger:
         if not r.ok:
             return self._merge_failed(task, "gh pr merge failed: " + (r.err.strip() or r.out.strip()))
         task.status, task.claim_nonce = Status.DONE, ""
-        task.flags = [f for f in task.flags if not f.startswith("merge_failed")]
+        task.flags = fresh_flags(self.board, task, drop=lambda f: f.startswith("merge_failed"))
         self.board.update_task(task, ["status", "claim_nonce", "flags"])
         self.board.append_task_report(task, "Merged", f"Squash-merged into {self.cfg.main_branch} at "
                                       f"{utcnow().isoformat(timespec='minutes')}. PR: {task.pr_url or '(none)'}")

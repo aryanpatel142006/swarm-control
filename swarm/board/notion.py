@@ -490,7 +490,18 @@ class NotionBoard:
     def get_task(self, task_id: str, *, page_id: str | None = None, agent: str | None = None) -> Task | None:
         """One row per id. When several pages share the id (the allocation race): the caller's own page
         (`page_id`) wins; otherwise Cut pages are ignored while a live one exists, then the page assigned to
-        `agent`, then the oldest. Never an arbitrary pick, and a warning names every page."""
+        `agent`, then the oldest. Never an arbitrary pick, and a warning names every page.
+        With `page_id` the page itself is read first: a data-source query can still return the row as it was a few
+        seconds ago, and a write built from that copy undid the orchestrator's host pin on T-361 (Oct 10 2026)."""
+        if page_id:
+            try:
+                page = self.c.get_page(page_id)
+            except NotionError:
+                page = None
+            if page and not page.get("archived") and not page.get("in_trash") and "properties" in page:
+                task = np.page_to_task(page)
+                if task.id == task_id:
+                    return task
         rows = self.c.query(self.ids.tasks_ds, filter={"property": "ID", "rich_text": {"equals": task_id}})
         if len(rows) <= 1:
             return np.page_to_task(rows[0]) if rows else None

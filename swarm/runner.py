@@ -20,7 +20,7 @@ from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, 
                        placeholder_feedback, placeholder_hits, scope_lint_feedback, scope_lint_lines,
                        scratch_files, out_of_scope_edits, reconcile_sync_feedback, stray_feedback, stray_files,
                        verify_feedback)
-from .board.base import Board, claim_task
+from .board.base import Board, claim_task, fresh_flags
 from .config import Config, config_signature
 from .models import AUTH_LOST_NOTE, QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
@@ -545,7 +545,7 @@ class Runner:
     # ----- recovery -----
     def _requeue(self, task: Task, why: str, *, prev_status: Status | None = None) -> None:
         task.status, task.claim_nonce = requeue_status(prev_status), ""
-        task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+        task.flags = fresh_flags(self.board, task, add=["resume"])
         task.last_error = why[:1900]
         self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error"])
 
@@ -1039,7 +1039,7 @@ class Runner:
         if blocker:
             self._cli_busy[task.id] = self.now()
             task.status, task.claim_nonce = requeue_status(prev_status), ""
-            task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+            task.flags = fresh_flags(self.board, task, add=["resume"])
             task.last_error = (f"a worker CLI from an earlier run (pid {blocker}) is still running in this task's "
                                "worktree; not starting a second one")[:1900]
             self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error"])
@@ -1086,7 +1086,7 @@ class Runner:
             setup = self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
             if setup is not None and not setup.ok:   # a broken environment is not the model's job to debug
                 task.last_error = f"{self.cfg.verify.setup_worktree} failed: {setup.tail(600)}"[:1900]
-                task.flags = list(dict.fromkeys(task.flags + ["env"]))
+                task.flags = fresh_flags(self.board, task, add=["env"])
                 task.status = Status.FAILED
                 self.board.update_task(task, PUBLISH_FIELDS)
                 self.log(f"[{task.id}] setup_worktree failed: {setup.tail(200)!r}")
@@ -1576,12 +1576,12 @@ class Runner:
         limited = task.agent
         with self._hb_lock:      # a heartbeat that read the row before this write would drop the cooldown
             row = self._write_cooldown(limited, result, now)
+        task.flags = fresh_flags(self.board, task, add=["resume"])   # first: the reroute must see a host pin
         self._reroute_after_limit(task, limited, now)
         # a merge-conflict or review round goes back as Changes Requested (feedback and PR intact), not Ready.
         # Attempts stay as they were and the next run resumes on the branch: codex-b's used-up plan and lost login
         # (Oct 10 2026) failed T-297..T-311 one per minute and spent their attempt budget on the account's problem.
         task.status, task.claim_nonce = requeue_status(prev_status), ""
-        task.flags = list(dict.fromkeys(task.flags + ["resume"]))
         kind = limit_kind(result)
         task.last_error = f"{kind}: {result.error[:300]}"
         self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error", "agent", "model", "effort"])
@@ -1626,7 +1626,7 @@ class Runner:
 
         changed = self.ws.changed_files(wt)
         report = parse_report(result.structured_output, wt, changed_files=changed, error=result.error)
-        flags = [f for f in task.flags if f not in TRANSIENT_FLAGS]
+        flags = [f for f in fresh.flags if f not in TRANSIENT_FLAGS]   # the board's list: a pin set mid-run stays
         if report.synthesized:
             flags.append("report_missing")
         if any(not in_scope(f, task.scope) for f in changed if not f.startswith(HARNESS_PATHS)):
@@ -1769,6 +1769,8 @@ class Runner:
             if fresh.claim_nonce and task.claim_nonce and fresh.claim_nonce != task.claim_nonce:
                 self.log(f"[{task.id}] result discarded: claim now belongs to another run")
                 return False
+            # verify ran for minutes since the run read its flags: keep what was set meanwhile (a host pin, T-361)
+            task.flags = task.flags + [f for f in fresh.flags if f not in task.flags and f not in TRANSIENT_FLAGS]
         task.status = status
         self.board.update_task(task, PUBLISH_FIELDS)
         return True

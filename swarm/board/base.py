@@ -44,3 +44,17 @@ def claim_task(board: Board, task: Task, agent: str, *, sleep: Callable[[float],
     if fresh is None or fresh.claim_nonce != nonce or fresh.status is not Status.RUNNING:
         return False
     return True
+
+
+def fresh_flags(board: Board, task: Task, *, add: Iterable[str] = (),
+                drop: Callable[[str], bool] | None = None) -> list[str]:
+    """The flags to write: the board's current list, re-read by page id, minus `drop`, plus `add`. Never a list
+    built from an older copy of the task: that is a lost update. The orchestrator pinned T-361 to laptop-b
+    (`host:laptop-b`) and then answered its question; serve wrote back the flags it had read before the pin, and
+    rebalance moved the task to the wrong host (Oct 10 2026). Falls back to the caller's copy when the read fails."""
+    try:
+        fresh = board.get_task(task.id, page_id=task.page_id or None)
+    except Exception:  # noqa: BLE001 - a failed read must not block the write it guards
+        fresh = None
+    base = fresh.flags if fresh is not None else task.flags
+    return list(dict.fromkeys([f for f in base if not (drop and drop(f))] + list(add)))
