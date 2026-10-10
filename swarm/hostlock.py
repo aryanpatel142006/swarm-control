@@ -39,6 +39,12 @@ taken) and says so: `exclusive hold by <holder> exceeded <N> min; proceeding - t
 The same line goes to `waits/<holder task>/perturbed.log`, which the runner appends to the measurement task's
 harness notes. The live-test hold is not affected: it is waited out before the clock starts and has no cap.
 
+An `--exclusive` request whose `--wait` runs out exits 75 without running the command and names the holders: a
+measurement next to another measurement measures nothing (Oct 10: T-371's batch ran unlocked after 900 s). A shared
+(non-exclusive) verify still runs without a slot after its wait. `swarm-lock --stop` stops the calling task's own
+swarm-lock jobs; workers use it (or `kill <pid>`) instead of `pkill -f`, which also matched other worktrees'
+identically named `.swarm-run/batch.sh` measurements (see swarm/killguard.py).
+
 CLI: `python -m swarm.hostlock [--exclusive] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's);
 `swarm-lock --snippet` prints the re-exec lines a project's verify script needs to take part (Q-224).
 """
@@ -66,6 +72,7 @@ PERTURBED_LOG = "perturbed.log"        # in waits/<holder task>/: the cap lines,
 CMD_ENV = "SWARM_VERIFY_LOCK"          # absolute path of the `swarm-lock` wrapper script
 DEFAULT_SLOTS = 2
 DEFAULT_WAIT_S = 1800                  # after this a verify runs without a slot (logged) rather than never
+EXCL_TIMEOUT_RC = 75                   # EX_TEMPFAIL: an --exclusive wait ran out; the command was not run
 HOLD_FILE = "HOLD"
 HOLD_BYPASS_ENV = "SWARM_HOLD_BYPASS"
 DEFAULT_HOLD_MINUTES = 60
@@ -472,7 +479,10 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
         yield True
     except TimeoutError as e:
         capped = isinstance(e, _ExclusiveCapExceeded)
-        if log and not capped:
+        if log and not capped and exclusive:
+            busy = [h for h in holders(directory, slots) if h.get("pid") != os.getpid()]
+            log(f"{label}: no exclusive lock after {int(wait_s)} s; the machine is still held by {describe(busy)}")
+        elif log and not capped:
             log(f"{label}: no verify slot after {int(wait_s)} s; running without one")
         for fd in fds:
             os.close(fd)
@@ -615,6 +625,11 @@ def worker_lock_env(project: str, slots: int, exclusive_cap_min: float | None = 
         wrapper = write_wrapper(directory.parent / "bin")
     except OSError:
         return {}
+    try:   # pkill/killall that only signal the task's own processes (Oct 10: pattern kills hit other measurements)
+        from .killguard import write_guards
+        write_guards(wrapper.parent)
+    except OSError:
+        pass
     env = {DIR_ENV: str(directory), SLOTS_ENV: str(slots), CMD_ENV: str(wrapper),
            "PATH": os.pathsep.join([str(wrapper.parent), os.environ.get("PATH", "")])}
     if exclusive_cap_min is not None:
@@ -636,12 +651,27 @@ def main(argv: list[str] | None = None) -> int:
                          "average is below this before running")
     ap.add_argument("--ignore-hold", action="store_true",
                     help="do not wait for a live-test hold (`swarm hold`); SWARM_HOLD_BYPASS=1 does the same")
+    ap.add_argument("--stop", action="store_true",
+                    help="stop this task's own swarm-lock jobs (SWARM_TASK_ID) and their command trees, then exit; "
+                         "use it instead of pkill -f")
     ap.add_argument("--snippet", action="store_true",
                     help="print the lines that make a project's verify script take a slot, and exit")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
     if a.snippet:
         print(SNIPPET, end="")
+        return 0
+    if a.stop:
+        task = os.environ.get("SWARM_TASK_ID", "")
+        if not task or not a.dir:
+            print("[swarm-lock] --stop works under a swarm task only (SWARM_TASK_ID and the lock dir are unset)",
+                  file=sys.stderr)
+            return 2
+        lines = stop_task_lock_jobs(a.dir, task)
+        for line in lines:
+            print(f"[swarm-lock] stopped {line}", file=sys.stderr)
+        if not lines:
+            print(f"[swarm-lock] no swarm-lock job of {task} is running", file=sys.stderr)
         return 0
     if a.max_load is not None and not a.exclusive:
         ap.error("--max-load needs --exclusive (it is for measurements)")
@@ -686,6 +716,12 @@ def main(argv: list[str] | None = None) -> int:
                          record=record, honor_hold=not a.ignore_hold, max_load=a.max_load,
                          exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes) as held:
             waited = time.monotonic() - started
+            if a.exclusive and not held:
+                # never run a measurement next to other measurements: its numbers would be invalid (Oct 10: T-371's
+                # exclusive batch ran unlocked after its 900 s wait, next to T-368's, and was thrown away)
+                log(f"the command was not run: --exclusive never runs without the machine (waited {waited:.0f} s). "
+                    "Run it again later, or with a longer --wait")
+                return EXCL_TIMEOUT_RC
             if waited >= 5:
                 log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"
                     + (" (the runner adds this back to the run's time limit)" if record else ""))

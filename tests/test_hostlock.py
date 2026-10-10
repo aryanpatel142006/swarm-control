@@ -599,3 +599,77 @@ def test_run_script_passes_quick_wait_to_the_slot(git_repo):
     ws.run_script(git_repo, "scripts/q.sh", 30)
     ws.run_script(git_repo, "scripts/q.sh", 30, quick_wait_s=60)
     assert seen == [None, 60]
+
+
+# ---- Oct 10: an --exclusive wait that runs out never runs the measurement unlocked; --stop for the task's own jobs ----
+def test_exclusive_wait_timeout_fails_without_running_the_command(tmp_path):
+    """T-371's exclusive batch ran unlocked after its 900 s wait, next to T-368's measurement, and was thrown away."""
+    d = tmp_path / "locks"
+    marker = tmp_path / "ran"
+    env = {**os.environ, "SWARM_TASK_ID": "T-371"}
+    env.pop(HELD_ENV, None)
+    root = str(Path(__file__).resolve().parent.parent)
+    with verify_slot(d, 1, exclusive=True, label="measurement: other batch"):     # another task's measurement
+        r = subprocess.run([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "1", "--wait", "0.5",
+                            "--exclusive", "--", "touch", str(marker)], cwd=root, env=env, capture_output=True,
+                           text=True, timeout=30)
+    assert r.returncode == hostlock.EXCL_TIMEOUT_RC == 75, r.stderr
+    assert not marker.exists()
+    assert "not run" in r.stderr and "still held by" in r.stderr and "other batch" in r.stderr
+    assert "running without one" not in r.stderr
+    assert not list(d.glob(hostlock.PENDING_PREFIX + "*"))
+    # a shared verify keeps the old behaviour: after its wait it runs without a slot
+    with verify_slot(d, 1, exclusive=True):
+        r = subprocess.run([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "1", "--wait", "0.5",
+                            "--exclusive-max-minutes", "0", "--", "touch", str(marker)], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and marker.exists(), r.stderr
+
+
+def test_exclusive_gets_the_machine_when_it_frees_within_the_wait(tmp_path):
+    d = tmp_path / "locks"
+    marker = tmp_path / "ran"
+    env = {**os.environ}
+    env.pop(HELD_ENV, None)
+    root = str(Path(__file__).resolve().parent.parent)
+    with verify_slot(d, 1):
+        p = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "1", "--wait", "30",
+                              "--exclusive", "--", "touch", str(marker)], cwd=root, env=env)
+        time.sleep(1.0)
+        assert not marker.exists()
+    assert p.wait(timeout=30) == 0 and marker.exists()
+
+
+def test_stop_ends_only_the_calling_tasks_lock_jobs(tmp_path):
+    d = tmp_path / "locks"
+    root = str(Path(__file__).resolve().parent.parent)
+    procs = {}
+    for task in ("T-A", "T-B"):
+        env = {**os.environ, "SWARM_TASK_ID": task}
+        env.pop(HELD_ENV, None)
+        procs[task] = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "2",
+                                        "--", "sleep", "60"], cwd=root, env=env, stderr=subprocess.DEVNULL)
+    try:
+        assert _wait_for(lambda: len(hostlock.holders(d, 2)) == 2)
+        env = {**os.environ, "SWARM_TASK_ID": "T-A"}
+        r = subprocess.run([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--stop"], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and "stopped" in r.stderr, r.stderr
+        assert procs["T-A"].wait(timeout=20) is not None
+        assert procs["T-B"].poll() is None                 # the other task's job keeps running
+        r = subprocess.run([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--stop"], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and "no swarm-lock job of T-A" in r.stderr
+    finally:
+        for p in procs.values():
+            with contextlib.suppress(Exception):
+                hostlock.stop_tree(p.pid, grace_s=2)
+                p.wait(timeout=10)
+
+
+def test_worker_lock_env_puts_the_kill_guards_on_path(tmp_path):
+    env = worker_lock_env("demo", 2)
+    bin_dir = Path(env[hostlock.CMD_ENV]).parent
+    for name in ("pkill", "killall"):
+        assert os.access(bin_dir / name, os.X_OK)
+        assert "swarm/killguard.py" in (bin_dir / name).read_text()
