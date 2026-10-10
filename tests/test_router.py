@@ -136,8 +136,11 @@ def test_host_pin_keeps_a_task_on_that_hosts_agents(cfg):
     assert t.pinned_host == "host-b"
     assert route(t, cfg, ctx())[0] == "fake-b"          # claude-a (host-a) is the frontend favourite
     assert route(Task(id="T", title="", type="frontend", importance="normal"), cfg, ctx())[0] == "claude-a"
-    # a pin to a host with no configured agent falls back to normal routing instead of failing
-    assert route(Task(id="T", title="", type="frontend", flags=["host:nowhere"]), cfg, ctx())[0] == "claude-a"
+    # a pin to a host with no configured agent keeps the task's owner (T-217, Oct 10: an owner unknown to this
+    # laptop's config must not hand a laptop-b task to a laptop-a agent); it waits for that host
+    assert route(Task(id="T", title="", type="frontend", flags=["host:nowhere"], agent="codex-sol-b"), cfg,
+                 ctx())[0] == "codex-sol-b"
+    assert route(Task(id="T", title="", type="frontend", flags=["host:nowhere"]), cfg, ctx())[0] is None
 
 
 def test_an_exhausted_plan_gets_nothing_not_even_critical_work(cfg):

@@ -652,3 +652,30 @@ def test_reap_gives_heartbeats_a_fresh_window_after_this_machine_slept(cfg, git_
     step = timedelta(minutes=cfg.heartbeat_stale_minutes + 1)
     clock["now"] += step; mono["t"] += step.total_seconds()
     assert srv.reap() == 1 and board.get_task(t1.id).status is Status.READY
+
+
+def test_pinned_task_never_leaves_its_host_when_its_agents_are_offline_or_unknown(cfg, git_repo, tmp_path):
+    """T-216/T-217 (Oct 10): laptop-b tasks went to laptop-a agents while laptop-b was offline."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    for name in ("claude-a", "codex-a"):
+        board.upsert_agent(AgentRow(name=name, status="idle", last_heartbeat=now))
+    board.upsert_agent(AgentRow(name="fake-b", status="offline", last_heartbeat=now - timedelta(hours=2)))
+    unknown = board.create_task(Task(id="", title="u", status=Status.READY, agent="codex-sol-b", type="frontend",
+                                     flags=["host:host-b"]))
+    offline = board.create_task(Task(id="", title="o", status=Status.READY, agent="fake-b", type="frontend",
+                                     flags=["host:host-b"]))
+    gone = board.create_task(Task(id="", title="g", status=Status.READY, agent="codex-sol-b", type="frontend",
+                                  flags=["host:host-c"]))     # a host this config has no agent for
+    backlog = board.create_task(Task(id="", title="b", status=Status.BACKLOG, agent="fake-b", type="frontend",
+                                     flags=["host:host-b"]))
+    for _ in range(2):
+        srv.reroute()
+        srv.rebalance()
+        srv.redistribute_on_return()
+    srv.promote()
+    hosts = {n: a.host for n, a in cfg.agents.items()}
+    for t in (unknown, offline, backlog):
+        assert hosts.get(board.get_task(t.id).agent, "host-b") == "host-b", board.get_task(t.id).agent
+    assert board.get_task(gone.id).agent == "codex-sol-b"
+    assert board.get_task(backlog.id).status is Status.READY

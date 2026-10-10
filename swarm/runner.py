@@ -538,7 +538,10 @@ class Runner:
     # ----- polling -----
     def pending_tasks(self) -> list[Task]:
         tasks = self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED], agent=list(self.agents))
-        return [t for t in tasks if t.agent in self.agents]
+        # a task pinned to another host is never claimed here, however it was routed to this runner's agent
+        # (T-216/T-217, Oct 10: laptop-b tasks ran on laptop-a while laptop-b was offline)
+        return [t for t in tasks if t.agent in self.agents
+                and (not t.pinned_host or self.agents[t.agent].host == t.pinned_host)]
 
     def tick(self) -> int:
         self._last_tick = self.now()

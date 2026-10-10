@@ -2018,3 +2018,13 @@ def test_runner_strips_ai_attribution_from_worker_commits_before_push(cfg, git_r
     r.run_task(t)
     log = _git(git_repo, "log", "--format=%B", f"origin/main..origin/task/{t.id}")
     assert "T: a" in log and "anthropic" not in log.lower()
+
+
+def test_runner_never_claims_a_task_pinned_to_another_host(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter, host="host-a")
+    t = ready_task(board, agent="claude-a", flags=["host:host-b"])     # mis-routed onto a host-a agent
+    ok = ready_task(board, agent="claude-a", flags=["host:host-a"])
+    assert [x.id for x in r.pending_tasks()] == [ok.id]
+    r.tick()
+    assert board.get_task(t.id).status is Status.READY and not adapter.specs[1:]

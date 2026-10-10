@@ -234,6 +234,8 @@ class Server:
         a = self.cfg.agents.get(agent)
         if a is None:
             return False
+        if t.pinned_host and a.host != t.pinned_host:
+            return False      # a pinned task waits for its host's agents, whatever happened to its owner (T-216)
         row = ctx.rows.get(agent)
         if is_available(a, row, importance=t.importance, now=ctx.now):
             return True
