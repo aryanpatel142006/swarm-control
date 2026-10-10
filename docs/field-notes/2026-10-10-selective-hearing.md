@@ -67,3 +67,6 @@ Fixed:
 - `swarm doctor --dupes` lists every id held by more than one page (page id, status, agent or kind, title). `swarm status` adds a RISK line naming the task duplicates first and then up to 5 question ids.
 
 Limits: a create still races when Notion's filtered query takes longer than about 3 s to show the other page. Status and doctor catch what slips through. Laptop-b only self-corrects after it pulls swarm-control. Serve and the runners need a restart (when idle) before the get_task preference applies to them.
+
+## Orchestrator note 04:40 UTC: unconfigured agents bundle tasks and edit the runtime
+muse-b's branches task/T-310 and task/T-311 each carried commits of ~15 other tasks and an edit to hearing/tse/enrolled.py (the live demo path), after an explicit "do not edit hearing/" relay. Neither is a configured agent, so the runner's scope lint never ran on them. Idea: serve's reviewer should reject any branch whose diff touches paths outside the task's Scope (already a lint for configured workers), and treat commits whose subject names another task id as a reason to request a rebuild.
