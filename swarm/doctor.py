@@ -164,10 +164,15 @@ def probe_models(cfg: Config, agent_name: str, tmp_dir: Path, *, board=None, smo
     ok = [c.name.rsplit(":", 1)[-1] for c in checks if c.ok]
     bad = [c.name.rsplit(":", 1)[-1] for c in checks if not c.ok]
     if board is not None:
-        from .models import AgentRow
+        from .models import AgentRow, auth_lost
         row = board.get_agent(agent_name) or AgentRow(name=agent_name)
+        lost = auth_lost(row, utcnow())
+        if lost and not ok:
+            return checks      # still logged out: keep the auth-lost note and cooldown (status shows the RISK)
         row.note = (f"models ok: {', '.join(ok) or '-'}" + (f" · failed: {', '.join(bad)}" if bad else "")
                     + f" · probed {utcnow().strftime('%b %d %H:%M')} UTC")[:1900]
+        if lost:               # a successful smoke check ends a lost login's cooldown (the human logged in again)
+            row.cooldown_until, row.status = None, "idle"
         board.upsert_agent(row)
     return checks
 

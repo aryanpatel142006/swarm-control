@@ -755,7 +755,7 @@ def test_cut_off_run_with_a_draft_report_resumes_and_keeps_the_draft(cfg, git_re
     assert "DRAFT" in board.reports[t.id][0][1]
 
 
-def test_usage_limit_cools_down_until_the_reset_or_three_hours(cfg, git_repo, tmp_path):
+def test_usage_limit_cools_down_until_the_reset_or_sixty_minutes(cfg, git_repo, tmp_path):
     """codex-b's exhausted plan (Oct 6 2026) cooled down 15 minutes and came back to fail two more tasks."""
     board = InMemoryBoard()
     board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))
@@ -766,7 +766,7 @@ def test_usage_limit_cools_down_until_the_reset_or_three_hours(cfg, git_repo, tm
                                  error="You've hit your usage limit. Upgrade to Pro"))
     row = board.get_agent("codex-a")
     assert row.note.startswith("usage limit until") and "no reset time given" in row.note
-    assert row.cooldown_until > utcnow() + timedelta(hours=2, minutes=55)
+    assert utcnow() + timedelta(minutes=55) < row.cooldown_until < utcnow() + timedelta(minutes=65)
     assert board.get_task(t.id).last_error.startswith("usage limit:") and board.get_task(t.id).agent == "claude-a"
     reset = utcnow() + timedelta(hours=5)
     t2 = board.create_task(Task(id="", title="y", status=Status.RUNNING, agent="codex-a", type="backend", claim_nonce="m"))
@@ -2070,3 +2070,46 @@ def test_reaped_attempt_keeps_uncommitted_work_for_the_next_attempt(cfg, git_rep
     # restored, so it is not offered again; the commit stays reachable under the applied namespace
     assert not _git(git_repo, "for-each-ref", f"refs/swarm/wip/{t.id}/").strip()
     assert _git(git_repo, "for-each-ref", f"refs/swarm/wip-applied/{t.id}/").strip()
+
+
+class _AccountAdapter(FakeAdapter):
+    """A CLI that fails on the account: a used-up plan or a lost login (codex-b, Oct 10 2026)."""
+
+    def __init__(self, **flags):
+        super().__init__(files={}, ok=False)
+        self.flags = flags
+
+    def run(self, spec):
+        r = super().run(spec)
+        for k, v in self.flags.items():
+            setattr(r, k, v)
+        return r
+
+
+def test_auth_lost_requeues_without_an_attempt_and_takes_the_agent_out(cfg, git_repo, tmp_path):
+    adapter = _AccountAdapter(auth_lost=True, error="unexpected status 401 Unauthorized: Missing bearer")
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    out = r.run_task(t)
+    stored = board.get_task(t.id)
+    assert out.status is Status.READY and stored.attempts == 0 and "resume" in stored.flags
+    assert stored.last_error.startswith("auth lost: unexpected status 401")
+    row = board.get_agent("codex-a")
+    assert row.status == "cooldown" and row.note.startswith("auth lost until") and "log in again" in row.note
+    assert utcnow() + timedelta(minutes=55) < row.cooldown_until < utcnow() + timedelta(minutes=65)
+    from swarm.models import auth_lost, usage_limited
+    assert auth_lost(row, utcnow()) and usage_limited(row, utcnow())
+    r.heartbeat(force=True)
+    assert board.get_agent("codex-a").note.startswith("auth lost")
+
+
+def test_usage_limit_run_requeues_with_resume_and_the_parsed_reset(cfg, git_repo, tmp_path):
+    reset = utcnow() + timedelta(hours=2, minutes=27)
+    adapter = _AccountAdapter(rate_limited=True, usage_limited=True, reset_at=reset,
+                              error="You’ve hit your usage limit. ... try again at 3:12 AM.")
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, attempts=1)
+    assert r.run_task(t).status is Status.READY
+    stored = board.get_task(t.id)
+    assert stored.attempts == 1 and "resume" in stored.flags and stored.last_error.startswith("usage limit:")
+    assert board.get_agent("codex-a").cooldown_until == reset

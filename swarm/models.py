@@ -114,11 +114,21 @@ class Question:
 
 
 USAGE_LIMIT_NOTE = "usage limit"   # AgentRow.note prefix for an exhausted plan (router, status and runner agree on it)
+# AgentRow.note prefix for a CLI whose login is gone ("401 Unauthorized: Missing bearer or basic authentication",
+# codex-b Oct 10 2026): every run fails in a minute until a human logs in again on that laptop.
+AUTH_LOST_NOTE = "auth lost"
 
 
 def usage_limited(row: "AgentRow | None", now: datetime) -> bool:
-    """The agent's plan is used up until cooldown_until: nothing is routed to it, critical work included."""
-    return bool(row and row.cooldown_until and row.cooldown_until > now and row.note.startswith(USAGE_LIMIT_NOTE))
+    """The agent cannot run anything until cooldown_until: its plan is used up, or its login is lost. Nothing is
+    routed to it, critical work included."""
+    return bool(row and row.cooldown_until and row.cooldown_until > now
+                and row.note.startswith((USAGE_LIMIT_NOTE, AUTH_LOST_NOTE)))
+
+
+def auth_lost(row: "AgentRow | None", now: datetime) -> bool:
+    """The agent's CLI lost its login (until a successful smoke check or cooldown_until): a human must re-login."""
+    return bool(row and row.cooldown_until and row.cooldown_until > now and row.note.startswith(AUTH_LOST_NOTE))
 
 
 @dataclass
@@ -159,6 +169,7 @@ class RunResult:
     session_id: str | None = None
     rate_limited: bool = False
     usage_limited: bool = False   # the plan is used up (hours, not minutes): "You've hit your usage limit"
+    auth_lost: bool = False       # the CLI's login is gone ("401 Unauthorized", "Missing bearer"): a human re-logs in
     reset_at: datetime | None = None
     timed_out: bool = False
     error: str = ""

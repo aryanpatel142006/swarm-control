@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..models import RunResult, Usage
 from ..workspace import run_cmd
-from .base import RATE_LIMIT_RE, Adapter, RunSpec, is_usage_limit, parse_reset_at
+from .base import RATE_LIMIT_RE, Adapter, RunSpec, is_auth_lost, is_usage_limit, parse_reset_at
 
 
 def registered_mcp_servers(run=run_cmd) -> set[str]:
@@ -70,6 +70,7 @@ class CodexAdapter(Adapter):
 
     def parse_output(self, code: int, out: str, err: str) -> RunResult:
         session, last_text, failed, error = None, None, False, ""
+        errors: list[str] = []   # every error the CLI reported: a usage limit is often followed by a retry's 401
         usage = Usage()
         for line in out.splitlines():
             line = line.strip()
@@ -84,13 +85,17 @@ class CodexAdapter(Adapter):
                 session = ev.get("thread_id")
             elif t == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
                 last_text = ev["item"].get("text")
+            elif t.startswith("item.") and (ev.get("item") or {}).get("type") == "error":
+                errors.append(str(ev["item"].get("message") or ev["item"].get("text") or ""))
             elif t == "turn.completed":
                 u = ev.get("usage") or {}
                 usage.input_tokens += int(u.get("input_tokens", 0) or 0)
                 usage.output_tokens += int(u.get("output_tokens", 0) or 0)
             elif t in ("turn.failed", "error"):
                 failed = True
-                error = str((ev.get("error") or {}).get("message") or ev.get("message") or t)
+                e = ev.get("error")
+                error = str((e.get("message") if isinstance(e, dict) else e) or ev.get("message") or t)
+                errors.append(error)
         structured = None
         if last_text and last_text.strip().startswith("{"):
             try:
@@ -100,8 +105,12 @@ class CodexAdapter(Adapter):
         ok = code == 0 and not failed
         if not ok and not error:
             error = f"exit {code}"
-        rate_limited = (not ok) and bool(RATE_LIMIT_RE.search(error + "\n" + err))
+        said = "\n".join(dict.fromkeys(errors + [error, err[-4000:]]))
+        rate_limited = (not ok) and bool(RATE_LIMIT_RE.search(said))
+        auth = (not ok) and not rate_limited and is_auth_lost(said)
+        if rate_limited and not RATE_LIMIT_RE.search(error):
+            error = next((e for e in errors if RATE_LIMIT_RE.search(e)), error)   # name the limit, not the 401 after it
         return RunResult(ok=ok, exit_code=code, stdout=out, stderr=err, structured_output=structured,
                          usage=usage, session_id=session, rate_limited=rate_limited,
-                         usage_limited=rate_limited and is_usage_limit(error + "\n" + err),
-                         reset_at=parse_reset_at(error + "\n" + err) if rate_limited else None, error=error)
+                         usage_limited=rate_limited and is_usage_limit(said),
+                         reset_at=parse_reset_at(said) if rate_limited else None, auth_lost=auth, error=error)

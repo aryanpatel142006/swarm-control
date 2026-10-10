@@ -24,3 +24,19 @@ def test_probe_models_tries_each_distinct_model_and_records_on_the_board(cfg, tm
     assert [c.ok for c in checks] == [m != "haiku" for m in distinct]
     row = board.get_agent("claude-a")
     assert row is not None and "models ok:" in row.note and "failed: haiku" in row.note
+
+
+def test_a_good_smoke_check_lifts_a_lost_login_and_a_bad_one_keeps_it(cfg, tmp_path):
+    from datetime import timedelta
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import AgentRow, auth_lost, utcnow
+    board = InMemoryBoard()
+    now = utcnow()
+    board.upsert_agent(AgentRow(name="claude-a", status="cooldown", cooldown_until=now + timedelta(minutes=50),
+                                note="auth lost until 05:45 UTC (hit at 04:45)"))
+    probe_models(cfg, "claude-a", tmp_path, board=board, smoke=lambda c, n, t, model=None: Check(n, False, "401"))
+    assert auth_lost(board.get_agent("claude-a"), utcnow())
+    probe_models(cfg, "claude-a", tmp_path, board=board, smoke=lambda c, n, t, model=None: Check(n, True, "ok"))
+    row = board.get_agent("claude-a")
+    assert not auth_lost(row, utcnow()) and row.cooldown_until is None and row.status == "idle"
+    assert row.note.startswith("models ok:")

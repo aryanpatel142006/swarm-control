@@ -5,7 +5,7 @@ from datetime import datetime
 
 from .config import Config
 from .failover import reviewer_status_line
-from .models import AgentRow, Question, Status, Task, usage_limited
+from .models import AgentRow, Question, Status, Task, auth_lost, usage_limited
 
 EST_HOURS_PER_TASK = 0.6
 
@@ -47,6 +47,8 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         exhausted = a.status != "offline" and usage_limited(a, now)
         if never_seen:
             bit = f"{a.name} no heartbeat yet"
+        elif exhausted and auth_lost(a, now):   # a lost login: a human must log in again on that laptop
+            bit = f"{a.name} auth-lost until {a.cooldown_until.strftime('%H:%M')}"
         elif exhausted:   # a used-up plan, not an idle agent: nothing will be routed to it until then
             bit = f"{a.name} usage-limit until {a.cooldown_until.strftime('%H:%M')}"
         else:
@@ -85,6 +87,11 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     dupes = dupe_risk(tasks, questions)
     if dupes:
         risks.append(dupes)
+    for a in sorted(agents, key=lambda x: x.name):   # codex-b, Oct 10 2026: "401 Unauthorized: Missing bearer"
+        if a.name != "serve" and a.status != "offline" and auth_lost(a, now):
+            risks.append(f"{a.name}: login lost; the human must re-login (on {a.host or 'its laptop'}, then "
+                         f"`swarm doctor --models {a.name}` lifts it; otherwise it retries at "
+                         f"{a.cooldown_until.strftime('%H:%M')} UTC)")
     for ms in sorted(by_ms):
         group = by_ms[ms]
         done = sum(1 for t in group if t.status is Status.DONE)

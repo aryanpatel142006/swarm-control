@@ -26,6 +26,14 @@ RATE_LIMIT_RE = re.compile(
 USAGE_LIMIT_RE = re.compile(
     r"usage limit|hit your .{0,40}limit|quota exceeded|plan limit|(?:hour|daily|weekly|session) limit reached|"
     r"upgrade to (?:pro|plus|max)|purchase more credits|credit balance is too low", re.I)
+# The CLI's login is gone (Codex on laptop-b, Oct 10 2026: "unexpected status 401 Unauthorized: Missing bearer or
+# basic authentication in header"): every run fails within a minute until a human logs in again. Only matched in a
+# failed run's error and stderr, never in the worker's own output.
+AUTH_LOST_RE = re.compile(
+    r"\b401\b[^\n]{0,40}unauthori[sz]ed|unauthori[sz]ed[^\n]{0,40}\b401\b|missing bearer|"
+    r"missing (?:bearer or basic )?authentication|not logged in|please (?:run )?[`'\"]?(?:codex |claude )?/?login\b|"
+    r"invalid[ _-]api[ _-]key|authentication_error|(?:oauth|access|refresh) token (?:has )?(?:expired|been revoked)|"
+    r"(?:log|sign) ?in again", re.I)
 _RESET_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))")
 _EPOCH_RE = re.compile(r"limit reached\|(\d{10})\b")
 _CLOCK_RE = re.compile(
@@ -79,6 +87,18 @@ def parse_reset_at(text: str, now: datetime | None = None) -> datetime | None:
 
 def is_usage_limit(text: str) -> bool:
     return bool(USAGE_LIMIT_RE.search(text or ""))
+
+
+def is_auth_lost(text: str) -> bool:
+    return bool(AUTH_LOST_RE.search(text or ""))
+
+
+def matching_line(text: str, rx: re.Pattern) -> str:
+    """The first line of `text` that `rx` matches (stripped), or ""."""
+    for line in (text or "").splitlines():
+        if rx.search(line):
+            return line.strip()
+    return ""
 
 
 def last_json_object(text: str) -> dict | None:
@@ -234,4 +254,12 @@ class Adapter:
             result.usage_limited = result.usage_limited or is_usage_limit(text)
             if result.reset_at is None:
                 result.reset_at = parse_reset_at(text)
+            result.auth_lost = False      # a limit names its reset; the login question waits for the next run
+        elif not result.ok and not result.auth_lost and is_auth_lost(result.error + "\n" + err[-4000:]):
+            result.auth_lost = True
+        if (result.rate_limited or result.auth_lost) and re.fullmatch(r"exit -?\d+", result.error.strip() or "exit 0"):
+            # the CLI said why only on stderr: the board's last_error should say it too, not "exit 1"
+            line = matching_line(err[-4000:], RATE_LIMIT_RE if result.rate_limited else AUTH_LOST_RE)
+            if line:
+                result.error = line[:500]
         return result

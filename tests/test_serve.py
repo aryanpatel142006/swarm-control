@@ -679,3 +679,46 @@ def test_pinned_task_never_leaves_its_host_when_its_agents_are_offline_or_unknow
         assert hosts.get(board.get_task(t.id).agent, "host-b") == "host-b", board.get_task(t.id).agent
     assert board.get_task(gone.id).agent == "codex-sol-b"
     assert board.get_task(backlog.id).status is Status.READY
+
+
+def test_a_failure_on_the_account_refunds_the_attempt_and_cools_the_agent(cfg, git_repo, tmp_path):
+    """Oct 10 2026: laptop-b's old runner counted codex-b's lost login (401) as failed attempts on T-297..T-311."""
+    from swarm.models import auth_lost, usage_limited
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now))
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now))
+    t = board.create_task(Task(id="", title="f", type="backend", status=Status.FAILED, attempts=2, agent="codex-a",
+                               model="gpt-6-sol", last_error="Report missing and no files changed. CLI: unexpected "
+                               "status 401 Unauthorized: Missing bearer or basic authentication in header"))
+    assert srv.retry_failed() == 1
+    s = board.get_task(t.id)
+    assert s.status is Status.READY and s.attempts == 1 and "resume" in s.flags and s.agent == "claude-a"
+    assert s.last_error.startswith("auth lost:") and s.importance == "normal"
+    assert auth_lost(board.get_agent("codex-a"), now)
+    # a used-up plan the same way, on an agent with no limit yet
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now))
+    t2 = board.create_task(Task(id="", title="g", type="backend", status=Status.FAILED, attempts=1, agent="claude-a",
+                                last_error="Report missing and no files changed. CLI: You’ve hit your usage limit."))
+    srv.retry_failed()
+    assert board.get_task(t2.id).attempts == 0 and usage_limited(board.get_agent("claude-a"), now)
+    # verify output that mentions an invalid API key is the task's failure, not the account's
+    t3 = board.create_task(Task(id="", title="h", type="backend", status=Status.FAILED, attempts=1, agent="codex-a",
+                                last_error="verify failed: elevenlabs invalid_api_key in test_tts"))
+    srv.retry_failed()
+    assert board.get_task(t3.id).attempts == 1
+
+
+def test_an_old_runners_short_rate_limit_on_a_used_up_plan_becomes_a_usage_limit(cfg, git_repo, tmp_path):
+    from swarm.models import usage_limited
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-a", status="cooldown", last_heartbeat=now,
+                                cooldown_until=now + timedelta(minutes=14), note="rate limited at 2026-10-10T04:35+00:00"))
+    board.create_task(Task(id="", title="f", status=Status.READY, agent="codex-a", last_error=(
+        "rate limited: You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+        "https://chatgpt.com/settings/usage to purchase more credits or try again in 2 hours 10 minutes.")))
+    assert srv.upgrade_limits() == 1
+    row = board.get_agent("codex-a")
+    assert usage_limited(row, now) and row.cooldown_until == now + timedelta(hours=2, minutes=10)
+    assert srv.upgrade_limits() == 0          # once

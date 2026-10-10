@@ -115,3 +115,15 @@ def test_duplicate_ids_are_listed_and_flagged(cfg):
     text = render_status(cfg, tasks, [], qs, now)
     assert "RISK: duplicate ids on the board: T-284 ×2 (1 Cut); Q-641." in text
     assert "duplicate ids" not in render_status(cfg, tasks[1:], [], [], now)
+
+
+def test_a_lost_login_reads_as_auth_lost_with_a_risk_line(cfg):
+    now = cfg.event_end - timedelta(hours=8)
+    agents = [AgentRow(name="codex-b", status="cooldown", host="laptop-b", last_heartbeat=now,
+                       cooldown_until=now + timedelta(minutes=60), note="auth lost until 05:45 UTC (hit at 04:45)")]
+    text = render_status(cfg, [Task(id="T-1", title="a", status=Status.READY, agent="claude-a")], agents, [], now)
+    until = (now + timedelta(minutes=60)).strftime("%H:%M")
+    assert f"codex-b auth-lost until {until}" in text and "usage-limit" not in text
+    assert "RISK: codex-b: login lost; the human must re-login" in text and "laptop-b" in text
+    agents[0].cooldown_until = now - timedelta(minutes=1)      # expired: no RISK, no auth-lost
+    assert "login lost" not in render_status(cfg, [], agents, [], now)

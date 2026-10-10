@@ -441,3 +441,68 @@ def test_run_reports_the_cli_pid_to_the_runner(tmp_path):
     r = a.run(spec(tmp_path, schema=None, timeout_s=10, should_stop=lambda: False, stop_poll_s=0.05,
                    on_start=pids.append))
     assert r.ok and len(pids) == 1 and pids[0] > 0
+
+
+# Oct 10 2026, codex-b on laptop-b: the plan ran out, then every run failed on a lost login, and T-297..T-311 each
+# burned an attempt per minute.
+CODEX_OCT10_LIMIT = ("You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+                     "https://chatgpt.com/settings/usage to purchase more credits or try again at 3:12 AM.")
+CODEX_401 = ("unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: "
+             "https://api.openai.com/v1/responses, cf-ray: a482ec2a4f8ed6c7-IAD")
+
+
+def _codex_events(*events):
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def test_codex_oct10_usage_limit_curly_and_straight_apostrophe_reset_in_local_time():
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h"))
+    for msg in (CODEX_OCT10_LIMIT, CODEX_OCT10_LIMIT.replace("’", "'")):
+        r = a.parse_output(1, _codex_events({"type": "error", "message": msg},
+                                            {"type": "turn.failed", "error": {"message": msg}}), "")
+        assert r.rate_limited and r.usage_limited and not r.auth_lost, msg
+        local = r.reset_at.astimezone()      # the runner's own timezone is the CLI's
+        assert (local.hour, local.minute) == (3, 12) and r.reset_at.tzinfo is not None
+        assert r.reset_at > datetime.now(timezone.utc) and r.error == msg
+
+
+def test_codex_usage_limit_without_a_time_has_no_reset():
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h"))
+    r = a.parse_output(1, _codex_events({"type": "error", "message": "You’ve hit your usage limit."}), "")
+    assert r.rate_limited and r.usage_limited and r.reset_at is None
+
+
+def test_codex_401_missing_bearer_is_auth_lost_not_a_limit():
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h"))
+    r = a.parse_output(1, _codex_events({"type": "error", "message": CODEX_401},
+                                        {"type": "turn.failed", "error": {"message": CODEX_401}}), "")
+    assert r.auth_lost and not r.rate_limited and not r.usage_limited
+    for text in ("Error: 401 Unauthorized", "Missing bearer or basic authentication in header",
+                 "Not logged in. Please run `codex login`", "Invalid API key · Please run /login"):
+        r = a.parse_output(1, _codex_events({"type": "error", "message": text}), "")
+        assert r.auth_lost and not r.rate_limited, text
+    ok = a.parse_output(0, _codex_events({"type": "item.completed", "item": {"type": "agent_message",
+                                                                            "text": "fixed the 401 Unauthorized"}}), "")
+    assert ok.ok and not ok.auth_lost
+
+
+def test_codex_limit_in_an_error_item_wins_over_the_401_after_it():
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h"))
+    r = a.parse_output(1, _codex_events({"type": "item.completed", "item": {"type": "error", "message": CODEX_OCT10_LIMIT}},
+                                        {"type": "turn.failed", "error": {"message": CODEX_401}}), "")
+    assert r.rate_limited and r.usage_limited and not r.auth_lost and "usage limit" in r.error
+
+
+def test_run_finds_auth_loss_and_limits_on_stderr_and_names_them(tmp_path):
+    import subprocess as sp
+    a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h"), mcp_lookup=lambda: set())
+
+    def fake(stderr):
+        return lambda argv, **kw: sp.CompletedProcess(argv, 1, stdout=b"", stderr=stderr.encode())
+    r = a.run(spec(tmp_path, schema=None), runner=fake("starting\nERROR: " + CODEX_401 + "\n"))
+    assert r.auth_lost and not r.rate_limited and r.error.startswith("ERROR: unexpected status 401")
+    r = a.run(spec(tmp_path, schema=None), runner=fake("ERROR: " + CODEX_OCT10_LIMIT + "\n"))
+    assert r.rate_limited and r.usage_limited and not r.auth_lost and "usage limit" in r.error
+    assert r.reset_at.astimezone().hour == 3
+    r = a.run(spec(tmp_path, schema=None), runner=fake("ERROR: tests failed\n"))
+    assert not r.auth_lost and not r.rate_limited and r.error == "exit 1"

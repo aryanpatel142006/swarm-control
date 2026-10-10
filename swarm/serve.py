@@ -11,7 +11,7 @@ from typing import Callable
 
 from .board.base import Board
 from .config import Config
-from .models import IMPORTANCES, AgentRow, Question, Status, Task, usage_limited, utcnow
+from .models import AUTH_LOST_NOTE, IMPORTANCES, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, usage_limited, utcnow
 from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
 from .status import render_headline, render_status
 from .workspace import Workspace
@@ -303,10 +303,80 @@ class Server:
                 n += 1
         return n
 
+    # ----- account failures (used-up plan, lost login): never the task's fault -----
+    _NO_WORK_CLI = re.compile(r"no files changed\. CLI: (.+)", re.S)
+
+    @classmethod
+    def account_failure(cls, last_error: str) -> tuple[str, str]:
+        """(kind, CLI message) when a run that changed nothing failed on the account: a used-up plan or a lost
+        login. A runner from before Oct 10 2026 counts those as failed attempts (codex-b: T-297..T-311 went
+        retry #2, #3 on "401 Unauthorized: Missing bearer"). Only the CLI's own error is read, never verify output."""
+        from .adapters.base import is_auth_lost, is_usage_limit
+        m = cls._NO_WORK_CLI.search(last_error or "")
+        if not m:
+            return "", ""
+        said = m.group(1).strip()
+        if is_usage_limit(said):
+            return USAGE_LIMIT_NOTE, said
+        if is_auth_lost(said):
+            return AUTH_LOST_NOTE, said
+        return "", ""
+
+    def _mark_account(self, agent: str, kind: str, said: str, ctx) -> AgentRow | None:
+        """Put `agent` on the cooldown its runner would have written (unless it already is on one)."""
+        from .adapters.base import parse_reset_at
+        from .runner import mark_limited
+        now = ctx.now
+        row = self.board.get_agent(agent) if agent else None
+        if row is None or usage_limited(row, now):
+            return row
+        reset = parse_reset_at(said, now) if kind == USAGE_LIMIT_NOTE else None
+        if reset and not (now < reset <= now + timedelta(hours=12)):
+            reset = None    # "try again at 3:12 AM" read after 3:12 would mean tomorrow: use the default instead
+        mark_limited(row, kind, now, reset, by="serve")
+        self.board.upsert_agent(row)
+        ctx.rows[agent] = row
+        self.log(f"{agent}: {row.note}")
+        return row
+
+    def upgrade_limits(self) -> int:
+        """A runner from before Oct 6 2026 records a used-up plan as a 15-minute rate limit ("rate limited: You've
+        hit your usage limit ... try again at 3:12 AM"), comes back and fails the next task the same way (codex-b,
+        Oct 10). While that short cooldown runs, give the row the usage-limit cooldown the current runner writes."""
+        from .adapters.base import is_usage_limit
+        now = self.now()
+        ctx = context_from_board(self.board, self.cfg, now)
+        n, seen = 0, set()
+        for t in self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED]):
+            row = ctx.rows.get(t.agent or "")
+            if (t.agent in seen or row is None or not (row.cooldown_until and row.cooldown_until > now)
+                    or usage_limited(row, now) or not t.last_error.startswith("rate limited: ")):
+                continue
+            said = t.last_error[len("rate limited: "):]
+            if is_usage_limit(said) and self._mark_account(t.agent, USAGE_LIMIT_NOTE, said, ctx):
+                seen.add(t.agent)
+                n += 1
+        return n
+
     def retry_failed(self) -> int:
         n = 0
         ctx = context_from_board(self.board, self.cfg, self.now())
         for t in self.board.list_tasks(status=[Status.FAILED]):
+            kind, said = self.account_failure(t.last_error)
+            if kind:
+                # the account failed, not the task: refund the attempt, cool the agent, resume elsewhere
+                self._mark_account(t.agent, kind, said, ctx)
+                before = t.agent
+                t.attempts = max(0, t.attempts - 1)
+                t.agent, t.model, t.effort = route(t, self.cfg, ctx, exclude={before} if before else None)
+                t.status, t.claim_nonce = Status.READY, ""
+                t.flags = list(dict.fromkeys(t.flags + ["resume"]))
+                t.last_error = f"{kind}: {said[:300]}"
+                self.board.update_task(t, ["status", "claim_nonce", "attempts", "agent", "model", "effort", "flags",
+                                           "last_error"])
+                self.log(f"[{t.id}] {kind} on {before}: requeued without spending an attempt → {t.agent}/{t.model}")
+                n += 1
+                continue
             if t.attempts >= self.cfg.max_attempts:
                 self.board.create_question(Question(
                     id="", text=f"{t.id} failed {t.attempts} times: {t.last_error[:600]}", kind="blocking",
@@ -807,6 +877,7 @@ class Server:
         else:
             self._step(summary, "reviewed", self.review_pending)
             self._step(summary, "merged", self.merge_pending)
+        self._step(summary, "limits", self.upgrade_limits)
         self._step(summary, "rerouted", self.reroute)
         self._step(summary, "rebalanced", self.rebalance)
         self._step(summary, "retro", self.maybe_retro)

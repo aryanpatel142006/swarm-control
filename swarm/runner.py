@@ -22,7 +22,7 @@ from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, 
                        verify_feedback)
 from .board.base import Board, claim_task
 from .config import Config, config_signature
-from .models import QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
+from .models import AUTH_LOST_NOTE, QUESTION_TEXT_CAP, TIERS, USAGE_LIMIT_NOTE, AgentRow, Question, Report, RunResult, Status, Task, utcnow
 from .policy import in_scope, needs_review
 from .prompt import compile_prompt, load_rules
 from .tools import ensure_plugins, installed_plugins, plugin_dirs, plugin_settings
@@ -36,7 +36,10 @@ STRUCTURED_PROVIDERS = {"claude", "codex"}
 ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
 HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itself, never by the model
 RATE_LIMIT_COOLDOWN_MIN = 15
-USAGE_LIMIT_COOLDOWN_H = 3       # an exhausted plan with no reset time in the message (Oct 6 2026, codex-b)
+# an exhausted plan with no reset time in the message: 3 h until Oct 10 2026, now 60 min (a run that finds it still
+# used up costs a minute and no attempt, while 3 h idled an account that had come back)
+USAGE_LIMIT_COOLDOWN_MIN = 60
+AUTH_LOST_COOLDOWN_MIN = 60      # a lost login: until a successful smoke check (`swarm doctor --models`) or this
 IDLE_AFTER_S = 300
 TRANSIENT_FLAGS = ("resume", "report_missing", "out_of_scope", "docs_touched", "timeout")
 SELF_UPDATE_EVERY_S = 600
@@ -220,6 +223,30 @@ def _has_feedback(report_text: str) -> bool:
     except ValueError:
         return False
     return isinstance(data, dict) and bool(data.get("harness_feedback"))
+
+
+def limit_kind(result: RunResult) -> str:
+    """Why the account (not the task) stopped the run: a used-up plan, a lost login or a short rate limit."""
+    if result.rate_limited:
+        return USAGE_LIMIT_NOTE if result.usage_limited else "rate limited"
+    return AUTH_LOST_NOTE if result.auth_lost else "rate limited"
+
+
+def mark_limited(row: AgentRow, kind: str, now, reset=None, *, by: str = "") -> AgentRow:
+    """Put an agent row on the cooldown `kind` calls for (the note prefix is what routing and status read):
+    until `reset` when the CLI named one, else 15 min (rate limit) or 60 min (usage limit, lost login)."""
+    default = {USAGE_LIMIT_NOTE: USAGE_LIMIT_COOLDOWN_MIN, AUTH_LOST_NOTE: AUTH_LOST_COOLDOWN_MIN}.get(
+        kind, RATE_LIMIT_COOLDOWN_MIN)
+    row.status = "cooldown"
+    row.cooldown_until = reset or (now + timedelta(minutes=default))
+    hit = f"hit{' by ' + by if by else ''} at {now.strftime('%H:%M')}"
+    if kind == AUTH_LOST_NOTE:
+        row.note = (f"{AUTH_LOST_NOTE} until {row.cooldown_until.strftime('%H:%M')} UTC ({hit}): the human must "
+                    f"log in again on {row.host or 'its laptop'}; `swarm doctor --models {row.name}` lifts it")
+    else:
+        row.note = (f"{kind} until {row.cooldown_until.strftime('%H:%M')} UTC "
+                    f"({hit}{'' if reset else ', no reset time given'})")
+    return row
 
 
 def requeue_status(prev_status: Status | None) -> Status:
@@ -1138,7 +1165,7 @@ class Runner:
                              result=result, agent_env=agent_cfg.env)
             if self._stopping:
                 return self._park(task, wt, result, prev_status=prev_status)
-            if result.rate_limited:
+            if result.rate_limited or result.auth_lost:   # the account, not the task: no attempt is spent
                 return self._rate_limited(task, result, prev_status=prev_status)
             return self._publish(task, wt, attempt, result)
         finally:
@@ -1550,28 +1577,27 @@ class Runner:
         with self._hb_lock:      # a heartbeat that read the row before this write would drop the cooldown
             row = self._write_cooldown(limited, result, now)
         self._reroute_after_limit(task, limited, now)
-        # a merge-conflict or review round goes back as Changes Requested (feedback and PR intact), not Ready
+        # a merge-conflict or review round goes back as Changes Requested (feedback and PR intact), not Ready.
+        # Attempts stay as they were and the next run resumes on the branch: codex-b's used-up plan and lost login
+        # (Oct 10 2026) failed T-297..T-311 one per minute and spent their attempt budget on the account's problem.
         task.status, task.claim_nonce = requeue_status(prev_status), ""
-        kind = USAGE_LIMIT_NOTE if result.usage_limited else "rate limited"
+        task.flags = list(dict.fromkeys(task.flags + ["resume"]))
+        kind = limit_kind(result)
         task.last_error = f"{kind}: {result.error[:300]}"
-        self.board.update_task(task, ["status", "claim_nonce", "last_error", "agent", "model", "effort"])
-        self.log(f"[{task.id}] {kind}; {limited} cooling down until {row.cooldown_until}"
-                 + (f"; task rerouted → {task.agent}" if task.agent != limited else ""))
+        self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error", "agent", "model", "effort"])
+        self.log(f"[{task.id}] {kind}; {limited} {'unavailable' if result.auth_lost else 'cooling down'} until "
+                 f"{row.cooldown_until}" + (f"; task rerouted → {task.agent}" if task.agent != limited else "")
+                 + ("; the human must log in again on this laptop" if kind == AUTH_LOST_NOTE else ""))
         return Outcome(task, None, result, None, task.status)
 
     def _write_cooldown(self, limited: str, result: RunResult, now) -> AgentRow:
         row = self.board.get_agent(limited) or AgentRow(
             name=limited, provider=self.agents[limited].provider, host=self.host)
-        usage = result.usage_limited
-        kind = USAGE_LIMIT_NOTE if usage else "rate limited"
-        default = timedelta(hours=USAGE_LIMIT_COOLDOWN_H) if usage else timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN)
-        reset = result.reset_at if result.reset_at and result.reset_at > now else None
+        kind = limit_kind(result)
+        reset = result.reset_at if result.reset_at and result.reset_at > now and kind != AUTH_LOST_NOTE else None
         # Before Oct 6 a "try again at 5:03 AM" reset was not parsed, codex-b cooled down for 15 minutes, came back
         # and was handed two more tasks that failed the same way.
-        row.status = "cooldown"
-        row.cooldown_until = reset or (now + default)
-        row.note = (f"{kind} until {row.cooldown_until.strftime('%H:%M')} UTC "
-                    f"(hit at {now.strftime('%H:%M')}{'' if reset else ', no reset time given'})")
+        mark_limited(row, kind, now, reset)
         self.board.upsert_agent(row)
         return row
 

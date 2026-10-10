@@ -16,10 +16,10 @@ from .config import Config
 from .failover import ReviewerState, reviewer_state
 from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
 from .lightverify import VerifyChoice, choose_verify
-from .models import QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
+from .models import AUTH_LOST_NOTE, QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
-from .runner import RATE_LIMIT_COOLDOWN_MIN, STRUCTURED_PROVIDERS, USAGE_LIMIT_COOLDOWN_H
+from .runner import RATE_LIMIT_COOLDOWN_MIN, STRUCTURED_PROVIDERS, USAGE_LIMIT_COOLDOWN_MIN
 from .workspace import CmdResult, Workspace
 
 DIFF_CAP = 60000
@@ -168,20 +168,20 @@ class Reviewer:
         """Remember until when `agent` cannot review. A used-up plan also goes on its board row (the same cooldown
         the runner writes), so routing stops sending it work and `swarm status` shows the failover."""
         now = self.now()
-        usage = bool(getattr(result, "usage_limited", False))
-        reset = result.reset_at if result.reset_at and result.reset_at > now else None
-        until = reset or now + (timedelta(hours=USAGE_LIMIT_COOLDOWN_H) if usage
+        auth = bool(getattr(result, "auth_lost", False)) and not result.rate_limited
+        usage = bool(getattr(result, "usage_limited", False)) or auth
+        reset = result.reset_at if result.reset_at and result.reset_at > now and not auth else None
+        until = reset or now + (timedelta(minutes=USAGE_LIMIT_COOLDOWN_MIN) if usage
                                 else timedelta(minutes=RATE_LIMIT_COOLDOWN_MIN))
         with self._lock:
             self.limits[agent] = until
         if usage:
             try:
+                from .runner import mark_limited
                 a = self.cfg.agents[agent]
                 row = self.board.get_agent(agent) or AgentRow(name=agent, provider=a.provider, host=a.host)
                 if not (row.cooldown_until and row.cooldown_until >= until):
-                    row.status, row.cooldown_until = "cooldown", until
-                    row.note = (f"{USAGE_LIMIT_NOTE} until {until:%H:%M} UTC (hit by the reviewer at {now:%H:%M}"
-                                f"{'' if reset else ', no reset time given'})")
+                    mark_limited(row, AUTH_LOST_NOTE if auth else USAGE_LIMIT_NOTE, now, reset, by="the reviewer")
                     self.board.upsert_agent(row)
             except Exception as e:   # noqa: BLE001 - the in-memory record is enough for the failover itself
                 self.log(f"reviewer: could not mark {agent} limited on the board: {e!r}")
@@ -226,7 +226,7 @@ class Reviewer:
                 tried.add(agent)
                 result = self._run_model(task, agent, st.model, pf, wt)
                 if not result.ok and result.structured_output is None:
-                    if result.rate_limited:   # the account is out of quota, not the code: hand the review over
+                    if result.rate_limited or getattr(result, "auth_lost", False):   # the account, not the code
                         until = self._record_limit(agent, result)
                         nxt = self.state().active
                         if nxt and nxt not in tried:
