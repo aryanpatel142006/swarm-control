@@ -10,6 +10,31 @@ from .models import AgentRow, Question, Status, Task, usage_limited
 EST_HOURS_PER_TASK = 0.6
 
 
+def duplicate_ids(tasks: list[Task], questions: list[Question]) -> dict[str, list[Task | Question]]:
+    """Ids held by more than one board page (the cross-laptop allocation race, Oct 10 2026), id -> rows."""
+    by_id: dict[str, list[Task | Question]] = {}
+    for row in [*tasks, *questions]:
+        if row.id:
+            by_id.setdefault(row.id, []).append(row)
+    return {k: v for k, v in sorted(by_id.items()) if len(v) > 1}
+
+
+def dupe_risk(tasks: list[Task], questions: list[Question]) -> str:
+    dupes = duplicate_ids(tasks, questions)
+    if not dupes:
+        return ""
+    bits = []
+    for k, rows in dupes.items():
+        if k.startswith("T-"):
+            cut = sum(1 for r in rows if isinstance(r, Task) and r.status is Status.CUT)
+            bits.append(f"{k} ×{len(rows)}" + (f" ({cut} Cut)" if cut else ""))
+    q_ids = [k for k in dupes if not k.startswith("T-")]
+    if q_ids:
+        bits.append(", ".join(q_ids[:5]) + (f" and {len(q_ids) - 5} more questions" if len(q_ids) > 5 else ""))
+    return (f"duplicate ids on the board: {'; '.join(bits)}. Lookups by id may hit the wrong page; "
+            f"`swarm doctor --dupes` lists the pages; rename the newer one")
+
+
 def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questions: list[Question],
                   now: datetime) -> str:
     hours_left = max(0.0, (cfg.event_end - now).total_seconds() / 3600)
@@ -57,6 +82,9 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         by_ms.setdefault(t.milestone or "(no milestone)", []).append(t)
     active_agents = max(1, len([a for a in agents if a.name != "serve" and a.status != "offline"]))
     risks = [review_risk] if review_risk else []
+    dupes = dupe_risk(tasks, questions)
+    if dupes:
+        risks.append(dupes)
     for ms in sorted(by_ms):
         group = by_ms[ms]
         done = sum(1 for t in group if t.status is Status.DONE)

@@ -493,3 +493,102 @@ def test_question_id_taken_by_another_process_is_renumbered():
     props = store["ds-q"][q.page_id]["properties"]
     assert props["ID"]["rich_text"][0]["text"]["content"] == "Q-002"
     assert props["Question"]["title"][0]["text"]["content"].startswith("Q-002 · mine")
+
+
+def _hidden_task_page(pid, tid, created, status="Ready", agent=None):
+    props = np.task_to_props(Task(id=tid, title=f"other {pid}", status=Status(status), agent=agent))
+    return {"id": pid, "created_time": created, "last_edited_time": created, "_hidden": True, "properties": props}
+
+
+def _lag_unfiltered(board):
+    """Notion's unfiltered query has not seen `_hidden` rows yet (the other laptop's fresh page)."""
+    real_query = board.c.query
+    board.c.query = lambda ds, filter=None, **kw: [r for r in real_query(ds, filter=filter, **kw)
+                                                   if filter or not r.get("_hidden")]
+
+
+def test_task_id_taken_by_an_older_page_on_the_other_laptop_is_renumbered():
+    """Oct 10: T-218, T-221, T-284, T-290, T-301 each existed twice; the newer page now moves itself."""
+    board, store = _board_with_fake_notion()
+    store["ds-tasks"]["pg0"] = _hidden_task_page("pg0", "T-001", "2026-10-10T15:59:00.000Z")
+    _lag_unfiltered(board)
+    t = board.create_task(Task(id="", title="mine", status=Status.READY, agent="claude-a"))
+    assert t.id == "T-002"
+    page = store["ds-tasks"][t.page_id]
+    assert np.page_to_task(page).id == "T-002" and np.r_title(page["properties"]["Name"]).startswith("T-002 · mine")
+    assert np.page_to_task(store["ds-tasks"]["pg0"]).id == "T-001"           # the other page is never touched
+
+
+def test_same_minute_tie_the_higher_page_id_steps_aside():
+    board, store = _board_with_fake_notion()
+    store["ds-tasks"]["pg0"] = _hidden_task_page("pg0", "T-001", "2026-10-10T16:00:00.000Z")
+    _lag_unfiltered(board)
+    assert board.create_task(Task(id="", title="mine")).id == "T-002"
+
+
+def test_same_minute_tie_winner_keeps_its_id_once_the_other_page_moves():
+    board, store = _board_with_fake_notion()
+    store["ds-tasks"]["pz9"] = _hidden_task_page("pz9", "T-001", "2026-10-10T16:00:00.000Z")
+    _lag_unfiltered(board)
+    waits = []
+
+    def sleep(s):
+        waits.append(s)
+        if s > 1:   # the winner's one wait: the other creator renumbers its own page meanwhile
+            store["ds-tasks"]["pz9"]["properties"]["ID"] = np.p_rich("T-002")
+    board.c._sleep = sleep
+    t = board.create_task(Task(id="", title="mine"))
+    assert t.id == "T-001" and len(waits) == 3
+
+
+def test_same_minute_tie_winner_steps_aside_when_the_other_page_stays():
+    """The other creator may have finished checking before our page existed; then nobody else will move."""
+    board, store = _board_with_fake_notion()
+    store["ds-tasks"]["pz9"] = _hidden_task_page("pz9", "T-001", "2026-10-10T16:00:00.000Z")
+    _lag_unfiltered(board)
+    assert board.create_task(Task(id="", title="mine")).id == "T-002"
+    assert np.page_to_task(store["ds-tasks"]["pz9"]).id == "T-001"
+
+
+def test_a_newer_page_with_our_id_is_left_for_its_creator():
+    board, store = _board_with_fake_notion()
+    store["ds-tasks"]["pg0"] = _hidden_task_page("pg0", "T-001", "2026-10-10T16:05:00.000Z")
+    _lag_unfiltered(board)
+    assert board.create_task(Task(id="", title="mine")).id == "T-001"
+
+
+def test_a_preset_task_id_is_never_renumbered():
+    """The planner hands out a batch of ids up front and links dependencies by them."""
+    board, store = _board_with_fake_notion()
+    store["ds-tasks"]["pg0"] = _hidden_task_page("pg0", "T-005", "2026-10-10T15:00:00.000Z")
+    assert board.create_task(Task(id="T-005", title="planned")).id == "T-005"
+
+
+def test_get_task_ignores_a_cut_duplicate_and_prefers_the_callers_page():
+    """A runner looked up T-284, found the other page and logged "claim lost" for many minutes."""
+    board, store = _board_with_fake_notion()
+    warnings = []
+    board.log = warnings.append
+    store["ds-tasks"]["pa"] = _hidden_task_page("pa", "T-284", "2026-10-10T15:00:00.000Z", status="Cut")
+    store["ds-tasks"]["pb"] = _hidden_task_page("pb", "T-284", "2026-10-10T15:01:00.000Z", status="Running",
+                                                agent="claude-a")
+    assert board.get_task("T-284").page_id == "pb" and not warnings          # only one live page: no noise
+    store["ds-tasks"]["pc"] = _hidden_task_page("pc", "T-284", "2026-10-10T15:02:00.000Z", status="Ready",
+                                                agent="codex-b")
+    assert board.get_task("T-284").page_id == "pb"                           # oldest live page
+    assert warnings and "3 board pages share ID T-284" in warnings[0]
+    assert board.get_task("T-284", agent="codex-b").page_id == "pc"          # the caller's agent
+    assert board.get_task("T-284", page_id="pa").page_id == "pa"            # the caller's own page, even Cut
+    assert len(warnings) == 1                                                # rate-limited per id
+
+
+def test_claim_succeeds_on_the_callers_page_when_the_id_is_shared():
+    from swarm.board.base import claim_task
+    board, store = _board_with_fake_notion()
+    board.log = lambda m: None
+    store["ds-tasks"]["pa"] = _hidden_task_page("pa", "T-290", "2026-10-10T15:00:00.000Z", status="Running",
+                                                agent="codex-b")
+    store["ds-tasks"]["pb"] = _hidden_task_page("pb", "T-290", "2026-10-10T15:01:00.000Z", agent="claude-a")
+    mine = np.page_to_task(store["ds-tasks"]["pb"])
+    assert claim_task(board, mine, "claude-a", sleep=lambda s: None)
+    assert np.page_to_task(store["ds-tasks"]["pa"]).agent == "codex-b"       # the other page is untouched

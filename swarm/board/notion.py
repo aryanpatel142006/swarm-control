@@ -5,6 +5,7 @@ import hashlib
 import os
 import random
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -20,6 +21,17 @@ API = "https://api.notion.com/v1"
 VERSION = "2026-03-11"
 MAX_RETRIES = 5
 MAX_SLEEP = 300.0
+# After creating a row, re-read its id this many times, this far apart: Notion's query is eventually consistent and
+# two laptops allocate ids from the same "highest + 1" (Oct 10 2026: T-218, T-221, T-284, T-290, T-301, Q-594, Q-641
+# each existed twice; a runner looked up T-284, found the other page and logged "claim lost" for minutes).
+SETTLE_TRIES = 3
+SETTLE_GAP_S = 1.0
+SETTLE_MAX_RENUMBERS = 4
+DUPE_WARN_EVERY_S = 600.0
+
+
+def _created(row: dict) -> str:
+    return str(row.get("created_time") or "")
 
 
 def _retry_after_seconds(value) -> float | None:
@@ -392,6 +404,59 @@ class NotionBoard:
         # harness note and its fyi) both became Q-209 and `swarm answer Q-209` closed only one (Oct 6).
         self._issued: dict[str, int] = {}
         self._id_lock = threading.Lock()
+        self._dupe_warned: dict[str, float] = {}
+
+    def log(self, msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
+    def _settle_id(self, prefix: str, ds: str, page: dict, cur_id: str, rename: Callable[[str], None]) -> str:
+        """Make the row this process just created (`page`) the only one with its id. Re-query the id a few times;
+        when another row has it and was created earlier (created_time, then page id), allocate again and rename
+        ours, then check the new id the same way. Only our own row is ever renamed. Notion rounds created_time to
+        the minute, so on a same-minute tie the winner waits once for the other creator to step aside and steps
+        aside itself if the other row is still there (that creator may have finished checking before ours
+        existed). Returns the final id."""
+        page_id = str(page.get("id") or "")
+        mine_ct = _created(page)
+        renumbers, clean, waited = 0, 0, False
+        while clean < SETTLE_TRIES:
+            rows = self.c.query(ds, filter={"property": "ID", "rich_text": {"equals": cur_id}})
+            if not mine_ct:
+                mine_ct = next((_created(r) for r in rows if r.get("id") == page_id), "")
+            others = [(_created(r), str(r.get("id"))) for r in rows if r.get("id") != page_id]
+            if not others:
+                clean += 1
+                if clean < SETTLE_TRIES:
+                    self.c._sleep(SETTLE_GAP_S)
+                continue
+            mine = (mine_ct, page_id)
+            if not any(o < mine for o in others):
+                if all(o[0] > mine_ct for o in others):
+                    return cur_id            # every other row is newer: its creator renumbers it
+                if not waited:
+                    waited = True
+                    self.c._sleep(3 * SETTLE_GAP_S)
+                    continue
+            if renumbers >= SETTLE_MAX_RENUMBERS:
+                self.log(f"WARNING: {cur_id} is still shared with page(s) "
+                         f"{', '.join(o[1] for o in others)} after {renumbers} renumbers; "
+                         f"run `swarm doctor --dupes` and rename one by hand")
+                return cur_id
+            new_id = self._allocate(prefix, ds)
+            rename(new_id)
+            self.log(f"board: {cur_id} was also taken by page {others[0][1]}; renumbered page {page_id} to {new_id}")
+            cur_id, renumbers, clean, waited = new_id, renumbers + 1, 0, False
+        return cur_id
+
+    def _warn_dupes(self, task_id: str, rows: list[dict], chosen: dict, why: str) -> None:
+        now = time.monotonic()
+        if now - self._dupe_warned.get(task_id, -DUPE_WARN_EVERY_S) < DUPE_WARN_EVERY_S:
+            return
+        self._dupe_warned[task_id] = now
+        desc = ", ".join(f"{r.get('id')} ({np.r_select(r['properties'].get('Status', {})) or '?'}, "
+                         f"{np.r_select(r['properties'].get('Agent', {})) or 'no agent'})" for r in rows)
+        self.log(f"WARNING: {len(rows)} board pages share ID {task_id}: {desc}. Using {chosen.get('id')} ({why}). "
+                 f"Rename the duplicate (`swarm doctor --dupes`).")
 
     # ----- tasks -----
     def _allocate(self, prefix: str, ds: str) -> str:
@@ -406,16 +471,43 @@ class NotionBoard:
         return self._allocate("T", self.ids.tasks_ds)
 
     def create_task(self, task: Task) -> Task:
-        if not task.id:
+        allocated = not task.id      # a caller's own id (planner batches with dependencies) is never changed
+        if allocated:
             task.id = self.next_task_id()
         children = markdown_to_blocks(task.description) if task.description else None
         page = self.c.create_page(self.ids.tasks_ds, np.task_to_props(task), children, icon=row_icon("type", task.type))
         task.page_id = page["id"]
+        if allocated:
+            def rename(new_id: str) -> None:
+                task.id = new_id
+                self.c.update_page(task.page_id, np.task_to_props(task, ["id"]))
+            try:
+                self._settle_id("T", self.ids.tasks_ds, page, task.id, rename)
+            except NotionError as e:
+                self.log(f"WARNING: could not check {task.id} for a duplicate id: {e}")
         return task
 
-    def get_task(self, task_id: str) -> Task | None:
+    def get_task(self, task_id: str, *, page_id: str | None = None, agent: str | None = None) -> Task | None:
+        """One row per id. When several pages share the id (the allocation race): the caller's own page
+        (`page_id`) wins; otherwise Cut pages are ignored while a live one exists, then the page assigned to
+        `agent`, then the oldest. Never an arbitrary pick, and a warning names every page."""
         rows = self.c.query(self.ids.tasks_ds, filter={"property": "ID", "rich_text": {"equals": task_id}})
-        return np.page_to_task(rows[0]) if rows else None
+        if len(rows) <= 1:
+            return np.page_to_task(rows[0]) if rows else None
+        hit = next((r for r in rows if page_id and r.get("id") == page_id), None)
+        if hit is not None:
+            why = "the caller's page"
+        else:
+            live = [r for r in rows if np.r_select(r["properties"].get("Status", {})) != Status.CUT.value] or rows
+            ours = [r for r in live if agent and np.r_select(r["properties"].get("Agent", {})) == agent]
+            pool = ours or live
+            pool.sort(key=lambda r: (_created(r), str(r.get("id"))))
+            hit = pool[0]
+            if len(live) == 1:
+                return np.page_to_task(hit)          # the rest are Cut duplicates
+            why = f"assigned to {agent}" if ours else "the oldest live page"
+        self._warn_dupes(task_id, rows, hit, why)
+        return np.page_to_task(hit)
 
     def list_tasks(self, *, status: Iterable[Status] | None = None,
                    agent: Iterable[str] | None = None) -> list[Task]:
@@ -442,20 +534,6 @@ class NotionBoard:
     # ----- questions -----
     def next_question_id(self) -> str:
         return self._allocate("Q", self.ids.questions_ds)
-
-    def _dedupe_question_id(self, q: Question) -> None:
-        """Another process (serve, the other laptop's runner) may have taken the same id meanwhile: the row created
-        later moves to a fresh id. Best effort; a query that cannot see the other row yet cannot help."""
-        for _ in range(3):
-            rows = self.c.query(self.ids.questions_ds, filter={"property": "ID", "rich_text": {"equals": q.id}})
-            if len(rows) < 2:
-                return
-            rows.sort(key=lambda r: (str(r.get("created_time") or ""), str(r.get("id"))))
-            if rows[0].get("id") == q.page_id:
-                return
-            q.id = self.next_question_id()
-            props = np.question_to_props(q)
-            self.c.update_page(q.page_id, {"ID": props["ID"], "Question": props["Question"]})
 
     def _question_columns(self) -> set[str]:
         """Boards made before Oct 6 2026 have no Details column, before Oct 10 no Answered By: add each once (the
@@ -496,7 +574,8 @@ class NotionBoard:
         return props
 
     def create_question(self, q: Question) -> Question:
-        if not q.id:
+        allocated = not q.id
+        if allocated:
             q.id = self.next_question_id()
         task_page = None
         if q.task_id:
@@ -505,10 +584,15 @@ class NotionBoard:
         page = self.c.create_page(self.ids.questions_ds, self._question_props(q, task_page_id=task_page),
                                   icon=row_icon("question", q.kind))
         q.page_id = page["id"]
-        try:
-            self._dedupe_question_id(q)
-        except NotionError:
-            pass
+        if allocated:
+            def rename(new_id: str) -> None:
+                q.id = new_id
+                props = np.question_to_props(q)
+                self.c.update_page(q.page_id, {"ID": props["ID"], "Question": props["Question"]})
+            try:
+                self._settle_id("Q", self.ids.questions_ds, page, q.id, rename)
+            except NotionError as e:
+                self.log(f"WARNING: could not check {q.id} for a duplicate id: {e}")
         return q
 
     def list_questions(self, *, status: str | None = None) -> list[Question]:

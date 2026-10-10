@@ -9,7 +9,8 @@ from ..models import AgentRow, Question, Status, Task, utcnow
 
 class Board(Protocol):
     def create_task(self, task: Task) -> Task: ...
-    def get_task(self, task_id: str) -> Task | None: ...
+    def get_task(self, task_id: str, *, page_id: str | None = None,
+                 agent: str | None = None) -> Task | None: ...
     def list_tasks(self, *, status: Iterable[Status] | None = None,
                    agent: Iterable[str] | None = None) -> list[Task]: ...
     def update_task(self, task: Task, fields: Iterable[str]) -> Task: ...
@@ -30,7 +31,7 @@ def claim_task(board: Board, task: Task, agent: str, *, sleep: Callable[[float],
                nonce: str | None = None, wait_s: float = 1.5) -> bool:
     """Optimistic claim: write Running + nonce, wait, re-read, confirm the nonce survived."""
     nonce = nonce or uuid.uuid4().hex
-    fresh = board.get_task(task.id)
+    fresh = board.get_task(task.id, page_id=task.page_id or None, agent=agent)
     if fresh is None or fresh.agent != agent or fresh.status not in (Status.READY, Status.CHANGES_REQUESTED):
         return False  # reassigned, cut, or already claimed since we polled
     task.status = Status.RUNNING
@@ -39,7 +40,7 @@ def claim_task(board: Board, task: Task, agent: str, *, sleep: Callable[[float],
     task.started = utcnow()
     board.update_task(task, ["status", "claim_nonce", "agent", "started"])
     sleep(wait_s)
-    fresh = board.get_task(task.id)
+    fresh = board.get_task(task.id, page_id=task.page_id or None, agent=agent)
     if fresh is None or fresh.claim_nonce != nonce or fresh.status is not Status.RUNNING:
         return False
     return True

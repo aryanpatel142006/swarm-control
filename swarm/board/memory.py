@@ -30,7 +30,8 @@ class InMemoryBoard:
         self.tasks[task.id] = task
         return copy.deepcopy(task)
 
-    def get_task(self, task_id: str) -> Task | None:
+    def get_task(self, task_id: str, *, page_id: str | None = None,
+                 agent: str | None = None) -> Task | None:
         t = self.tasks.get(task_id)
         return copy.deepcopy(t) if t else None
 

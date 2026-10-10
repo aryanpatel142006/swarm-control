@@ -583,7 +583,7 @@ class Runner:
         except Exception as e:  # noqa: BLE001 - a worker crash must never kill the loop
             self.log(f"[{task.id}] runner crashed: {e!r}")
             try:
-                fresh = self.board.get_task(task.id)
+                fresh = self.board.get_task(task.id, page_id=task.page_id or None)
                 if fresh and fresh.status is Status.RUNNING and fresh.claim_nonce == task.claim_nonce:
                     if self._stopping:
                         self._requeue(fresh, "runner stopped mid-task")
@@ -944,7 +944,7 @@ class Runner:
                 return False
             state["last"] = time.monotonic()
             try:
-                fresh = self.board.get_task(task.id)
+                fresh = self.board.get_task(task.id, page_id=task.page_id or None)
             except Exception:
                 return False   # a board hiccup must not kill a good run
             state["lost"] = fresh is None or fresh.status is not Status.RUNNING or fresh.claim_nonce != nonce
@@ -1266,7 +1266,7 @@ class Runner:
         (the next provision replaces it), deleting someone's live worktree is not. Before provisioning a read
         failure must not abandon a claimed task, so the caller passes on_error=False there."""
         try:
-            fresh = self.board.get_task(task.id)
+            fresh = self.board.get_task(task.id, page_id=task.page_id or None)
         except Exception:   # noqa: BLE001
             return on_error
         if fresh is None:
@@ -1592,7 +1592,7 @@ class Runner:
             self.log(f"[{task.id}] reroute after rate limit failed: {e!r}")
 
     def _publish(self, task: Task, wt: Path, attempt: int, result: RunResult) -> Outcome:
-        fresh = self.board.get_task(task.id)
+        fresh = self.board.get_task(task.id, page_id=task.page_id or None)
         if fresh is None or fresh.claim_nonce != task.claim_nonce or fresh.status is not Status.RUNNING:
             # we were reaped (laptop slept) and someone else owns the task now; never overwrite their state
             self.log(f"[{task.id}] claim no longer ours; abandoning publish")
@@ -1727,14 +1727,15 @@ class Runner:
         if lint_notes and status in (Status.REVIEW, Status.MERGE_READY):
             task.feedback = scope_lint_feedback(lint_notes)   # the reviewer's prompt and the board show it (Q-439)
         if not self.publish_outcome(task, status):
-            return Outcome(task, report, result, verify_ok, self.board.get_task(task.id).status)
+            fresh = self.board.get_task(task.id, page_id=task.page_id or None)
+            return Outcome(task, report, result, verify_ok, fresh.status)
         self.log(f"[{task.id}] → {status.value}")
         return Outcome(task, report, result, verify_ok, status)
 
     def publish_outcome(self, task: Task, status: Status) -> bool:
         """Write the run's result unless the board closed the task meanwhile (human merge, `swarm cut`) or another
         runner holds the claim now; a late publish must never reopen finished work (T-001 was redone, Oct 4 2026)."""
-        fresh = self.board.get_task(task.id)
+        fresh = self.board.get_task(task.id, page_id=task.page_id or None)
         if fresh is not None:
             if fresh.status in (Status.DONE, Status.CUT):
                 self.log(f"[{task.id}] result discarded: task is {fresh.status.value} on the board")

@@ -218,7 +218,7 @@ class Server:
         reviewer moved it). Ready/Backlog rows move freely; a Changes Requested row may change agent only while no
         run holds its claim, and keeps its status. Nothing else is touched."""
         try:
-            fresh = self.board.get_task(t.id)
+            fresh = self.board.get_task(t.id, page_id=t.page_id or None)
         except Exception:   # noqa: BLE001 - when in doubt, leave the task where it is
             return False
         if fresh is None or fresh.agent != t.agent or fresh.status is not t.status:
@@ -618,7 +618,7 @@ class Server:
             if not files:
                 self._conflict_checked[t.id] = (tip, main_tip)
                 continue
-            fresh = self.board.get_task(t.id)
+            fresh = self.board.get_task(t.id, page_id=t.page_id or None)
             if fresh is None or fresh.status not in (Status.REVIEW, Status.MERGE_READY) or t.id in self._busy():
                 continue
             from .merge import conflict_feedback

@@ -108,8 +108,28 @@ def main(ctx: typer.Context,
 def doctor(offline: bool = typer.Option(False, "--offline", help="skip network checks"),
            smoke: str = typer.Option(None, "--smoke", help="agent name to smoke-test with a 1-turn prompt"),
            models: str = typer.Option(None, "--models", help="agent name: try every configured model id once and "
-                                                              "record which ones work on this laptop's board row")):
+                                                              "record which ones work on this laptop's board row"),
+           dupes: bool = typer.Option(False, "--dupes", help="only list task/question ids held by more than one "
+                                                             "board page")):
     """Check tokens, CLIs, git, gh, verify scripts."""
+    if dupes:
+        from .status import duplicate_ids
+        board = make_board(_cfg(), state.memory)
+        found = duplicate_ids(board.list_tasks(), board.list_questions())
+        if not found:
+            console.print("no duplicate ids on the board")
+            raise typer.Exit(code=0)
+        for k, rows in found.items():
+            console.print(f"[red]{k}[/red] on {len(rows)} pages:")
+            for r in rows:
+                if isinstance(r, Task):
+                    row = f"{r.status.value:<14} {r.agent or '-':<14} {r.title[:60]}"
+                else:
+                    row = f"{r.status:<14} {r.kind:<14} {r.text[:60]}"
+                console.print(f"  page {r.page_id}  " + " ".join(row.split()), soft_wrap=True, markup=False)
+        console.print("Rename the newer page's ID (e.g. T-284-dup-of-T-290) or cut it; `swarm add` and question "
+                      "creation renumber new rows themselves after the Oct 10 fix.")
+        raise typer.Exit(code=1)
     from .doctor import probe_models, run_checks, smoke_agent
     checks = run_checks(_cfg(), state.host, offline=offline)
     if smoke:

@@ -101,3 +101,17 @@ def test_an_exhausted_plan_reads_as_usage_limit_not_idle(cfg):
     until = (now + timedelta(hours=3)).strftime("%H:%M")
     assert f"codex-b usage-limit until {until}" in text and "codex-b idle" not in text
     assert "is idle with nothing Ready" not in text
+
+
+def test_duplicate_ids_are_listed_and_flagged(cfg):
+    from swarm.status import duplicate_ids
+    now = cfg.event_end - timedelta(hours=8)
+    tasks = [Task(id="T-284", title="a", status=Status.CUT, page_id="p1"),
+             Task(id="T-284", title="b", status=Status.RUNNING, page_id="p2"),
+             Task(id="T-285", title="c", page_id="p3")]
+    qs = [Question(id="Q-641", text="x", page_id="q1"), Question(id="Q-641", text="y", page_id="q2")]
+    dupes = duplicate_ids(tasks, qs)
+    assert list(dupes) == ["Q-641", "T-284"] and [r.page_id for r in dupes["T-284"]] == ["p1", "p2"]
+    text = render_status(cfg, tasks, [], qs, now)
+    assert "RISK: duplicate ids on the board: T-284 ×2 (1 Cut); Q-641." in text
+    assert "duplicate ids" not in render_status(cfg, tasks[1:], [], [], now)
