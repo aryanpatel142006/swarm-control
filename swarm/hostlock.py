@@ -316,7 +316,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 sleep: Callable[[float], None] = time.sleep, label: str = "verify",
                 record: Path | None = None, honor_hold: bool = False,
                 exclusive_cap_min: float | None = None, max_load: float | None = None,
-                loadavg: Callable[[], tuple] = os.getloadavg) -> Iterator[bool]:
+                loadavg: Callable[[], tuple] = os.getloadavg, quick_cap_s: float | None = None) -> Iterator[bool]:
     """Hold one slot (or all of them with exclusive=True). Yields True when held, False when the wait ran out and
     the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once. `record` is a file
     the wait is written to (the runner adds a worker's waits back to its wall-clock limit). `honor_hold`: first wait
@@ -324,7 +324,10 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
     `exclusive_cap_min`: a non-exclusive waiter that has been queued behind exclusive holders for longer than this
     proceeds without a slot (yields True, so nested wrappers do not wait again) and logs it; the holder's wait log gets the same line (Q-478).
     `max_load` (exclusive only): once every slot is held, also wait until the 1-minute load average is below it, within
-    the same `wait_s`; past that the measurement runs anyway and logs the load (Q-517, Q-520, Q-523)."""
+    the same `wait_s`; past that the measurement runs anyway and logs the load (Q-517, Q-520, Q-523).
+    `quick_cap_s` (non-exclusive only): a verify of a change that cannot perturb a measurement (verify.quick_paths)
+    waits at most this long behind exclusive measurements, holding OR queued, then proceeds without a slot like the
+    cap above (Oct 10: merges of web-only tasks waited the full 1800 s behind audio measurements)."""
     if os.environ.get(HELD_ENV):
         yield True
         return
@@ -341,7 +344,8 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
     me = _me(label, exclusive)
     pending = directory / f"{PENDING_PREFIX}{os.getpid()}"
     cap_s = None if exclusive_cap_min is None or exclusive_cap_min <= 0 else exclusive_cap_min * 60
-    behind = {"s": 0.0, "last": time.monotonic()}
+    quick_s = None if quick_cap_s is None or quick_cap_s < 0 or exclusive else float(quick_cap_s)
+    behind = {"s": 0.0, "any": 0.0, "last": time.monotonic()}
     state = {"announced": False, "last_report": 0.0, "waiting": False, "since": 0.0, "last_record": 0.0}
 
     def waiting(reason: str) -> None:
@@ -360,14 +364,27 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
             log(f"{label}: {prefix}")
             state["announced"], state["last_report"] = True, nowm
 
-    def check_exclusive_cap() -> None:
-        """Count the time spent while an exclusive holder is on the machine; past the cap, proceed (Q-478)."""
+    def check_exclusive_cap(queued: list[dict] | None = None) -> None:
+        """Count the time spent while an exclusive holder is on the machine; past the cap, proceed (Q-478). With
+        quick_cap_s, also count time behind a queued exclusive measurement and proceed past that shorter cap."""
         nowm = time.monotonic()
         dt, behind["last"] = nowm - behind["last"], nowm
-        if cap_s is None:
+        if cap_s is None and quick_s is None:
             return
         excl = [h for h in holders(directory, slots) if h.get("exclusive")]
-        if not excl:
+        if quick_s is not None and (excl or queued):
+            behind["any"] += dt
+            if behind["any"] > quick_s:
+                h = (excl or queued or [{}])[0]
+                line = (f"verify of a change outside measurement code (verify.quick_paths) waited "
+                        f"{behind['any']:.0f} s behind the exclusive measurement of {h.get('task') or 'harness'}; "
+                        f"proceeding without a slot \u2014 that measurement may be perturbed")
+                if log:
+                    log(f"{label}: {line}")
+                for x in excl or queued or []:
+                    _note_perturbed(directory, x, line)
+                raise _ExclusiveCapExceeded(line)
+        if cap_s is None or not excl:
             return
         behind["s"] += dt
         if behind["s"] > cap_s:
@@ -439,7 +456,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                         break
                 if time.monotonic() > deadline:
                     raise TimeoutError
-                check_exclusive_cap()
+                check_exclusive_cap(queued)
                 if queued:
                     waiting(f"a measurement is waiting for the machine ({describe(queued)}); this verify runs after "
                             f"it.{own_task_note(queued)}")

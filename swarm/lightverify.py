@@ -50,6 +50,25 @@ def glob_match(path: str, pattern: str) -> bool:
     return bool(_regex(pattern.lstrip("/")).match(path))
 
 
+# Changes that cannot perturb a measurement: their verify does not queue behind exclusive measurements for long.
+QUICK_DEFAULT = ("docs/**", "*.md", "web/**", "frontend/**")
+
+
+def quick_slot_wait(verify_cfg, files: list[str]) -> float | None:
+    """Seconds a harness verify of a branch changing `files` waits at most behind `swarm-lock --exclusive`
+    measurements (hostlock quick_cap_s), or None for the usual wait. Quick only when every changed file matches
+    `verify.quick_paths` (None = QUICK_DEFAULT, [] = off). Oct 10 2026: merges of web-only tasks waited 1800 s each
+    behind audio measurements, one at a time, and six frontend tasks queued for hours."""
+    paths = getattr(verify_cfg, "quick_paths", None)
+    paths = [p for p in (QUICK_DEFAULT if paths is None else paths) if p.strip()]
+    files = [f for f in files if f.strip()]
+    if not paths or not files:
+        return None
+    if all(any(glob_match(f, p) for p in paths) for f in files):
+        return float(getattr(verify_cfg, "quick_wait_seconds", 60.0))
+    return None
+
+
 @dataclass
 class VerifyChoice:
     light: bool

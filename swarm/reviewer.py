@@ -15,7 +15,7 @@ from .board.base import Board, fresh_flags
 from .config import Config
 from .failover import ReviewerState, reviewer_state
 from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
-from .lightverify import VerifyChoice, choose_verify
+from .lightverify import VerifyChoice, choose_verify, quick_slot_wait
 from .models import AUTH_LOST_NOTE, QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
@@ -203,7 +203,8 @@ class Reviewer:
                                [{"severity": "high", "file": self.cfg.verify.setup_worktree or "",
                                  "issue": setup.tail(1200), "fix": "orchestrator: fix the environment, then re-review"}])
             choice = self._choose_verify(task, wt)
-            full = self.ws.run_script(wt, choice.command, 1800)
+            full = self.ws.run_script(wt, choice.command, 1800,
+                                      quick_wait_s=quick_slot_wait(self.cfg.verify, choice.files))
             verify_note = ""
             if full is not None and not full.ok:
                 full, verify_note, verdict = self._triage_full_failure(task, wt, full, choice.command)

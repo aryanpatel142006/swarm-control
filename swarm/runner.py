@@ -15,6 +15,7 @@ from typing import Callable
 
 from .adapters import get_adapter
 from .adapters.base import RunSpec
+from .lightverify import quick_slot_wait
 from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, DEFAULT_SCRATCH_PATTERNS,
                        DEFAULT_STRAY_PATTERNS, fenced_lines,
                        placeholder_feedback, placeholder_hits, scope_lint_feedback, scope_lint_lines,
@@ -1672,7 +1673,9 @@ class Runner:
             except RuntimeError as e:   # a failed fetch must not lose the run's result
                 self.log(f"[{task.id}] pre-verify merge skipped: {e}")
 
-        verify = self.ws.run_script(wt, self.cfg.verify.fast, 900) if changed else None
+        verify = (self.ws.run_script(wt, self.cfg.verify.fast, 900,
+                                     quick_wait_s=quick_slot_wait(self.cfg.verify, list(changed)))
+                  if changed else None)
         verify_ok = verify.ok if verify is not None else None
         if verify is not None and not verify.ok:
             # the failing step first, each section capped on its own (Q-168: the ruff errors were cut off)

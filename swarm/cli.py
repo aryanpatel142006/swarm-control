@@ -81,8 +81,9 @@ def configure_verify_slots(ws, cfg: Config, host: str | None, log=print) -> None
     swarm processes and the workers' own wrapped verifies (swarm/hostlock.py, Q-175/Q-185/Q-190)."""
     from .hostlock import lock_dir, verify_slot
     slots = cfg.hosts[host].max_parallel_verify if host in cfg.hosts else 2
-    ws.verify_slot = lambda label: verify_slot(lock_dir(cfg.project), slots, log=log, label=label,
-                                               exclusive_cap_min=cfg.verify.exclusive_max_minutes)
+    ws.verify_slot = lambda label, quick_wait_s=None: verify_slot(
+        lock_dir(cfg.project), slots, log=log, label=label, exclusive_cap_min=cfg.verify.exclusive_max_minutes,
+        quick_cap_s=quick_wait_s)
     ws.script_env = cfg.project_env()
 
 

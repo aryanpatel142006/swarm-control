@@ -8,7 +8,7 @@ from typing import Callable
 from .board.base import Board, fresh_flags
 from .config import Config
 from .feedback import verify_feedback
-from .lightverify import choose_verify
+from .lightverify import choose_verify, quick_slot_wait
 from .models import Question, Status, Task, utcnow
 from .workspace import CmdResult, Workspace
 
@@ -127,7 +127,11 @@ class Merger:
             if self.cfg.verify.light_paths:
                 self.log(choice.log_line(task.id))
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
-            verify = self.ws.run_script(wt, choice.command, 900)
+            quick = quick_slot_wait(self.cfg.verify, files)
+            if quick is not None:
+                self.log(f"[{task.id}] quick slot: only web/docs files changed; waits at most {quick:.0f} s "
+                         "behind exclusive measurements")
+            verify = self.ws.run_script(wt, choice.command, 900, quick_wait_s=quick)
             if verify is not None and not verify.ok:
                 return self._back(task, verify_feedback(
                     verify.out + ("\n" + verify.err if verify.err else ""), code=verify.code,

@@ -43,6 +43,12 @@ class VerifyConfig:
     light_paths: list[str] | None = None
     light_command: str | None = None
     protected_paths: list[str] | None = None
+    # Quick slot (swarm/lightverify.py quick_slot_wait): a harness verify of a branch whose every changed file matches
+    # `quick_paths` (changes that cannot perturb an audio/latency measurement: web UI, docs) waits at most
+    # `quick_wait_seconds` behind `swarm-lock --exclusive` measurements, then runs without a slot. None = the
+    # built-in defaults (docs/**, *.md, web/**, frontend/**); [] turns it off.
+    quick_paths: list[str] | None = None
+    quick_wait_seconds: float = 60.0
 
 
 @dataclass
@@ -400,7 +406,9 @@ def load_config(path: Path | str) -> Config:
                             light_paths=_str_list(verify_raw.get("light_paths"), "verify.light_paths"),
                             light_command=(str(verify_raw["light_command"]) if verify_raw.get("light_command")
                                            else None),
-                            protected_paths=_str_list(verify_raw.get("protected_paths"), "verify.protected_paths")),
+                            protected_paths=_str_list(verify_raw.get("protected_paths"), "verify.protected_paths"),
+                            quick_paths=_str_list(verify_raw.get("quick_paths"), "verify.quick_paths"),
+                            quick_wait_seconds=max(0.0, float(verify_raw.get("quick_wait_seconds", 60)))),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),

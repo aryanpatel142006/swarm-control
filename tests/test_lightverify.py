@@ -74,3 +74,17 @@ def test_config_reads_the_light_keys(project_dir, sample_config_dict):
     (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(d))
     cfg = load_config(project_dir / ".swarm" / "config.yaml")
     assert cfg.verify.light_paths is None and cfg.verify.light_command is None
+
+
+def test_quick_slot_wait_for_web_and_docs_only():
+    from swarm.lightverify import quick_slot_wait
+    cfg = SimpleNamespace(quick_paths=None, quick_wait_seconds=60.0)
+    assert quick_slot_wait(cfg, ["web/app/judge.js", "docs/x.md", "README.md"]) == 60.0
+    assert quick_slot_wait(cfg, ["web/app/judge.js", "hearing/engine.py"]) is None
+    assert quick_slot_wait(cfg, ["eval/measure.py"]) is None
+    assert quick_slot_wait(cfg, []) is None
+    custom = SimpleNamespace(quick_paths=["web/**", "scripts/demo.sh"], quick_wait_seconds=30)
+    assert quick_slot_wait(custom, ["scripts/demo.sh", "web/a.css"]) == 30.0
+    assert quick_slot_wait(custom, ["scripts/verify_fast.sh"]) is None
+    assert quick_slot_wait(SimpleNamespace(quick_paths=[], quick_wait_seconds=60), ["web/a.js"]) is None
+    assert quick_slot_wait(SimpleNamespace(), ["docs/a.md"]) == 60.0     # older config objects: defaults

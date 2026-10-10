@@ -515,10 +515,12 @@ class Workspace:
                 return True
         return False
 
-    def run_script(self, path: Path, script_rel: str | None, timeout: int, *, slot: bool = True) -> CmdResult | None:
+    def run_script(self, path: Path, script_rel: str | None, timeout: int, *, slot: bool = True,
+                   quick_wait_s: float | None = None) -> CmdResult | None:
         """Run a project script in a worktree. With slot=True (verify scripts) it first takes a per-host verify
         slot when the CLI configured one, so N verifies at most run at once on this machine; setup scripts pass
-        slot=False. The wait for a slot does not count against `timeout`."""
+        slot=False. The wait for a slot does not count against `timeout`. `quick_wait_s` (lightverify.quick_slot_wait):
+        wait at most this long behind exclusive measurements."""
         if not script_rel:
             return None
         script = path / script_rel
@@ -531,7 +533,10 @@ class Workspace:
         if not slot or self.verify_slot is None:
             return run_cmd(["bash", str(script)], cwd=path, timeout=timeout, env=env)
         from .hostlock import HELD_ENV
-        with self.verify_slot(f"{path.name}: {script_rel}") as held:
+        label = f"{path.name}: {script_rel}"
+        slot_cm = (self.verify_slot(label) if quick_wait_s is None
+                   else self.verify_slot(label, quick_wait_s=quick_wait_s))
+        with slot_cm as held:
             return run_cmd(["bash", str(script)], cwd=path, timeout=timeout,
                            env={**env, HELD_ENV: "1"} if held else env)
 

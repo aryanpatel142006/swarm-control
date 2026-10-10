@@ -1,3 +1,4 @@
+import contextlib
 import os
 import subprocess
 import sys
@@ -528,3 +529,73 @@ def test_max_load_flag_needs_exclusive(tmp_path):
     with pytest.raises(SystemExit):
         hostlock.main(["--dir", str(tmp_path), "--max-load", "4", "--", "true"])
     assert hostlock.main(["--dir", str(tmp_path / "l"), "--exclusive", "--max-load", "1000", "--", "true"]) == 0
+
+
+# ---- quick slot: web/docs-only verifies do not queue behind measurements for long ----
+def test_quick_waiter_proceeds_behind_an_exclusive_holder_after_quick_cap(tmp_path, monkeypatch):
+    d = tmp_path / "locks"
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    monkeypatch.setenv("SWARM_TASK_ID", "T-meas")
+    logs = []
+    with verify_slot(d, 2, exclusive=True, label="measurement"):
+        monkeypatch.setenv("SWARM_TASK_ID", "T-web")
+        t0 = time.monotonic()
+        with verify_slot(d, 2, wait_s=30, poll_s=0.05, log=logs.append, exclusive_cap_min=25,
+                         quick_cap_s=0.2) as held:
+            waited = time.monotonic() - t0
+            assert held is True                    # nested wrapped verify_fast runs straight through
+    assert 0.2 <= waited < 5
+    assert any("verify.quick_paths" in m and "T-meas" in m for m in logs)
+    assert not any("no verify slot" in m for m in logs)
+    assert any("quick_paths" in n for n in hostlock.task_perturbed_notes(d, "T-meas"))
+
+
+def test_quick_waiter_proceeds_behind_a_queued_exclusive_measurement(tmp_path, monkeypatch):
+    """The Oct 10 serve.log case: 'a measurement is waiting for the machine' held every merge for 1800 s."""
+    d = tmp_path / "locks"
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    hostlock.ensure_lock_files(d, 2)
+    other = subprocess.Popen(["sleep", "30"])
+    import json
+    (d / f"exclusive-pending-{other.pid}").write_text(json.dumps(
+        {"pid": other.pid, "task": "T-meas", "exclusive": True, "pstart": hostlock._proc_start(other.pid)}))
+    try:
+        t0 = time.monotonic()
+        with verify_slot(d, 2, wait_s=0.3, poll_s=0.05) as held:   # an audio verify keeps waiting (runs out here)
+            assert held is False
+        assert time.monotonic() - t0 >= 0.3
+        t0 = time.monotonic()
+        with verify_slot(d, 2, wait_s=30, poll_s=0.05, quick_cap_s=0.2) as held:
+            assert held is True
+        assert time.monotonic() - t0 < 5
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_quick_cap_does_not_skip_ordinary_slot_contention(tmp_path, monkeypatch):
+    d = tmp_path / "locks"
+    monkeypatch.delenv(HELD_ENV, raising=False)
+    with verify_slot(d, 1):                        # a normal verify, not a measurement
+        t0 = time.monotonic()
+        with verify_slot(d, 1, wait_s=0.5, poll_s=0.05, quick_cap_s=0.1) as held:
+            assert held is False                   # waited the full wait_s: the quick cap is for measurements only
+        assert time.monotonic() - t0 >= 0.5
+
+
+def test_run_script_passes_quick_wait_to_the_slot(git_repo):
+    ws = Workspace(git_repo, git_repo.parent / "wt", "main")
+    seen = []
+
+    @contextlib.contextmanager
+    def slot(label, quick_wait_s=None):
+        seen.append(quick_wait_s)
+        yield True
+
+    ws.verify_slot = slot
+    script = git_repo / "scripts" / "q.sh"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text("exit 0\n")
+    ws.run_script(git_repo, "scripts/q.sh", 30)
+    ws.run_script(git_repo, "scripts/q.sh", 30, quick_wait_s=60)
+    assert seen == [None, 60]
