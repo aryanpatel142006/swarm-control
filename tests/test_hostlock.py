@@ -404,3 +404,45 @@ def test_config_reads_exclusive_max_minutes(project_dir, sample_config_dict):
     sample_config_dict["verify"] = {**(sample_config_dict.get("verify") or {}), "exclusive_max_minutes": 10}
     (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
     assert load_config(project_dir / ".swarm" / "config.yaml").verify.exclusive_max_minutes == 10
+
+
+def test_entry_with_a_reused_pid_is_stale(tmp_path):
+    """Q-523: slot entries whose PIDs were reused by long-lived processes (swarm serve, swarm run) never freed."""
+    import json
+    d = tmp_path / "locks"
+    hostlock.ensure_lock_files(d, 2)
+    me = os.getpid()
+    mine = hostlock._proc_start(me)
+    assert mine                                     # this process's start time is readable
+    # a crashed holder's entry whose pid now belongs to another process: the recorded start time differs
+    (d / "verify-0.holder").write_text(json.dumps({"pid": me, "task": "T-1", "label": "verify", "pstart": "Thu Jan  1 00:00:00 1970"}))
+    other = subprocess.Popen(["sleep", "30"])
+    (d / "exclusive-pending-424242").write_text(json.dumps({"pid": other.pid, "task": "T-2", "exclusive": True,
+                                                            "pstart": "Thu Jan  1 00:00:00 1970"}))
+    try:
+        assert hostlock.holders(d, 2) == []
+        assert hostlock.pending_exclusive(d) == []
+        assert not (d / "exclusive-pending-424242").exists()      # a stale pending file is removed
+        # an entry with the right start time is live; an old entry without one falls back to the pid check
+        (d / "verify-0.holder").write_text(json.dumps({"pid": other.pid, "task": "T-1",
+                                                       "pstart": hostlock._proc_start(other.pid)}))
+        (d / "verify-1.holder").write_text(json.dumps({"pid": me, "task": "T-3"}))
+        assert sorted(h["task"] for h in hostlock.holders(d, 2)) == ["T-1", "T-3"]
+        # a normal verify is not held up by a stale pending exclusive file
+        (d / "exclusive-pending-424243").write_text(json.dumps({"pid": other.pid, "exclusive": True,
+                                                                "pstart": "Thu Jan  1 00:00:00 1970"}))
+        with verify_slot(d, 2, wait_s=0.5, poll_s=0.05) as held:
+            assert held is True
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_holder_entries_record_the_process_start_time(tmp_path):
+    import json
+    d = tmp_path / "locks"
+    with verify_slot(d, 1, label="x") as held:
+        assert held
+        h = json.loads((d / "verify-0.holder").read_text())
+        assert h["pid"] == os.getpid() and h["pstart"] == hostlock._proc_start(os.getpid())
+

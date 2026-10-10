@@ -112,6 +112,40 @@ def _alive(pid: int) -> bool:
         return False
 
 
+_PSTART_CACHE: dict[int, tuple[float, str]] = {}
+_PSTART_TTL_S = 5.0
+
+
+def _proc_start(pid: int) -> str:
+    """The process's start time as `ps` prints it ("" when unknown). With the pid it identifies one process: an entry
+    whose pid was reused by another process (a long-lived `swarm serve` or `swarm run`, Q-523) no longer matches."""
+    now = time.monotonic()
+    hit = _PSTART_CACHE.get(pid)
+    if hit and now - hit[0] < _PSTART_TTL_S:
+        return hit[1]
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
+        out = " ".join(r.stdout.split()) if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError, ValueError):
+        out = ""
+    _PSTART_CACHE[pid] = (now, out)
+    return out
+
+
+def _entry_alive(h: dict) -> bool:
+    """A slot/pending entry still names a live process: its pid is alive and, when the entry recorded the process's
+    start time, the process with that pid now is the same one (not a reused pid). Entries written before Oct 10
+    have no start time and fall back to the pid check."""
+    pid = h.get("pid")
+    if not isinstance(pid, int) or not _alive(pid):
+        return False
+    want = h.get("pstart")
+    if not want:
+        return True
+    now = _proc_start(pid)
+    return not now or " ".join(str(want).split()) == now
+
+
 def _write_json(path: Path, data: dict) -> None:
     try:
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
@@ -131,7 +165,7 @@ def _read_json(path: Path) -> dict | None:
 
 def _me(label: str, exclusive: bool) -> dict:
     return {"pid": os.getpid(), "task": os.environ.get("SWARM_TASK_ID", ""), "label": label,
-            "exclusive": exclusive, "started": time.time()}
+            "exclusive": exclusive, "started": time.time(), "pstart": _proc_start(os.getpid())}
 
 
 def _unlink_if_mine(path: Path) -> None:
@@ -146,8 +180,8 @@ def holders(directory: Path | str, slots: int) -> list[dict]:
     out, seen = [], set()
     for i in range(max(1, slots)):
         h = _read_json(Path(directory) / f"verify-{i}.holder")
-        if h and isinstance(h.get("pid"), int) and _alive(h["pid"]) and h["pid"] not in seen:
-            seen.add(h["pid"])
+        if h and _entry_alive(h) and (h["pid"], h.get("label")) not in seen:
+            seen.add((h["pid"], h.get("label")))      # two harness verifies in one process are two holders
             out.append(h)
     return out
 
@@ -156,8 +190,13 @@ def pending_exclusive(directory: Path | str) -> list[dict]:
     out = []
     for f in sorted(Path(directory).glob(PENDING_PREFIX + "*")):
         h = _read_json(f)
-        if h and isinstance(h.get("pid"), int) and h["pid"] != os.getpid() and _alive(h["pid"]):
+        if h is None or not isinstance(h.get("pid"), int) or h["pid"] == os.getpid():
+            continue
+        if _entry_alive(h):
             out.append(h)
+        else:          # its waiter died (SIGKILL) or the pid was reused: the file would stall every verify (Q-523)
+            with contextlib.suppress(OSError):
+                f.unlink()
     return out
 
 
@@ -230,7 +269,7 @@ def task_wait_seconds(directory: Path | str, task_id: str, now: float | None = N
         d = _read_json(f) or {}
         total += float(d.get("waited_s") or 0)
         since = d.get("waiting_since")
-        if since and isinstance(d.get("pid"), int) and _alive(d["pid"]):
+        if since and _entry_alive(d):
             total += max(0.0, now - float(since))
         elif since:          # the waiter was killed while queued: count it up to its last refresh
             total += max(0.0, float(d.get("last_seen") or since) - float(since))
