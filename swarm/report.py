@@ -200,7 +200,7 @@ def repeated_question(q: dict, earlier: list) -> "object | None":
     return None
 
 
-def earlier_questions_note(questions: list, cap: int = 4000) -> str:
+def earlier_questions_note(questions: list, cap: int = 4000, *, orch_host: str = "") -> str:
     """Prompt text listing this task's earlier questions with their answers so far, newest answer included, so an
     attempt neither re-asks them nor misses an answer that asked for a change (T-120 merged before Q-313's answer
     reached it)."""
@@ -212,7 +212,11 @@ def earlier_questions_note(questions: list, cap: int = 4000) -> str:
         if q.proceeding_with:
             head += f" You proceeded with: {_clip(q.proceeding_with, 300)}"
         if q.answer.strip():
-            head += f"\n  **Answer:** {_clip(q.answer, 1200)}"
+            label = ""
+            if getattr(q, "answered_by", "").strip():   # `swarm answer` records who; older answers did not
+                from .relay import origin_label, parse_sender
+                label = " " + origin_label(*parse_sender(q.answered_by), orch_host)
+            head += f"\n  **Answer{label}:** {_clip(q.answer, 1200)}"
         else:
             head += "\n  Not answered yet: keep what you proceeded with unless new facts change it."
         lines.append(head)

@@ -105,9 +105,10 @@ class Question:
     proceeding_with: str = ""
     impact: str = "medium"
     task_id: str = ""
-    asked_by: str = ""
+    asked_by: str = ""      # relays and harness-made questions: "<sender>@<host>" (swarm/relay.py sender_tag)
     status: str = "Open"  # Open | Applied
     answer: str = ""
+    answered_by: str = ""   # `swarm answer`: "<sender>@<host>"; empty when typed on the board (origin unknown)
     needs_follow_up: bool = False
     page_id: str = ""
 

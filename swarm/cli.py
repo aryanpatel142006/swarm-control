@@ -257,8 +257,11 @@ def init(parent_page: str = typer.Option(..., "--parent-page", help="Notion page
 @app.command()
 def tell(task_id: str, text: str):
     """Send a message into a task's next prompt (orchestrator → worker); logged as a relay note on the board."""
+    from .relay import cli_sender, orchestrator_host
     from .relay import tell as _tell
-    q = _tell(make_board(_cfg(), state.memory), task_id, text)
+    board = make_board(_cfg(), state.memory)
+    host = state.host or os.environ.get("SWARM_HOST", "")
+    q = _tell(board, task_id, text, sender=cli_sender(), host=host, orch_host=orchestrator_host(_cfg(), board))
     if q is None:
         raise typer.Exit(code=_fail(f"{task_id} not found or already closed"))
     console.print(f"{q.id}: {q.text}")
@@ -474,9 +477,11 @@ def answer(question_id: str, text: str,
         for q in picked:
             console.print(f"  {q.id} · kind={q.kind} · task={q.task_id or '-'} · {q.status} · {q.text[:100]}")
         raise typer.Exit(code=_fail(f"{len(picked)} questions share {question_id}: add --kind/--task, or --all"))
+    from .relay import cli_sender, sender_tag
+    by = sender_tag(cli_sender(), state.host or os.environ.get("SWARM_HOST", ""))   # serve labels the relay with it
     for q in picked:
-        q.answer, q.needs_follow_up = text, follow_up
-        board.update_question(q, ["answer", "needs_follow_up"])
+        q.answer, q.needs_follow_up, q.answered_by = text, follow_up, by
+        board.update_question(q, ["answer", "needs_follow_up", "answered_by"])
     console.print(f"{question_id} answered ({len(picked)} row{'s' if len(picked) > 1 else ''}); serve will relay it "
                   f"within {_cfg().serve_seconds}s")
 

@@ -1039,8 +1039,11 @@ class Runner:
                            + ". A background job still running when you stop is lost: bound long evaluations to fit, "
                            "start them early, and record their command, PID and output path in `.swarm-run/notes.md`.")
             self._restore_carry(task.id, attempt, wt)
+            from .relay import orchestrator_host
+            orch_host = orchestrator_host(self.cfg, self.board)   # relay labels are checked against it (Q-584)
             try:
-                questions_note = earlier_questions_note(earlier_questions(self.board.list_questions(), task.id))
+                questions_note = earlier_questions_note(earlier_questions(self.board.list_questions(), task.id),
+                                                        orch_host=orch_host)
             except Exception as e:  # noqa: BLE001 - the run goes ahead without the earlier answers
                 questions_note = ""
                 self.log(f"[{task.id}] could not read the task's earlier questions: {e!r}")
@@ -1050,7 +1053,8 @@ class Runner:
                                     previous_notes=self._previous_carry(task.id, attempt, wt), limits_line=limits_line,
                                     doc_root=wt, branch_log=self._branch_log(wt) if reuse else "",
                                     references_note=references_note, automerged_note=automerged_note,
-                                    questions_note=questions_note)
+                                    questions_note=questions_note,
+                                    orchestrator_host=orch_host)
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=turns,
@@ -1662,7 +1666,7 @@ class Runner:
         if hf:
             self._file_question(task, report, hf, context=hf.pop("context"))
         from .relay import deliver_messages
-        for note in deliver_messages(self.board, task, report):
+        for note in deliver_messages(self.board, task, report, host=self.host):
             self.log(f"[{task.id}] {note.text[:120]}")
 
         status = self._decide(task, report, result, changed, verify_ok, verify_tail, push_error, markers, placeholders,

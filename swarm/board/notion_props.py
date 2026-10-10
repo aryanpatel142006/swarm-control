@@ -200,7 +200,7 @@ def TASKS_SCHEMA(agent_names: list[str]) -> dict:  # noqa: N802 - schema factory
 
 # ---------- questions ----------
 QUESTION_FIELD_NAMES = {"status": "Status", "answer": "Answer", "needs_follow_up": "Needs Follow-up",
-                        "text": "Question", "context": "Context"}
+                        "text": "Question", "context": "Context", "answered_by": "Answered By"}
 # A Notion title shows ~200 chars; the full question lives in Details (Q-129, Q-151, Q-153 were cut mid-word).
 QUESTION_TITLE_CHARS = 200
 
@@ -214,6 +214,7 @@ def question_to_props(q: Question, *, task_page_id: str | None = None,
         "Proceeding With": p_rich(q.proceeding_with), "Impact": p_select(q.impact),
         "Task ID": p_rich(q.task_id), "Asked By": p_rich(q.asked_by), "Status": p_select(q.status),
         "Answer": p_rich(q.answer), "Needs Follow-up": p_checkbox(q.needs_follow_up),
+        "Answered By": p_rich(q.answered_by),
     }
     if task_page_id:
         all_props["Task"] = p_relation([task_page_id])
@@ -248,7 +249,7 @@ def page_to_question(page: dict) -> Question:
         proceeding_with=r_rich(g("Proceeding With")), impact=r_select(g("Impact")) or "medium",
         task_id=r_rich(g("Task ID")), asked_by=r_rich(g("Asked By")), status=r_select(g("Status")) or "Open",
         answer=r_rich(g("Answer")), needs_follow_up=r_checkbox(g("Needs Follow-up")),
-        page_id=page.get("id", ""),
+        answered_by=r_rich(g("Answered By")), page_id=page.get("id", ""),
     )
 
 
@@ -266,7 +267,7 @@ def QUESTIONS_SCHEMA(tasks_ds_id: str | None = None) -> dict:  # noqa: N802
         "Context": {"rich_text": {}}, "Options": {"rich_text": {}}, "Proceeding With": {"rich_text": {}},
         "Impact": _sel(["high", "medium", "low"], IMPACT_COLORS),
         "Task ID": {"rich_text": {}}, "Asked By": {"rich_text": {}},
-        "Answer": {"rich_text": {}}, "Needs Follow-up": {"checkbox": {}},
+        "Answer": {"rich_text": {}}, "Needs Follow-up": {"checkbox": {}}, "Answered By": {"rich_text": {}},
     }
     if tasks_ds_id:
         schema.update(TASK_RELATION(tasks_ds_id))

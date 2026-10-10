@@ -332,6 +332,13 @@ class Server:
             n += 1
         return n
 
+    def answer_label(self, q: Question) -> str:
+        """Who answered: `swarm answer` records `<sender>@<host>`; an answer typed on the board records nothing."""
+        from .relay import origin_label, parse_sender
+        if not q.answered_by.strip():
+            return "[answer typed on the board (sender not recorded; unverified)]"
+        return origin_label(*parse_sender(q.answered_by), self.cfg.orchestrator_host or self.host)
+
     def relay(self) -> int:
         n = 0
         ctx = None
@@ -361,7 +368,7 @@ class Server:
                 self.log(f"[{t.id}] accepted as is by answer to {q.id} → merge")
             elif q.kind == "blocking":
                 if t and t.status is Status.BLOCKED:
-                    t.feedback = f"Human answer to \"{q.text}\": {q.answer}"[:1900]
+                    t.feedback = f"{self.answer_label(q)} Human answer to \"{q.text}\": {q.answer}"[:1900]
                     t.flags = list(dict.fromkeys(t.flags + ["resume"]))
                     t.status, t.claim_nonce = Status.READY, ""
                     self.board.update_task(t, ["feedback", "flags", "status", "claim_nonce"])
@@ -369,7 +376,8 @@ class Server:
             elif q.needs_follow_up:
                 ctx = ctx or context_from_board(self.board, self.cfg, self.now())
                 follow = Task(id="", title=f"Follow-up: {q.text[:70]}",
-                              description=f"Human answer to \"{q.text}\": {q.answer}\n\nContext: {q.context}",
+                              description=f"{self.answer_label(q)} Human answer to \"{q.text}\": {q.answer}\n\n"
+                                          f"Context: {q.context}",
                               acceptance="- the human's answer is implemented\n- verify passes", type="bugfix",
                               importance=IMPACT_TO_IMPORTANCE.get(q.impact, "normal"), size="S",
                               milestone=t.milestone if t else "", scope=list(t.scope) if t else [],

@@ -147,6 +147,9 @@ class Config:
     # Directories whose gitignored files the runner symlinks from the main checkout into each fresh worktree (Q-250,
     # Q-252, Q-254 … nine tasks lost runs to 'no demo clip': manifests are committed, clips and stems are not).
     worktree_links: list[str] = field(default_factory=list)
+    # The laptop whose `swarm tell` / `swarm answer` count as the orchestrator. Empty = the host that runs serve
+    # (its row on the Agents board). Relays from any other host are labelled with their real origin (Q-561, Q-584).
+    orchestrator_host: str = ""
 
     def project_env(self) -> dict[str, str]:
         return {k: v.replace("{repo_root}", str(self.repo_root)) for k, v in self.env.items()}
@@ -392,6 +395,7 @@ def load_config(path: Path | str) -> Config:
         mcp_servers={str(k): dict(v or {}) for k, v in (raw.get("mcp_servers") or {}).items()},
         env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
         worktree_links=_str_list(raw.get("worktree_links"), "worktree_links") or [],
+        orchestrator_host=str(raw.get("orchestrator_host") or ""),
     )
 
 

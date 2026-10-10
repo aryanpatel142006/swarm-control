@@ -93,8 +93,11 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
                    structured_output_supported: bool, mcp: list[str] = (), skills: list[str] = (),
                    skill_tool: bool = True, conflicts_note: str = "", previous_notes: str = "",
                    limits_line: str = "", doc_root: Path | None = None, branch_log: str = "",
-                   references_note: str = "", automerged_note: str = "", questions_note: str = "") -> str:
+                   references_note: str = "", automerged_note: str = "", questions_note: str = "",
+                   orchestrator_host: str = "") -> str:
     import platform
+    from .relay import label_feedback
+    rules_text = rules_text.replace("<orchestrator_host>", orchestrator_host or "the orchestrator's host")
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
     parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", host_line]
@@ -119,7 +122,8 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
         parts += ["", "## Files main and this branch both changed (merged without a conflict)", "",
                   automerged_note.strip()]
     if task.feedback.strip():
-        parts += ["", "## Feedback and messages for this task (address every item)", "", task.feedback.strip()]
+        parts += ["", "## Feedback and messages for this task (address every item)", "",
+                  label_feedback(task.feedback.strip(), orchestrator_host)]
     if questions_note.strip():
         # an fyi answered after the attempt that asked it was never seen, and the next attempt asked again (Q-315)
         parts += ["", "## Questions this task already asked, with the answers so far", "",

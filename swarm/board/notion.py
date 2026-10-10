@@ -386,7 +386,7 @@ class NotionBoard:
     def __init__(self, client: NotionClient, ids: NotionIds):
         self.c = client
         self.ids = ids
-        self._details_ok: bool | None = None   # Questions has a Details column (checked once per process)
+        self._columns_ok: set[str] | None = None   # optional Questions columns present (checked once per process)
         # Highest id this process handed out per prefix. Notion's query is eventually consistent: a page created a
         # moment ago may be missing from the next query, so two questions filed in one runner publish (T-096's
         # harness note and its fyi) both became Q-209 and `swarm answer Q-209` closed only one (Oct 6).
@@ -457,22 +457,38 @@ class NotionBoard:
             props = np.question_to_props(q)
             self.c.update_page(q.page_id, {"ID": props["ID"], "Question": props["Question"]})
 
-    def _questions_have_details(self) -> bool:
-        """Boards made before Oct 6 2026 have no Details column: add it once (the integration owns the schema).
-        If that fails, the full text goes into Context instead, so it is never lost to the title's length."""
-        if self._details_ok is None:
+    def _question_columns(self) -> set[str]:
+        """Boards made before Oct 6 2026 have no Details column, before Oct 10 no Answered By: add each once (the
+        integration owns the schema). A column that cannot be added is left out of every write."""
+        if self._columns_ok is None:
+            ok: set[str] = set()
             try:
                 props = (self.c.get_data_source(self.ids.questions_ds) or {}).get("properties") or {}
-                if "Details" not in props:
-                    self.c.request("PATCH", f"/data_sources/{self.ids.questions_ds}",
-                                   json={"properties": {"Details": {"rich_text": {}}}})
-                self._details_ok = True
             except NotionError:
-                self._details_ok = False
-        return self._details_ok
+                props = None
+            for name in ("Details", "Answered By"):
+                if props is None:
+                    continue
+                if name in props:
+                    ok.add(name)
+                    continue
+                try:
+                    self.c.request("PATCH", f"/data_sources/{self.ids.questions_ds}",
+                                   json={"properties": {name: {"rich_text": {}}}})
+                    ok.add(name)
+                except NotionError:
+                    pass
+            self._columns_ok = ok
+        return self._columns_ok
+
+    def _questions_have_details(self) -> bool:
+        """If Details cannot be added, the full text goes into Context instead, so it is never lost to the title."""
+        return "Details" in self._question_columns()
 
     def _question_props(self, q: Question, **kw) -> dict:
         props = np.question_to_props(q, **kw)
+        if "Answered By" in props and "Answered By" not in self._question_columns():
+            props.pop("Answered By")
         if "Details" in props and not self._questions_have_details():
             props.pop("Details")
             if len(q.text) > np.QUESTION_TITLE_CHARS - len(q.id) - 3 and "Context" in props:
