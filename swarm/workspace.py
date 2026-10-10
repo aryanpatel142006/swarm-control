@@ -356,6 +356,23 @@ class Workspace:
         uncommitted = [line[3:].strip() for line in status if line.strip()]
         return sorted(set(committed) | set(uncommitted))
 
+    def ensure_script_from_main(self, path: Path, script_rel: str | None) -> bool:
+        """Make `script_rel` runnable in the worktree: present already, or copied (untracked) from main when the
+        branch forked before main added it (web verify, Oct 10: review worktrees are not merged with main).
+        False when main does not have it either."""
+        if not script_rel:
+            return False
+        target = Path(path) / script_rel
+        if target.exists():
+            return True
+        r = self.git(path, "show", f"{self._main_ref()}:{script_rel}", check=False)
+        if not r.ok or not r.out:
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(r.out if r.out.endswith("\n") else r.out + "\n")
+        target.chmod(0o755)
+        return True
+
     def branch_files(self, path: Path) -> list[str]:
         """Committed files the branch changes against its merge base with main; a rename counts both paths (so a
         move out of a protected directory is still seen). Uncommitted files are left out (light verify)."""

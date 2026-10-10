@@ -411,3 +411,26 @@ def test_web_only_branch_gets_the_web_command_in_review_without_a_slot(cfg, git_
     assert "web verify: scripts/verify_web.sh, web-only diff" in adapter.prompts[0]
     assert any(line.startswith(f"[{t.id}] web verify:") for line in logs)
     assert rev._slot_for("scripts/verify_web.sh") is False and rev._slot_for("scripts/verify_full.sh") is True
+
+
+def test_web_command_missing_on_the_branch_is_copied_from_main(cfg, git_repo, tmp_path):
+    # the branch forks before main adds scripts/verify_web.sh: the review still runs the web command
+    import subprocess
+    cfg.verify.web_paths = ["web/**"]
+    cfg.verify.web_command = "scripts/verify_web.sh"
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["web/app/app.js"])
+    (git_repo / "scripts" / "verify_web.sh").write_text("#!/bin/sh\necho RAN_WEB; exit 0\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "scripts"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "web script"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "push", "-q", "origin", "main"], check=True)
+    assert rev.process(t).status is Status.MERGE_READY
+    assert "RAN_WEB" in adapter.prompts[0]
+
+
+def test_web_command_missing_everywhere_falls_back(cfg, git_repo, tmp_path):
+    cfg.verify.web_paths = ["web/**"]
+    cfg.verify.web_command = "scripts/no_such_verify_web.sh"
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["web/app/app.js"])
+    assert rev.process(t).status is Status.MERGE_READY
+    assert "RAN_FULL" in adapter.prompts[0]
+    assert any("is not on the branch or main; no web verify" in m for m in logs)

@@ -119,13 +119,14 @@ def logs_choice(verify_cfg) -> bool:
     return bool(getattr(verify_cfg, "light_paths", None) or getattr(verify_cfg, "web_paths", None))
 
 
-def choose_verify(verify_cfg, files: list[str], importance: str, full_command: str | None) -> VerifyChoice:
+def choose_verify(verify_cfg, files: list[str], importance: str, full_command: str | None,
+                  web: bool = True) -> VerifyChoice:
     """Which verify a review or merge runs for a branch that changes `files`. `full_command` is what that step runs
     without the light path (the reviewer's verify.full, the merger's verify.fast). A web-only branch gets the web
     verify first (`web_choice`)."""
-    web = web_choice(verify_cfg, files)
-    if web is not None:
-        return web
+    w = web_choice(verify_cfg, files) if web else None
+    if w is not None:
+        return w
     light_paths = [p for p in (getattr(verify_cfg, "light_paths", None) or []) if p.strip()]
     files = sorted({f for f in files if f.strip()})
 

@@ -1677,6 +1677,8 @@ class Runner:
 
         # web-only change: verify.web_command, no verify slot, no wait behind exclusive measurements
         web = web_choice(self.cfg.verify, list(changed)) if changed else None
+        if web is not None and not self.ws.ensure_script_from_main(wt, web.command):
+            web = None
         if web is not None:
             self.log(web.log_line(task.id))
         verify_script = web.command if web is not None else self.cfg.verify.fast

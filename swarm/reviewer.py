@@ -261,6 +261,9 @@ class Reviewer:
             self.log(f"[{task.id}] could not list the branch's files ({e!r}); full verify")
             files = []
         choice = choose_verify(self.cfg.verify, files, task.importance, self.cfg.verify.full)
+        if choice.web and not self.ws.ensure_script_from_main(wt, choice.command):
+            self.log(f"[{task.id}] {choice.command} is not on the branch or main; no web verify")
+            choice = choose_verify(self.cfg.verify, files, task.importance, self.cfg.verify.full, web=False)
         if logs_choice(self.cfg.verify):
             self.log(choice.log_line(task.id))
         return choice
