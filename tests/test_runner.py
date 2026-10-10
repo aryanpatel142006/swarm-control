@@ -1927,3 +1927,38 @@ def test_report_markdown_lists_harness_notes():
                             harness_notes=["scratch files committed: scratch.py"])
     assert "Harness notes (not blocking):\n- scratch files committed: scratch.py" in md
     assert "Harness notes" not in report_to_markdown(r, attempt=1, verify_ok=True, verify_tail="", pr_url="", flags=[])
+
+
+def test_new_attempt_stops_the_previous_attempts_swarm_lock_jobs(cfg, git_repo, tmp_path, monkeypatch):
+    """Q-521: a detached measurement of an earlier attempt held the exclusive lock 20+ min after the reset."""
+    import os
+    import sys
+    import time
+    from pathlib import Path
+    from swarm import hostlock
+    locks = tmp_path / "locks"
+    monkeypatch.setattr(hostlock, "lock_dir", lambda project: locks)
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    env = {**os.environ, "SWARM_TASK_ID": t.id}
+    env.pop(hostlock.HELD_ENV, None)
+    root = str(Path(hostlock.__file__).resolve().parent.parent)
+    old = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(locks), "--slots", "1",
+                            "--exclusive", "--", "sleep", "60"], cwd=root, env=env)
+    other = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(locks), "--slots", "2",
+                              "--", "sleep", "60"], cwd=root, env={**env, "SWARM_TASK_ID": "T-OTHER"})
+    try:
+        end = time.monotonic() + 15
+        while time.monotonic() < end and len(hostlock.holders(locks, 2)) < 2:
+            time.sleep(0.05)
+        assert len(hostlock.holders(locks, 2)) == 2
+        r.run_task(t)
+        assert old.wait(timeout=20) != 0                    # the earlier attempt's job is gone
+        assert other.poll() is None                         # another task's job is left alone
+        assert f"pid {old.pid}" in adapter.prompts[0] and "stopped" in adapter.prompts[0]
+    finally:
+        for p in (old, other):
+            if p.poll() is None:
+                p.kill()
+                p.wait()

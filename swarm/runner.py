@@ -800,6 +800,19 @@ class Runner:
                     break
         return sorted(dict.fromkeys(found))[:cap]
 
+    def _stop_previous_lock_jobs(self, task: Task) -> list[str]:
+        """Before a new attempt: stop `swarm-lock` jobs an earlier attempt of this task left running (Q-521).
+        The worker CLI of that attempt is gone (checked just before); its detached measurement is not. Never raises."""
+        try:
+            from .hostlock import lock_dir, stop_task_lock_jobs
+            lines = stop_task_lock_jobs(lock_dir(self.cfg.project), task.id)
+        except Exception as e:  # noqa: BLE001 - a cleanup must not stop the run
+            self.log(f"[{task.id}] could not check earlier swarm-lock jobs: {e!r}")
+            return []
+        for line in lines:
+            self.log(f"[{task.id}] stopped an earlier attempt's swarm-lock job: {line}")
+        return lines
+
     def _lock_wait_credit(self, task: Task, timeout_s: int):
         """Seconds the worker's processes have waited in `swarm-lock` this run, capped: the adapter extends the
         run's deadline by that much, so a queue behind other worktrees' verify_full does not eat the budget
@@ -901,6 +914,7 @@ class Runner:
                      f"starting a second worker (retry in {CLI_BUSY_RETRY_S // 60} min)")
             return Outcome(task, None, None, None, task.status)
         self._cli_busy.pop(task.id, None)
+        stopped_jobs = self._stop_previous_lock_jobs(task)
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
             if carried:
@@ -917,6 +931,11 @@ class Runner:
                 task.feedback, synced=synced, conflicts=conflicts,
                 markers=self.ws.conflict_marker_files(wt) if reuse else [],
                 main_ref=f"{self.ws.remote}/{self.cfg.main_branch}")
+            if stopped_jobs:
+                note = ("The harness stopped background jobs an earlier attempt of this task left running under "
+                        "`swarm-lock` (they would have held the measurement lock next to this run): "
+                        + "; ".join(stopped_jobs) + ". Their output is partial; rerun what you need.")
+                task.feedback = (task.feedback.rstrip() + "\n\n" + note).strip()
             if self.cfg.worktree_links:
                 try:
                     linked = self.ws.link_ignored(wt, self.cfg.worktree_links)

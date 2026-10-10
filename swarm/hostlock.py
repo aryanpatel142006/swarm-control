@@ -518,6 +518,44 @@ def _zombie(pid: int) -> bool:
     return r.stdout.strip().startswith("Z")
 
 
+def _cmdline(pid: int) -> str:
+    try:
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def task_lock_jobs(directory: Path | str, task_id: str) -> list[dict]:
+    """Live `swarm-lock` processes (holding slots or queued for the exclusive lock) started for `task_id`. Only
+    processes whose command line runs swarm.hostlock count: a harness verify inside `swarm serve` or `swarm run`
+    is never one of them."""
+    directory = Path(directory)
+    out, seen = [], set()
+    files = sorted(directory.glob("verify-*.holder")) + sorted(directory.glob(PENDING_PREFIX + "*"))
+    for f in files:
+        h = _read_json(f)
+        if not h or not task_id or h.get("task") != task_id or not isinstance(h.get("pid"), int):
+            continue
+        if h["pid"] == os.getpid() or h["pid"] in seen or not _entry_alive(h):
+            continue
+        if "swarm.hostlock" not in _cmdline(h["pid"]):
+            continue
+        seen.add(h["pid"])
+        out.append(h)
+    return out
+
+
+def stop_task_lock_jobs(directory: Path | str, task_id: str, *, grace_s: float = 10.0) -> list[str]:
+    """Stop a task's earlier `swarm-lock` jobs and their command trees (Q-521: a previous attempt's detached
+    measurement held the exclusive lock 20+ min after its worktree was reset). One line per job stopped."""
+    lines = []
+    for h in task_lock_jobs(directory, task_id):
+        tree = stop_tree(h["pid"], grace_s=grace_s)
+        lines.append(f"{describe([h])}; stopped pids {', '.join(str(t) for t in tree)}")
+    return lines
+
+
 def write_wrapper(bin_dir: Path, python: str | None = None) -> Path:
     """`<bin_dir>/swarm-lock`: a shell wrapper around this module with the harness's own interpreter, so a worker
     (any shell, any venv) can run `swarm-lock -- <cmd>` without knowing where swarm-control lives."""
