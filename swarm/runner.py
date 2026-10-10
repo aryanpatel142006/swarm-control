@@ -36,6 +36,7 @@ from .workspace import Workspace, automerge_note, merge_conflict_instructions
 STRUCTURED_PROVIDERS = {"claude", "codex"}
 ALWAYS_REVIEWED_DOCS = ("docs/CONTRACTS.md", "docs/DESIGN.md")
 HARNESS_PATHS = ("docs/decisions/", "docs/debt/")   # written by the runner itself, never by the model
+SHOTS_DIR = "web/app/tests/shots/{task}/"   # rule 20: committed frontend acceptance screenshots, always in scope
 RATE_LIMIT_COOLDOWN_MIN = 15
 # an exhausted plan with no reset time in the message: 3 h until Oct 10 2026, now 60 min (a run that finds it still
 # used up costs a minute and no attempt, while 3 h idled an account that had come back)
@@ -1786,7 +1787,8 @@ class Runner:
             patterns = self.cfg.verify.scratch_patterns
             patterns = DEFAULT_SCRATCH_PATTERNS if patterns is None else patterns
             scratch = scratch_files(self.ws.added_files(wt), patterns, task.scope) if patterns else []
-            outside = out_of_scope_edits(changed, task.scope, exempt=HARNESS_PATHS, skip=scratch,
+            exempt = HARNESS_PATHS + (SHOTS_DIR.format(task=task.id),)
+            outside = out_of_scope_edits(changed, task.scope, exempt=exempt, skip=scratch,
                                          named_in="\n".join([task.description, task.acceptance,
                                                              report.notes_for_reviewer]))
             return scope_lint_lines(scratch, outside)

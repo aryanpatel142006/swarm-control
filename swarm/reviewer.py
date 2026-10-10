@@ -12,6 +12,7 @@ from pathlib import Path
 from .adapters import get_adapter
 from .adapters.base import RunSpec
 from .board.base import Board, fresh_flags
+from .cichecks import checks_note
 from .config import Config
 from .failover import ReviewerState, reviewer_state
 from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
@@ -54,7 +55,7 @@ def parse_verdict(structured: dict | None, worktree: Path) -> Verdict:
 
 
 def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: str, questions_note: str = "",
-                        verify_label: str = "full suite") -> str:
+                        verify_label: str = "full suite", checks_note: str = "") -> str:
     asked = (["## Questions the worker asked, with the orchestrator's answers so far", "",
               "An answer that asks for a change is part of the acceptance: request changes when the diff does not "
               "make it (T-120 merged before Q-313's answer reached it).", "", questions_note.strip(), ""]
@@ -63,12 +64,15 @@ def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: s
              "Scratch files should be removed; an edit outside the scope is acceptable only when the diff shows the "
              "acceptance needs it. Say so in a finding when it is not.", ""]
             if task.feedback.startswith(HARNESS_NOTE_MARK) else [])
+    checks = (["## GitHub checks on the PR", "", "The local verify above is the gate. A check marked as CI "
+               "infrastructure unavailable never ran, so it is never a reason to request changes.", "",
+               checks_note.strip(), ""] if checks_note.strip() else [])
     parts = [f"# Review of {task.id} · {task.title}", "", instructions.strip(), "", "## Task", "",
              f"- Type: {task.type} · Importance: {task.importance} · Scope: {', '.join(task.scope) or 'any'}",
              f"- Flags from the harness: {', '.join(task.flags) or 'none'}", "", "### Description", "",
              task.description.strip() or "(none)", "", "### Acceptance criteria", "",
              task.acceptance.strip() or "(none given)", "", *lint, *asked, f"## Verify output ({verify_label})", "", "```",
-             verify_tail.strip() or "(no verify script)", "```", "", "## Diff against main", "", "```diff",
+             verify_tail.strip() or "(no verify script)", "```", "", *checks, "## Diff against main", "", "```diff",
              diff[:DIFF_CAP] + ("\n[diff truncated]" if len(diff) > DIFF_CAP else ""), "```", "",
              "## Verdict contract", "", "Your final answer MUST be a JSON object matching:", "", "```json",
              json.dumps(REVIEW_SCHEMA, indent=1), "```", "",
@@ -218,7 +222,9 @@ class Reviewer:
             prompt = build_review_prompt(task, diff, (verify_note + "\n\n" + tail).strip() if verify_note else tail,
                                          self.prompt_text, self._questions_note(task),
                                          verify_label=(f"light verify: {choice.command}, docs/eval-only diff"
-                                                       if choice.light else "full suite"))
+                                                       if choice.light else "full suite"),
+                                         checks_note=checks_note(self.ws.gh, self.ws.repo_root,
+                                                                 task.pr_url or task.branch))
             pf = wt / ".swarm-run" / "review_prompt.md"
             pf.write_text(prompt)
             tried: set[str] = set()
