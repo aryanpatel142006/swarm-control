@@ -1567,6 +1567,11 @@ class Runner:
             # merger, which sends the task back; the next run starts with the markers in place.
             # commit_all also concludes a merge the worker resolved but could not commit (sandbox).
             self.ws.commit_all(wt, f"{task.id}: {(report.summary or 'work in progress')[:60]}")
+            try:   # project rule: no AI co-author/attribution lines in any commit (T-205, Oct 10)
+                if self.ws.scrub_attribution(wt):
+                    self.log(f"[{task.id}] stripped AI co-author/attribution lines from the branch's commits")
+            except RuntimeError as e:
+                self.log(f"[{task.id}] could not strip attribution lines: {e}")
             markers = self.ws.conflict_marker_files(wt)
             try:
                 if not markers and not self.ws.rebase_in_progress(wt):

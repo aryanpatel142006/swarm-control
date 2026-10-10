@@ -291,3 +291,46 @@ def test_merge_main_clean_brings_main_in(git_repo, tmp_path):
     _git(git_repo, "add", "other.txt"); _git(git_repo, "commit", "-qm", "main other"); _git(git_repo, "push", "-q", "origin", "main")
     assert ws.merge_main(wt, keep_conflicts=True) == (True, [], [])
     assert (wt / "other.txt").exists() and ws.changed_files(wt) == ["new.txt"]
+
+
+def test_strip_ai_attribution_lines():
+    from swarm.workspace import strip_ai_attribution
+    msg = ("T-205: fix\n\nbody line\n\n\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n\n"
+           "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nco-authored-by: Someone <x@anthropic.com>\n"
+           "Co-authored-by: Joseph <j@example.com>\n")
+    out = strip_ai_attribution(msg)
+    assert "Claude" not in out and "anthropic" not in out
+    assert "Co-authored-by: Joseph <j@example.com>" in out and out.startswith("T-205: fix\n\nbody line")
+
+
+def test_scrub_attribution_rewrites_branch_commits_only(git_repo, tmp_path):
+    """T-205 (Oct 10): a worker commit's Claude co-author trailer reached main through the squash message."""
+    ws = Workspace(git_repo, tmp_path / "wt")
+    wt = ws.provision("T-900")
+    main_head = _git(wt, "rev-parse", "origin/main").strip()
+    (wt / "a.txt").write_text("a\n")
+    _git(wt, "add", "a.txt")
+    _git(wt, "-c", "user.email=w@x", "-c", "user.name=w", "commit", "-qm",
+         "T-900: a\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
+    (wt / "b.txt").write_text("b\n")
+    _git(wt, "add", "b.txt")
+    _git(wt, "-c", "user.email=w@x", "-c", "user.name=w", "commit", "-qm", "T-900: b")
+    tree = _git(wt, "rev-parse", "HEAD^{tree}").strip()
+    assert ws.scrub_attribution(wt) == 1
+    log = _git(wt, "log", "--format=%B%x00%an", "origin/main..HEAD")
+    assert "Claude" not in log and "T-900: a" in log and "T-900: b" in log and "\x00w" in log
+    assert _git(wt, "rev-parse", "HEAD^{tree}").strip() == tree        # same content
+    assert _git(wt, "rev-parse", "origin/main").strip() == main_head    # main untouched
+    assert _git(wt, "status", "--porcelain").strip() == ""
+    assert ws.scrub_attribution(wt) == 0
+    ws.dispose(wt)
+
+
+def test_pr_merge_passes_an_explicit_squash_message(git_repo, tmp_path):
+    calls = []
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda args, cwd: calls.append(args) or CmdResult(0, "", ""))
+    ws.pr_merge("https://gh/pr/7", subject="T-1 · x (#7)", body="* T-1: a\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    args = calls[-1]
+    assert args[args.index("--subject") + 1] == "T-1 · x (#7)"
+    body = args[args.index("--body") + 1]
+    assert body == "* T-1: a"

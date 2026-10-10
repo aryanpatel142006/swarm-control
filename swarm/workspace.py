@@ -13,6 +13,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+# No AI co-author or attribution lines in any commit (project rule; T-205's squash commit on main carried a
+# `Co-Authored-By: Claude` trailer from a worker commit, Oct 10 2026).
+_AI_ATTRIBUTION_RE = re.compile(r"^[ \t]*(co-authored-by:[^\n]*(claude|anthropic)[^\n]*"
+                                r"|[^\n]*generated with \[?claude code[^\n]*)$", re.I | re.M)
+
+
+def strip_ai_attribution(text: str) -> str:
+    """The message without `Co-Authored-By:` lines naming Claude/Anthropic and "Generated with Claude Code" lines."""
+    out = _AI_ATTRIBUTION_RE.sub("", text)
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in out.splitlines()))
+    return out.strip()
+
+
 _MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)", re.M)
 _SEPARATOR_RE = re.compile(r"^={7}$", re.M)
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -436,9 +449,52 @@ class Workspace:
             return "N/A", "N/A"          # no PR or gh unavailable: nothing to wait for
         return str(data.get("mergeable") or "UNKNOWN"), str(data.get("mergeStateStatus") or "UNKNOWN")
 
-    def pr_merge(self, ref: str) -> CmdResult:
-        # no --delete-branch: gh would try to delete the local branch too, which fails while a worktree holds it
-        return self.gh(["pr", "merge", ref, "--squash"], self.repo_root)
+    def pr_merge(self, ref: str, *, subject: str = "", body: str | None = None) -> CmdResult:
+        # no --delete-branch: gh would try to delete the local branch too, which fails while a worktree holds it.
+        # An explicit body: GitHub's default squash body concatenates every commit message, trailers included.
+        args = ["pr", "merge", ref, "--squash"]
+        if subject:
+            args += ["--subject", strip_ai_attribution(subject)]
+        if body is not None:
+            args += ["--body", strip_ai_attribution(body)]
+        return self.gh(args, self.repo_root)
+
+    def squash_body(self, path: Path) -> str:
+        """The squash commit's body: one line per non-merge commit the branch adds to main."""
+        r = self.git(path, "log", "--no-merges", "--reverse", "--format=%s", f"{self._main_ref()}..HEAD", check=False)
+        return "\n".join(f"* {s}" for s in r.out.splitlines() if s.strip()) if r.ok else ""
+
+    def scrub_attribution(self, path: Path) -> int:
+        """Rewrite the messages of the branch's own commits (main..HEAD) that carry AI co-author/attribution lines;
+        trees, authors, dates and merge structure stay. Returns how many messages changed (0: nothing rewritten)."""
+        main = self._main_ref()
+        revs = self.git(path, "rev-list", "--reverse", "--topo-order", f"{main}..HEAD", check=False).out.split()
+        if not revs:
+            return 0
+        msgs = {c: self.git(path, "log", "-1", "--format=%B", c).out for c in revs}
+        if not any(_AI_ATTRIBUTION_RE.search(m) for m in msgs.values()):
+            return 0
+        mapped: dict[str, str] = {}
+        changed = 0
+        for c in revs:
+            info = self.git(path, "log", "-1", "--format=%T%n%P%n%an%n%ae%n%aI%n%cn%n%ce%n%cI", c).out.split("\n")
+            tree, parents, an, ae, ad, cn, ce, cd = info[:8]
+            msg = msgs[c]
+            clean = strip_ai_attribution(msg) + "\n"
+            if clean.strip() != msg.strip():
+                changed += 1
+            args = ["commit-tree", tree]
+            for par in parents.split():
+                args += ["-p", mapped.get(par, par)]
+            env = {**os.environ, "GIT_AUTHOR_NAME": an, "GIT_AUTHOR_EMAIL": ae, "GIT_AUTHOR_DATE": ad,
+                   "GIT_COMMITTER_NAME": cn, "GIT_COMMITTER_EMAIL": ce, "GIT_COMMITTER_DATE": cd}
+            r = subprocess.run(["git", "-C", str(path), *args], input=clean, capture_output=True, text=True,
+                               env=env, timeout=60)
+            if r.returncode != 0:
+                raise RuntimeError(f"git commit-tree failed: {r.stderr.strip()}")
+            mapped[c] = r.stdout.strip()
+        self.git(path, "update-ref", "-m", "swarm: strip AI attribution lines", "HEAD", mapped[revs[-1]], revs[-1])
+        return changed
 
     def remote_tip(self, branch: str) -> str:
         r = self.git(self.repo_root, "ls-remote", "--heads", self.remote, branch, check=False, timeout=60)

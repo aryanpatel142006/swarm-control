@@ -1998,3 +1998,23 @@ def test_retry_after_a_failed_push_reapplies_the_unpushed_commit(cfg, git_repo, 
     assert seen["a"] == "first attempt\n" and seen["ancestor"]
     base = _git(git_repo, "rev-parse", "origin/main").strip()
     assert sha[:12] in seen["prompt"] and base[:12] in seen["prompt"]
+
+
+def test_runner_strips_ai_attribution_from_worker_commits_before_push(cfg, git_repo, tmp_path):
+    adapter = FakeAdapter(structured={"status": "done", "summary": "s"})
+    orig = adapter.run
+
+    def run(spec):
+        out = orig(spec)
+        (spec.cwd / "src").mkdir(exist_ok=True)
+        (spec.cwd / "src" / "a.py").write_text("x\n")
+        _git(spec.cwd, "add", "src/a.py")
+        _git(spec.cwd, "-c", "user.email=w@x", "-c", "user.name=w", "commit", "-qm",
+             "T: a\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
+        return out
+    adapter.run = run
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board)
+    r.run_task(t)
+    log = _git(git_repo, "log", "--format=%B", f"origin/main..origin/task/{t.id}")
+    assert "T: a" in log and "anthropic" not in log.lower()

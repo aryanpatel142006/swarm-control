@@ -1,6 +1,7 @@
 """Merger: merge current main into the branch, fast verify, force-with-lease push, squash merge, mark Done."""
 from __future__ import annotations
 
+import re
 import time
 from typing import Callable
 
@@ -52,7 +53,7 @@ class Merger:
             self.sleep(MERGEABILITY_WAIT_S)
         return state
 
-    def _gh_merge(self, task: Task):
+    def _gh_merge(self, task: Task, body: str | None = None):
         ref = self._ref(task)
         before = self.ws.pr_info(ref)
         if before and str(before.get("state", "OPEN")).upper() != "OPEN":
@@ -69,11 +70,13 @@ class Merger:
             task.pr_url = ref = fresh
             self.board.update_task(task, ["pr_url"])
         self._wait_mergeable(task)
-        r = self.ws.pr_merge(ref)
+        num = re.search(r"/pull/(\d+)|/pr/(\d+)", ref or "")
+        subject = task.title_with_id() + (f" (#{num.group(1) or num.group(2)})" if num else "")
+        r = self.ws.pr_merge(ref, subject=subject, body=body)
         if not r.ok and "not mergeable" in (r.err + r.out):
             self.sleep(MERGEABILITY_WAIT_S * 2)   # one more chance for GitHub to settle
             self._wait_mergeable(task)
-            r = self.ws.pr_merge(ref)
+            r = self.ws.pr_merge(ref, subject=subject, body=body)
         if r.ok:
             after = self.ws.pr_info(ref)
             if after and str(after.get("state", "MERGED")).upper() != "MERGED":
@@ -119,13 +122,19 @@ class Merger:
                 return self._back(task, verify_feedback(
                     verify.out + ("\n" + verify.err if verify.err else ""), code=verify.code,
                     intro=f"{self.cfg.verify.fast} failed after merging current main into the branch. Fix it."))
+            try:
+                if self.ws.scrub_attribution(wt):
+                    self.log(f"[{task.id}] stripped AI co-author/attribution lines from branch commits")
+            except RuntimeError as e:
+                self.log(f"[{task.id}] could not strip attribution lines: {e}")
+            body = self.ws.squash_body(wt)   # explicit: GitHub's default squash body copies every trailer
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if not push.ok:
                 return self._merge_failed(task, "push failed: " + push.err.strip())
         finally:
             # release the branch before gh touches it: a checked-out branch cannot be deleted or fast-forwarded
             self.ws.dispose(wt)
-        r = self._gh_merge(task)
+        r = self._gh_merge(task, body)
         if not r.ok:
             return self._merge_failed(task, "gh pr merge failed: " + (r.err.strip() or r.out.strip()))
         task.status, task.claim_nonce = Status.DONE, ""

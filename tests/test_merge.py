@@ -218,3 +218,14 @@ def test_merge_by_url_then_confirms_and_deletes_branch(cfg, git_repo, tmp_path):
     m.merge(t)
     assert board.get_task(t.id).status is Status.DONE
     assert not _git(git_repo, "ls-remote", "--heads", "origin", t.branch).strip()   # branch deleted after confirmation
+
+
+def test_squash_message_lists_branch_commits_without_ai_attribution(cfg, git_repo, tmp_path):
+    seen = {}
+    m, board, t, dep, calls = prep(cfg, git_repo, tmp_path, seen=seen)
+    assert m.merge(t) is True
+    args = seen["args"]
+    assert "--subject" in args and "--body" in args
+    assert args[args.index("--subject") + 1].startswith(t.title_with_id())
+    body = args[args.index("--body") + 1]
+    assert "feature" in body and "Claude" not in body
