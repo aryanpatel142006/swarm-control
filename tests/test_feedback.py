@@ -172,3 +172,10 @@ def test_lorem_is_flagged_only_as_lorem_ipsum():
                                 (3, "lorem  ipsum"), (4, "the word lorem alone")]}
     hits = placeholder_hits(added, patterns=DEFAULT_PLACEHOLDER_PATTERNS, files=DEFAULT_PLACEHOLDER_FILES)
     assert [n for _, n, _ in hits] == [2, 3]
+
+
+def test_double_braces_skip_python_and_fstrings_but_flag_doc_templates():
+    added = {"docs/A.md": [(1, "Fill {{TODO}} here"), (2, "Hello {{ name }}"), (3, 'say f"{{x}}" in docs')],
+             "hearing/x.py": [(1, 'print(f"{{literal}} {v}")'), (2, "x = '{{'"), (3, "y = 'TBD'")]}
+    hits = placeholder_hits(added, patterns=DEFAULT_PLACEHOLDER_PATTERNS, files=["**/*.md", "**/*.py"])
+    assert [(f, n) for f, n, _ in hits] == [("docs/A.md", 1), ("docs/A.md", 2), ("hearing/x.py", 3)]

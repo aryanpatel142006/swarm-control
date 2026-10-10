@@ -175,12 +175,16 @@ DEFAULT_PLACEHOLDER_PATTERNS = [r"\bTBD\b", r"TODO\(fill\)", r"\{\{", r"<fill", 
 DEFAULT_PLACEHOLDER_FILES = ["**/*.md", "**/*.markdown", "**/*.rst", "**/*.txt", "**/*.adoc", "docs/**"]
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _INLINE_CODE = re.compile(r"`[^`\n]*`")
+_DOUBLE_BRACE = re.compile(r"\{\{|\}\}")
+_FSTRING_LINE = re.compile(r"""(?<![\w])(?:[fF][rR]?|[rR][fF])(?:\"|')""")   # f"..", f'..', rf".."
 
 
 def placeholder_hits(added: dict[str, list[tuple[int, str]]], *, patterns: list[str], files: list[str],
                      fenced: dict[str, set[int]] | None = None) -> list[tuple[str, int, str]]:
     """(file, line, text) for every added line in a checked file that holds a placeholder token. Inline code spans
-    and fenced code blocks are skipped: a doc may quote `{{ var }}` or `TODO` legitimately."""
+    and fenced code blocks are skipped: a doc may quote `{{ var }}` or `TODO` legitimately. Doubled braces are how
+    Python writes literal braces in an f-string, so in *.py files and on lines with an f-string prefix `{{`/`}}`
+    are not a template placeholder (`{{TODO}}` and `{{ name }}` in docs are still flagged)."""
     if not patterns:
         return []
     regs = [re.compile(p) for p in patterns]
@@ -193,6 +197,8 @@ def placeholder_hits(added: dict[str, list[tuple[int, str]]], *, patterns: list[
             if no in skip:
                 continue
             bare = _INLINE_CODE.sub("", line)
+            if path.endswith(".py") or _FSTRING_LINE.search(line):
+                bare = _DOUBLE_BRACE.sub("", bare)
             if any(r.search(bare) for r in regs):
                 hits.append((path, no, line.strip()[:200]))
     return hits
