@@ -673,3 +673,19 @@ def test_worker_lock_env_puts_the_kill_guards_on_path(tmp_path):
     for name in ("pkill", "killall"):
         assert os.access(bin_dir / name, os.X_OK)
         assert "swarm/killguard.py" in (bin_dir / name).read_text()
+
+
+def test_slot_count_is_the_larger_of_config_and_lock_files_on_disk(tmp_path):
+    # Oct 10: laptop-a went from 2 to 5 slots while runners (and their workers' SWARM_VERIFY_SLOTS) still said 2
+    d = tmp_path / "locks"
+    hostlock.ensure_lock_files(d, 5)
+    assert hostlock.lock_file_count(d) == 5
+    with verify_slot(d, 2, exclusive=True) as ex:           # an old-count measurement takes all five
+        assert ex is True
+        with verify_slot(d, 5, wait_s=0.2, poll_s=0.05) as v:
+            assert v is False                               # a new-count verify cannot slip into slot 2..4
+    held = []
+    with contextlib.ExitStack() as st:
+        for _ in range(5):
+            held.append(st.enter_context(verify_slot(d, 2, wait_s=0.2, poll_s=0.05)))
+    assert held == [True] * 5                               # an old-count verify sees all five slots

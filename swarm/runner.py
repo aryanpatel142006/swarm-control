@@ -15,7 +15,7 @@ from typing import Callable
 
 from .adapters import get_adapter
 from .adapters.base import RunSpec
-from .lightverify import quick_slot_wait
+from .lightverify import quick_slot_wait, web_choice
 from .feedback import (DEFAULT_PLACEHOLDER_FILES, DEFAULT_PLACEHOLDER_PATTERNS, DEFAULT_SCRATCH_PATTERNS,
                        DEFAULT_STRAY_PATTERNS, fenced_lines,
                        placeholder_feedback, placeholder_hits, scope_lint_feedback, scope_lint_lines,
@@ -1675,14 +1675,20 @@ class Runner:
             except RuntimeError as e:   # a failed fetch must not lose the run's result
                 self.log(f"[{task.id}] pre-verify merge skipped: {e}")
 
-        verify = (self.ws.run_script(wt, self.cfg.verify.fast, 900,
-                                     quick_wait_s=quick_slot_wait(self.cfg.verify, list(changed)))
+        # web-only change: verify.web_command, no verify slot, no wait behind exclusive measurements
+        web = web_choice(self.cfg.verify, list(changed)) if changed else None
+        if web is not None:
+            self.log(web.log_line(task.id))
+        verify_script = web.command if web is not None else self.cfg.verify.fast
+        verify = ((self.ws.run_script(wt, verify_script, 900, slot=False) if web is not None
+                   else self.ws.run_script(wt, verify_script, 900,
+                                           quick_wait_s=quick_slot_wait(self.cfg.verify, list(changed))))
                   if changed else None)
         verify_ok = verify.ok if verify is not None else None
         if verify is not None and not verify.ok:
             # the failing step first, each section capped on its own (Q-168: the ruff errors were cut off)
             verify_tail = verify_feedback(verify.out + ("\n" + verify.err if verify.err else ""),
-                                          script=self.cfg.verify.fast or "verify", code=verify.code)
+                                          script=verify_script or "verify", code=verify.code)
             if merged_from:
                 verify_tail = self._semantic_merge_note(wt, merged_from) + "\n\n" + verify_tail
         else:

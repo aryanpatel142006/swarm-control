@@ -393,3 +393,21 @@ def test_without_light_paths_review_is_always_full(cfg, git_repo, tmp_path):
     rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["docs/a.md"], light_paths=None)
     rev.process(t)
     assert "RAN_FULL" in adapter.prompts[0] and logs == [l for l in logs if "light verify" not in l]
+
+
+def test_web_only_branch_gets_the_web_command_in_review_without_a_slot(cfg, git_repo, tmp_path):
+    import subprocess
+    cfg.verify.web_paths = ["web/**", "docs/**", "*.md"]
+    cfg.verify.web_command = "scripts/verify_web.sh"
+    (git_repo / "scripts").mkdir(exist_ok=True)
+    (git_repo / "scripts" / "verify_web.sh").write_text("#!/bin/sh\necho RAN_WEB; exit 0\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "scripts"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "web script"], check=True)
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["web/app/app.js", "docs/a.md"],
+                                         importance="critical")
+    rev.ws.verify_slot = lambda label, **kw: (_ for _ in ()).throw(AssertionError("took a slot"))
+    assert rev.process(t).status is Status.MERGE_READY
+    assert "RAN_WEB" in adapter.prompts[0] and "RAN_FULL" not in adapter.prompts[0]
+    assert "web verify: scripts/verify_web.sh, web-only diff" in adapter.prompts[0]
+    assert any(line.startswith(f"[{t.id}] web verify:") for line in logs)
+    assert rev._slot_for("scripts/verify_web.sh") is False and rev._slot_for("scripts/verify_full.sh") is True

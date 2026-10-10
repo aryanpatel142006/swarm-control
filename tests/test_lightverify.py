@@ -88,3 +88,58 @@ def test_quick_slot_wait_for_web_and_docs_only():
     assert quick_slot_wait(custom, ["scripts/verify_fast.sh"]) is None
     assert quick_slot_wait(SimpleNamespace(quick_paths=[], quick_wait_seconds=60), ["web/a.js"]) is None
     assert quick_slot_wait(SimpleNamespace(), ["docs/a.md"]) == 60.0     # older config objects: defaults
+
+
+WEB = ["web/**", "tests/test_app_*", "web/app/tests/shots/**", "docs/**", "*.md"]
+
+
+def wvc(web_paths=WEB, web_command="scripts/verify_web.sh", **kw):
+    v = vc(**kw)
+    v.web_paths, v.web_command = web_paths, web_command
+    return v
+
+
+def test_web_only_diff_gets_the_web_command_without_a_slot_even_when_critical():
+    from swarm.lightverify import web_choice
+    files = ["web/app/app.js", "web/app/tests/shots/T-366/a.jpg", "tests/test_app_static.py", "docs/a.md", "README.md"]
+    for imp in ("low", "critical"):
+        c = choose_verify(wvc(), files, imp, "scripts/verify_full.sh")
+        assert c.web and c.light and not c.slot and c.command == "scripts/verify_web.sh"
+        assert c.reason == "5 files, web only"
+        assert c.commit_line() == "Verify: web, scripts/verify_web.sh (5 files, web only)"
+        assert "web verify" in c.log_line("T-1") and "no verify slot" in c.log_line("T-1")
+    assert web_choice(wvc(), files).web
+
+
+def test_one_non_web_file_falls_back_to_light_or_full():
+    c = choose_verify(wvc(), ["web/app/app.js", "hearing/engine.py"], "normal", "F")
+    assert not c.web and not c.light and c.slot and c.command == "F"
+    c = choose_verify(wvc(), ["docs/a.md", "eval/x.py"], "normal", "F")      # docs + eval: the light rules
+    assert not c.web and c.light and c.command == "scripts/verify_fast.sh"
+    c = choose_verify(wvc(), ["tests/test_server.py"], "normal", "F")      # tests/ outside test_app_*: light
+    assert not c.web and c.light
+
+
+def test_web_verify_off_without_paths_command_or_files():
+    from swarm.lightverify import web_choice
+    assert web_choice(wvc(web_paths=None), ["web/a.js"]) is None
+    assert web_choice(wvc(web_paths=[]), ["web/a.js"]) is None
+    assert web_choice(wvc(web_command=None), ["web/a.js"]) is None
+    assert web_choice(wvc(), []) is None
+    assert web_choice(vc(), ["web/a.js"]) is None                          # older config objects: off
+    assert not choose_verify(vc(), ["web/a.js"], "low", "F").web
+
+
+def test_web_paths_and_command_load_from_config(project_dir, sample_config_dict):
+    import yaml
+    from swarm.lightverify import logs_choice
+    d = dict(sample_config_dict)
+    d["verify"] = {**d["verify"], "web_paths": WEB, "web_command": "scripts/verify_web.sh"}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(d))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.verify.web_paths == WEB and cfg.verify.web_command == "scripts/verify_web.sh"
+    assert logs_choice(cfg.verify)
+    d["verify"] = {k: v for k, v in d["verify"].items() if not k.startswith(("web", "light"))}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(d))
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.verify.web_paths is None and cfg.verify.web_command is None and not logs_choice(cfg.verify)

@@ -241,6 +241,15 @@ verify:
   protected_paths: []                        # extends the built-in never-light list
 ```
 
+- Web verify (checked first): with `verify.web_paths` and `verify.web_command` set, a branch whose every file
+  matches a web glob runs the web command in pre-publish verify, review and merge, critical tasks included. It takes
+  no verify slot and never waits behind `swarm-lock --exclusive` measurements. The logs say `web verify` and the
+  squash body ends with `Verify: web, ...`. selective-hearing: `web_paths: ["web/**", "tests/test_app_*",
+  "web/app/tests/shots/**", "docs/**", "*.md"]`, `web_command: scripts/verify_web.sh` (about 15 s).
+- Verify slots: the machine's slot count is the larger of `hosts.<host>.max_parallel_verify` and the
+  `verify-<i>.lock` files already in the lock directory, so raising it takes effect for runners and workers that
+  still carry the old count (an exclusive measurement takes every slot). To lower it, delete the extra lock files
+  while the machine is idle.
 - Never light: `hearing/**`, `config/**`, `scripts/**`, `web/**`, `.swarm/**`, `pyproject.toml`, `requirements*`,
   `.github/**` (built in) plus `verify.protected_paths`; a critical task; an empty diff. Protected wins over light.
 - The reviewer runs the light command instead of `verify.full` (its flaky rerun and the check on main use the same

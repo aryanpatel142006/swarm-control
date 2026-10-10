@@ -16,7 +16,7 @@ from .cichecks import checks_note
 from .config import Config
 from .failover import ReviewerState, reviewer_state
 from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
-from .lightverify import VerifyChoice, choose_verify, quick_slot_wait
+from .lightverify import VerifyChoice, choose_verify, logs_choice, quick_slot_wait
 from .models import AUTH_LOST_NOTE, QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
@@ -207,8 +207,9 @@ class Reviewer:
                                [{"severity": "high", "file": self.cfg.verify.setup_worktree or "",
                                  "issue": setup.tail(1200), "fix": "orchestrator: fix the environment, then re-review"}])
             choice = self._choose_verify(task, wt)
-            full = self.ws.run_script(wt, choice.command, 1800,
-                                      quick_wait_s=quick_slot_wait(self.cfg.verify, choice.files))
+            full = (self.ws.run_script(wt, choice.command, 1800, slot=False) if choice.web   # web-only: no slot
+                    else self.ws.run_script(wt, choice.command, 1800,
+                                            quick_wait_s=quick_slot_wait(self.cfg.verify, choice.files)))
             verify_note = ""
             if full is not None and not full.ok:
                 full, verify_note, verdict = self._triage_full_failure(task, wt, full, choice.command)
@@ -221,7 +222,8 @@ class Reviewer:
             tail = full.tail(1500) if full else ""
             prompt = build_review_prompt(task, diff, (verify_note + "\n\n" + tail).strip() if verify_note else tail,
                                          self.prompt_text, self._questions_note(task),
-                                         verify_label=(f"light verify: {choice.command}, docs/eval-only diff"
+                                         verify_label=(f"web verify: {choice.command}, web-only diff" if choice.web
+                                                       else f"light verify: {choice.command}, docs/eval-only diff"
                                                        if choice.light else "full suite"),
                                          checks_note=checks_note(self.ws.gh, self.ws.repo_root,
                                                                  task.pr_url or task.branch))
@@ -259,9 +261,14 @@ class Reviewer:
             self.log(f"[{task.id}] could not list the branch's files ({e!r}); full verify")
             files = []
         choice = choose_verify(self.cfg.verify, files, task.importance, self.cfg.verify.full)
-        if getattr(self.cfg.verify, "light_paths", None):
+        if logs_choice(self.cfg.verify):
             self.log(choice.log_line(task.id))
         return choice
+
+    def _slot_for(self, command: str | None) -> bool:
+        """The web command (verify.web_command) runs without a verify slot; everything else takes one."""
+        web = getattr(self.cfg.verify, "web_command", None)
+        return not (web and command == web)
 
     def _questions_note(self, task: Task) -> str:
         try:
@@ -294,7 +301,7 @@ class Reviewer:
         conflicted). Returns (result to show the reviewer, note for the reviewer, verdict or None to continue)."""
         command = command or self.cfg.verify.full     # the light command when the review chose light verify
         script = command or "verify_full"
-        second = self.ws.run_script(wt, command, 1800)
+        second = self.ws.run_script(wt, command, 1800, slot=self._slot_for(command))
         if second is not None and second.ok:
             self.log(f"[{task.id}] {script} failed, then passed on a rerun: flaky, not sent back")
             step = failing_step_line(_text(first))
@@ -332,7 +339,7 @@ class Reviewer:
             return None
         try:
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
-            return self.ws.run_script(wt, command or self.cfg.verify.full, 1800)
+            return self.ws.run_script(wt, command or self.cfg.verify.full, 1800, slot=self._slot_for(command))
         finally:
             self.ws.dispose(wt)
 

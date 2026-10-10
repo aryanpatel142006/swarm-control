@@ -8,7 +8,7 @@ from typing import Callable
 from .board.base import Board, fresh_flags
 from .config import Config
 from .feedback import verify_feedback
-from .lightverify import choose_verify, quick_slot_wait
+from .lightverify import choose_verify, logs_choice, quick_slot_wait
 from .models import Question, Status, Task, utcnow
 from .workspace import CmdResult, Workspace
 
@@ -124,14 +124,17 @@ class Merger:
                 files = []
             # light verify for a docs/eval-only branch (swarm/lightverify.py); otherwise the merge's usual verify_fast
             choice = choose_verify(self.cfg.verify, files, task.importance, self.cfg.verify.fast)
-            if self.cfg.verify.light_paths:
+            if logs_choice(self.cfg.verify):
                 self.log(choice.log_line(task.id))
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
-            quick = quick_slot_wait(self.cfg.verify, files)
-            if quick is not None:
-                self.log(f"[{task.id}] quick slot: only web/docs files changed; waits at most {quick:.0f} s "
-                         "behind exclusive measurements")
-            verify = self.ws.run_script(wt, choice.command, 900, quick_wait_s=quick)
+            if choice.web:   # web-only: the web command, no verify slot, no wait behind exclusive measurements
+                verify = self.ws.run_script(wt, choice.command, 900, slot=False)
+            else:
+                quick = quick_slot_wait(self.cfg.verify, files)
+                if quick is not None:
+                    self.log(f"[{task.id}] quick slot: only web/docs files changed; waits at most {quick:.0f} s "
+                             "behind exclusive measurements")
+                verify = self.ws.run_script(wt, choice.command, 900, quick_wait_s=quick)
             if verify is not None and not verify.ok:
                 return self._back(task, verify_feedback(
                     verify.out + ("\n" + verify.err if verify.err else ""), code=verify.code,
@@ -142,7 +145,7 @@ class Merger:
             except RuntimeError as e:
                 self.log(f"[{task.id}] could not strip attribution lines: {e}")
             body = self.ws.squash_body(wt)   # explicit: GitHub's default squash body copies every trailer
-            if self.cfg.verify.light_paths:
+            if logs_choice(self.cfg.verify):
                 body = (body + "\n\n" if body else "") + choice.commit_line()
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if not push.ok:

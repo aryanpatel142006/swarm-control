@@ -50,6 +50,11 @@ class VerifyConfig:
     # built-in defaults (docs/**, *.md, web/**, frontend/**); [] turns it off.
     quick_paths: list[str] | None = None
     quick_wait_seconds: float = 60.0
+    # Web verify (swarm/lightverify.py web_choice): a branch whose every changed file matches `web_paths` runs
+    # `web_command` in pre-publish verify, review and merge instead of verify.fast/verify.full, without a verify
+    # slot or any wait behind exclusive measurements. Applies to critical tasks too. None/[] = off (the default).
+    web_paths: list[str] | None = None
+    web_command: str | None = None
 
 
 @dataclass
@@ -451,7 +456,9 @@ def load_config(path: Path | str) -> Config:
                                            else None),
                             protected_paths=_str_list(verify_raw.get("protected_paths"), "verify.protected_paths"),
                             quick_paths=_str_list(verify_raw.get("quick_paths"), "verify.quick_paths"),
-                            quick_wait_seconds=max(0.0, float(verify_raw.get("quick_wait_seconds", 60)))),
+                            quick_wait_seconds=max(0.0, float(verify_raw.get("quick_wait_seconds", 60))),
+                            web_paths=_str_list(verify_raw.get("web_paths"), "verify.web_paths"),
+                            web_command=(str(verify_raw["web_command"]) if verify_raw.get("web_command") else None)),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),

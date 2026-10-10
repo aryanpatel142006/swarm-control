@@ -102,6 +102,25 @@ def ensure_lock_files(directory: Path, slots: int) -> None:
             f.touch()
 
 
+def lock_file_count(directory: Path | str) -> int:
+    """How many consecutive `verify-<i>.lock` files exist from 0. The machine's slot count is the larger of this and
+    the caller's configured count, so processes started with an older, smaller `max_parallel_verify` (a runner not yet
+    restarted, a worker's SWARM_VERIFY_SLOTS) still see every slot: an exclusive measurement takes all of them and a
+    normal verify never slips into a slot the measurement does not hold (Oct 10: laptop-a went from 2 to 5 slots
+    while runners kept running). Lowering the count takes effect once the extra lock files are deleted while idle."""
+    n = 0
+    try:
+        while (Path(directory) / f"verify-{n}.lock").exists():
+            n += 1
+    except OSError:
+        pass
+    return n
+
+
+def _slots(directory: Path | str, slots: int) -> int:
+    return max(1, int(slots), lock_file_count(directory))
+
+
 def _open(path: Path) -> int:
     try:
         return os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
@@ -185,7 +204,7 @@ def _unlink_if_mine(path: Path) -> None:
 def holders(directory: Path | str, slots: int) -> list[dict]:
     """Who holds the slots now (live processes only; a crashed holder's file is ignored)."""
     out, seen = [], set()
-    for i in range(max(1, slots)):
+    for i in range(_slots(directory, slots)):
         h = _read_json(Path(directory) / f"verify-{i}.holder")
         if h and _entry_alive(h) and (h["pid"], h.get("label")) not in seen:
             seen.add((h["pid"], h.get("label")))      # two harness verifies in one process are two holders
@@ -344,6 +363,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
         ensure_lock_files(directory, slots)
     except OSError:
         pass   # read-only sandbox: the runner created the files; _open falls back to O_RDONLY
+    slots = _slots(directory, slots)   # every slot on the machine, whoever configured how many
     fds: list[int] = []
     held_idx: list[int] = []
     deadline = time.monotonic() + wait_s

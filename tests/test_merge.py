@@ -279,3 +279,16 @@ def test_critical_merge_never_takes_the_light_path(cfg, git_repo, tmp_path):
     m, board, t, seen, logs = _light_prep(cfg, git_repo, tmp_path, "docs/notes.md", importance="critical")
     assert m.merge(t) is True                                    # verify_fast (passing) ran, not the failing light one
     assert f"[{t.id}] full verify: critical task" in logs
+
+
+def test_merge_of_a_web_only_branch_runs_the_web_command_without_a_slot(cfg, git_repo, tmp_path):
+    cfg.verify.web_paths = ["web/**", "docs/**", "*.md"]
+    cfg.verify.web_command = "scripts/verify_web.sh"
+    (git_repo / "scripts" / "verify_web.sh").write_text("#!/bin/sh\necho WEBRAN; exit 1\n")
+    _git(git_repo, "add", "scripts"); _git(git_repo, "commit", "-qm", "web"); _git(git_repo, "push", "-q", "origin", "main")
+    m, board, t, seen, logs = _light_prep(cfg, git_repo, tmp_path, "web/app/app.js", importance="critical")
+    slots = []
+    m.ws.verify_slot = lambda label, **kw: slots.append(label) or (_ for _ in ()).throw(AssertionError("slot"))
+    assert m.merge(t) is False                                   # the (failing) web command ran, not verify_fast
+    assert "WEBRAN" in board.get_task(t.id).feedback and not slots
+    assert any(line.startswith(f"[{t.id}] web verify: scripts/verify_web.sh (1 file, web only") for line in logs)
