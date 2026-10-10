@@ -1946,19 +1946,55 @@ def test_new_attempt_stops_the_previous_attempts_swarm_lock_jobs(cfg, git_repo, 
     root = str(Path(hostlock.__file__).resolve().parent.parent)
     old = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(locks), "--slots", "1",
                             "--exclusive", "--", "sleep", "60"], cwd=root, env=env)
-    other = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(locks), "--slots", "2",
-                              "--", "sleep", "60"], cwd=root, env={**env, "SWARM_TASK_ID": "T-OTHER"})
-    try:
-        end = time.monotonic() + 15
-        while time.monotonic() < end and len(hostlock.holders(locks, 2)) < 2:
+    other = None
+
+    def wait_holders(n):
+        end = time.monotonic() + 30
+        while time.monotonic() < end and len(hostlock.holders(locks, 2)) < n:
             time.sleep(0.05)
-        assert len(hostlock.holders(locks, 2)) == 2
+        assert len(hostlock.holders(locks, 2)) == n
+    try:
+        wait_holders(1)                                     # the earlier job holds verify-0 first
+        other = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(locks), "--slots", "2",
+                                  "--", "sleep", "60"], cwd=root, env={**env, "SWARM_TASK_ID": "T-OTHER"})
+        wait_holders(2)
         r.run_task(t)
         assert old.wait(timeout=20) != 0                    # the earlier attempt's job is gone
         assert other.poll() is None                         # another task's job is left alone
         assert f"pid {old.pid}" in adapter.prompts[0] and "stopped" in adapter.prompts[0]
     finally:
         for p in (old, other):
-            if p.poll() is None:
+            if p is not None and p.poll() is None:
                 p.kill()
                 p.wait()
+
+
+def test_retry_after_a_failed_push_reapplies_the_unpushed_commit(cfg, git_repo, tmp_path):
+    """Q-506: after a failed push the retry's branch lacked the previous attempt's commit (left dangling)."""
+    adapter = FakeAdapter(files={"src/a.py": "first attempt\n"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    real_push = r.ws.push
+    r.ws.push = lambda path, branch, force_with_lease=False: CmdResult(1, "", "rejected")
+    t = ready_task(board)
+    assert r.run_task(t).status is Status.FAILED
+    stored = board.get_task(t.id)
+    sha = _git(git_repo, "rev-parse", f"refs/heads/task/{t.id}").strip()
+    assert sha[:12] in stored.last_error                     # the board names the unpushed commit
+    r.ws.push = real_push
+    seen = {}
+    orig = adapter.run
+
+    def run(spec):
+        a = spec.cwd / "src" / "a.py"
+        seen["a"] = a.read_text() if a.exists() else None
+        seen["ancestor"] = subprocess.run(["git", "-C", str(spec.cwd), "merge-base", "--is-ancestor", sha, "HEAD"]
+                                          ).returncode == 0
+        seen["prompt"] = spec.prompt_file.read_text()
+        return orig(spec)
+    adapter.run = run
+    stored.status = Status.READY
+    board.update_task(stored, ["status"])
+    r.run_task(board.get_task(t.id))
+    assert seen["a"] == "first attempt\n" and seen["ancestor"]
+    base = _git(git_repo, "rev-parse", "origin/main").strip()
+    assert sha[:12] in seen["prompt"] and base[:12] in seen["prompt"]

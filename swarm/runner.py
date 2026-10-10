@@ -1,6 +1,7 @@
 """Worker loop: claim → worktree → prompt → run CLI → verify → push/PR → publish. One process per laptop."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -800,6 +801,62 @@ class Runner:
                     break
         return sorted(dict.fromkeys(found))[:cap]
 
+    UNPUSHED_FILE = "unpushed.json"
+
+    def _remember_unpushed(self, task: Task, wt: Path, attempt: int) -> str:
+        """A push failed: keep the attempt's local HEAD so the next attempt on this host re-applies it (Q-506: the
+        retry's `worktree add -B` reset the branch to the older remote commit and left the new one dangling)."""
+        head = self.ws.git(wt, "rev-parse", "HEAD", check=False).out.strip()
+        if not head:
+            return ""
+        try:
+            d = self.log_dir / task.id
+            d.mkdir(parents=True, exist_ok=True)
+            (d / self.UNPUSHED_FILE).write_text(json.dumps({"head": head, "attempt": attempt}))
+        except OSError as e:
+            self.log(f"[{task.id}] could not record the unpushed commit {head[:12]}: {e!r}")
+        return head
+
+    def _reapply_unpushed(self, task: Task, wt: Path) -> str:
+        """Put an earlier attempt's unpushed commit back on the freshly provisioned branch: nothing to do when it is
+        already an ancestor, a fast-forward when the branch is behind it, a merge otherwise. Returns the prompt note
+        (expected commit and base SHA), or "" when there was no unpushed commit. Never raises."""
+        rec = self.log_dir / task.id / self.UNPUSHED_FILE
+        try:
+            head = str(json.loads(rec.read_text()).get("head") or "")
+        except (OSError, ValueError, AttributeError):
+            return ""
+        git = lambda *a: self.ws.git(wt, *a, check=False)   # noqa: E731
+        base = git("rev-parse", f"{self.ws.remote}/{self.cfg.main_branch}").out.strip()
+        check = f"`git merge-base --is-ancestor {head[:12]} HEAD` must succeed"
+        try:
+            if not git("cat-file", "-e", f"{head}^{{commit}}").ok:
+                how = None
+            elif git("merge-base", "--is-ancestor", head, "HEAD").ok:
+                how = "already on the branch"
+            elif git("merge-base", "--is-ancestor", "HEAD", head).ok and git("merge", "--ff-only", "-q", head).ok:
+                how = "fast-forwarded"
+            else:
+                r = git("-c", "user.email=swarm@local", "-c", "user.name=swarm", "merge", "--no-edit", "-q", head)
+                if not r.ok:
+                    git("merge", "--abort")
+                how = "merged in" if r.ok else None
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[{task.id}] could not re-apply the unpushed commit {head[:12]}: {e!r}")
+            how = None
+        if how is None:
+            self.log(f"[{task.id}] unpushed commit {head[:12]} could not be re-applied")
+            return (f"The previous attempt's commit {head} was never pushed (its push failed) and the harness could "
+                    f"not re-apply it here. Base: {self.ws.remote}/{self.cfg.main_branch} at {base}. Check "
+                    f"`git show {head[:12]}` (it may exist only on the laptop that ran that attempt) and redo what is "
+                    "missing.")
+        with contextlib.suppress(OSError):
+            rec.unlink()
+        self.log(f"[{task.id}] unpushed commit {head[:12]} from the previous attempt: {how}")
+        return (f"The previous attempt's commit {head} was not pushed (its push failed); the harness {how} it on "
+                f"this branch, so {check}. Base: {self.ws.remote}/{self.cfg.main_branch} at {base} (diff against "
+                "that SHA, not a local `main`).")
+
     def _stop_previous_lock_jobs(self, task: Task) -> list[str]:
         """Before a new attempt: stop `swarm-lock` jobs an earlier attempt of this task left running (Q-521).
         The worker CLI of that attempt is gone (checked just before); its detached measurement is not. Never raises."""
@@ -917,6 +974,9 @@ class Runner:
         stopped_jobs = self._stop_previous_lock_jobs(task)
         wt = self.ws.provision(task.id, reuse_branch=reuse)
         try:
+            reapplied = self._reapply_unpushed(task, wt)
+            if reapplied:
+                task.feedback = (task.feedback.rstrip() + "\n\n" + reapplied).strip()
             if carried:
                 note = (f"This worktree continues from the previous attempt's commits on "
                         f"{self.ws.remote}/{task.branch} (current main merged in). Read "
@@ -1551,6 +1611,9 @@ class Runner:
                     self.log(f"[{task.id}] PR failed: {e}")
             else:
                 push_error = push.err.strip()[:600] or f"exit {push.code}"
+                head = self._remember_unpushed(task, wt, attempt)
+                if head:
+                    push_error = f"(local commit {head[:12]} not on {self.ws.remote}) {push_error}"
                 self.log(f"[{task.id}] push failed: {push_error[:200]}")
         task.pr_url = pr_url
 
