@@ -8,6 +8,7 @@ from typing import Callable
 from .board.base import Board
 from .config import Config
 from .feedback import verify_feedback
+from .lightverify import choose_verify
 from .models import Question, Status, Task, utcnow
 from .workspace import CmdResult, Workspace
 
@@ -116,18 +117,29 @@ class Merger:
             ok, conflicts, causes = self.ws.merge_main(wt, keep_conflicts=False)
             if not ok:
                 return self._back(task, conflict_feedback(conflicts, causes, self.cfg.main_branch))
+            try:
+                files = self.ws.branch_files(wt)
+            except Exception as e:   # noqa: BLE001 - a failed diff means the usual verify, never a failed merge
+                self.log(f"[{task.id}] could not list the branch's files ({e!r}); full verify")
+                files = []
+            # light verify for a docs/eval-only branch (swarm/lightverify.py); otherwise the merge's usual verify_fast
+            choice = choose_verify(self.cfg.verify, files, task.importance, self.cfg.verify.fast)
+            if self.cfg.verify.light_paths:
+                self.log(choice.log_line(task.id))
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
-            verify = self.ws.run_script(wt, self.cfg.verify.fast, 900)
+            verify = self.ws.run_script(wt, choice.command, 900)
             if verify is not None and not verify.ok:
                 return self._back(task, verify_feedback(
                     verify.out + ("\n" + verify.err if verify.err else ""), code=verify.code,
-                    intro=f"{self.cfg.verify.fast} failed after merging current main into the branch. Fix it."))
+                    intro=f"{choice.command} failed after merging current main into the branch. Fix it."))
             try:
                 if self.ws.scrub_attribution(wt):
                     self.log(f"[{task.id}] stripped AI co-author/attribution lines from branch commits")
             except RuntimeError as e:
                 self.log(f"[{task.id}] could not strip attribution lines: {e}")
             body = self.ws.squash_body(wt)   # explicit: GitHub's default squash body copies every trailer
+            if self.cfg.verify.light_paths:
+                body = (body + "\n\n" if body else "") + choice.commit_line()
             push = self.ws.push(wt, task.branch, force_with_lease=True)
             if not push.ok:
                 return self._merge_failed(task, "push failed: " + push.err.strip())

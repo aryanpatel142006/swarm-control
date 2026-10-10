@@ -15,6 +15,7 @@ from .board.base import Board
 from .config import Config
 from .failover import ReviewerState, reviewer_state
 from .feedback import HARNESS_NOTE_MARK, clip_middle, failing_step_line, verify_feedback
+from .lightverify import VerifyChoice, choose_verify
 from .models import QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
@@ -49,7 +50,8 @@ def parse_verdict(structured: dict | None, worktree: Path) -> Verdict:
                    [f for f in (data.get("findings") or []) if isinstance(f, dict)])
 
 
-def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: str, questions_note: str = "") -> str:
+def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: str, questions_note: str = "",
+                        verify_label: str = "full suite") -> str:
     asked = (["## Questions the worker asked, with the orchestrator's answers so far", "",
               "An answer that asks for a change is part of the acceptance: request changes when the diff does not "
               "make it (T-120 merged before Q-313's answer reached it).", "", questions_note.strip(), ""]
@@ -62,7 +64,7 @@ def build_review_prompt(task: Task, diff: str, verify_tail: str, instructions: s
              f"- Type: {task.type} · Importance: {task.importance} · Scope: {', '.join(task.scope) or 'any'}",
              f"- Flags from the harness: {', '.join(task.flags) or 'none'}", "", "### Description", "",
              task.description.strip() or "(none)", "", "### Acceptance criteria", "",
-             task.acceptance.strip() or "(none given)", "", *lint, *asked, "## Verify output (full suite)", "", "```",
+             task.acceptance.strip() or "(none given)", "", *lint, *asked, f"## Verify output ({verify_label})", "", "```",
              verify_tail.strip() or "(no verify script)", "```", "", "## Diff against main", "", "```diff",
              diff[:DIFF_CAP] + ("\n[diff truncated]" if len(diff) > DIFF_CAP else ""), "```", "",
              "## Verdict contract", "", "Your final answer MUST be a JSON object matching:", "", "```json",
@@ -197,10 +199,11 @@ class Reviewer:
                 return Verdict("escalate", "setup_worktree.sh failed (environment, not code)",
                                [{"severity": "high", "file": self.cfg.verify.setup_worktree or "",
                                  "issue": setup.tail(1200), "fix": "orchestrator: fix the environment, then re-review"}])
-            full = self.ws.run_script(wt, self.cfg.verify.full, 1800)
+            choice = self._choose_verify(task, wt)
+            full = self.ws.run_script(wt, choice.command, 1800)
             verify_note = ""
             if full is not None and not full.ok:
-                full, verify_note, verdict = self._triage_full_failure(task, wt, full)
+                full, verify_note, verdict = self._triage_full_failure(task, wt, full, choice.command)
                 if verdict is not None:
                     return verdict
             role = self.cfg.reviewer
@@ -209,7 +212,9 @@ class Reviewer:
             diff = self.ws.git(wt, "diff", f"{self.ws.remote}/{self.cfg.main_branch}...HEAD", check=False).out
             tail = full.tail(1500) if full else ""
             prompt = build_review_prompt(task, diff, (verify_note + "\n\n" + tail).strip() if verify_note else tail,
-                                         self.prompt_text, self._questions_note(task))
+                                         self.prompt_text, self._questions_note(task),
+                                         verify_label=(f"light verify: {choice.command}, docs/eval-only diff"
+                                                       if choice.light else "full suite"))
             pf = wt / ".swarm-run" / "review_prompt.md"
             pf.write_text(prompt)
             tried: set[str] = set()
@@ -236,6 +241,18 @@ class Reviewer:
         finally:
             self.ws.dispose(wt)
 
+    def _choose_verify(self, task: Task, wt: Path) -> VerifyChoice:
+        """Light verify for a docs/eval-only branch (swarm/lightverify.py), else verify.full; logged either way."""
+        try:
+            files = self.ws.branch_files(wt)
+        except Exception as e:   # noqa: BLE001 - a failed diff means the full verify, never a failed review
+            self.log(f"[{task.id}] could not list the branch's files ({e!r}); full verify")
+            files = []
+        choice = choose_verify(self.cfg.verify, files, task.importance, self.cfg.verify.full)
+        if getattr(self.cfg.verify, "light_paths", None):
+            self.log(choice.log_line(task.id))
+        return choice
+
     def _questions_note(self, task: Task) -> str:
         try:
             return earlier_questions_note(earlier_questions(self.board.list_questions(), task.id))
@@ -259,14 +276,15 @@ class Reviewer:
         return result
 
     # ----- verify_full failures that are not the task's (Q-189, Q-190, Q-191, Q-196) -----
-    def _triage_full_failure(self, task: Task, wt: Path, first: CmdResult):
+    def _triage_full_failure(self, task: Task, wt: Path, first: CmdResult, command: str | None = None):
         """verify_full failed on the branch. Run it once more (the slot lock means less load now); if it passes the
         failure was flaky. If it fails again, run it on current main: a failure main has too (same failing tests) is
         not this task's to fix. Either way the task goes on to the model review, and one test-hygiene note goes to
         the orchestrator so ONE task fixes the test (Q-196: two branches patched the same flaky Kokoro test and
         conflicted). Returns (result to show the reviewer, note for the reviewer, verdict or None to continue)."""
-        script = self.cfg.verify.full or "verify_full"
-        second = self.ws.run_script(wt, self.cfg.verify.full, 1800)
+        command = command or self.cfg.verify.full     # the light command when the review chose light verify
+        script = command or "verify_full"
+        second = self.ws.run_script(wt, command, 1800)
         if second is not None and second.ok:
             self.log(f"[{task.id}] {script} failed, then passed on a rerun: flaky, not sent back")
             step = failing_step_line(_text(first))
@@ -277,7 +295,7 @@ class Reviewer:
             return second, (f"Note from the harness: {script} failed once and passed on a rerun (flaky; filed for "
                             "the orchestrator). Do not ask this task to fix that test."), None
         again = second or first
-        on_main = self._verify_full_on_main(task)
+        on_main = self._verify_full_on_main(task, command)
         branch_ids, main_ids = failing_tests(_text(again)), failing_tests(_text(on_main)) if on_main else set()
         if on_main is not None and not on_main.ok and branch_ids and branch_ids <= main_ids:
             names = ", ".join(sorted(branch_ids)[:5])
@@ -296,7 +314,7 @@ class Reviewer:
                                      intro=f"{script} failed (exit {again.code}) on two runs.{main_line}"),
             "fix": "make the full verify pass (the output above is the failing step's own)"}])
 
-    def _verify_full_on_main(self, task: Task) -> CmdResult | None:
+    def _verify_full_on_main(self, task: Task, command: str | None = None) -> CmdResult | None:
         try:
             wt = self.ws.provision_detached(f"_main-verify-{task.id}")   # two reviews may check main at once
         except RuntimeError as e:
@@ -304,7 +322,7 @@ class Reviewer:
             return None
         try:
             self.ws.run_script(wt, self.cfg.verify.setup_worktree, 600, slot=False)
-            return self.ws.run_script(wt, self.cfg.verify.full, 1800)
+            return self.ws.run_script(wt, command or self.cfg.verify.full, 1800)
         finally:
             self.ws.dispose(wt)
 

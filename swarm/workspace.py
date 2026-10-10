@@ -356,6 +356,13 @@ class Workspace:
         uncommitted = [line[3:].strip() for line in status if line.strip()]
         return sorted(set(committed) | set(uncommitted))
 
+    def branch_files(self, path: Path) -> list[str]:
+        """Committed files the branch changes against its merge base with main; a rename counts both paths (so a
+        move out of a protected directory is still seen). Uncommitted files are left out (light verify)."""
+        r = self.git(path, "-c", "core.quotepath=off", "diff", "--name-only", "--no-renames",
+                     f"{self._main_ref()}...HEAD", check=False)
+        return sorted({f.strip() for f in r.out.splitlines() if f.strip()})
+
     def added_files(self, path: Path) -> list[str]:
         """Files this branch adds relative to main (committed, staged or untracked)."""
         committed = self.git(path, "diff", "--name-only", "--diff-filter=A", f"{self._main_ref()}...HEAD",

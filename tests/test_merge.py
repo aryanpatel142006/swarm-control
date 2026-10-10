@@ -229,3 +229,53 @@ def test_squash_message_lists_branch_commits_without_ai_attribution(cfg, git_rep
     assert args[args.index("--subject") + 1].startswith(t.title_with_id())
     body = args[args.index("--body") + 1]
     assert "feature" in body and "Claude" not in body
+
+
+def _light_prep(cfg, git_repo, tmp_path, rel, importance="normal"):
+    """A Merge Ready branch changing `rel`; verify_fast passes, the light command fails, so the outcome shows which ran."""
+    cfg.verify.light_paths = ["docs/**", "eval/**", "tests/**", "experiments/**", "*.md"]
+    cfg.verify.light_command = "scripts/verify_light.sh"
+    (git_repo / "scripts" / "verify_light.sh").write_text("#!/bin/sh\necho LIGHTRAN; exit 1\n")
+    _git(git_repo, "add", "scripts"); _git(git_repo, "commit", "-qm", "light"); _git(git_repo, "push", "-q", "origin", "main")
+    seen, logs = {}, []
+    m, board, t, dep, calls = prep(cfg, git_repo, tmp_path, seen=seen)
+    t.importance = importance
+    wt = m.ws.provision(t.id, reuse_branch=True)
+    (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+    (wt / rel).write_text("x\n")
+    (wt / "feature.txt").unlink()
+    m.ws.commit_all(wt, "only " + rel)
+    m.ws.push(wt, t.branch, force_with_lease=True)
+    m.ws.dispose(wt)
+    m.log = logs.append
+    return m, board, t, seen, logs
+
+
+def test_merge_of_a_docs_only_branch_runs_the_light_command(cfg, git_repo, tmp_path):
+    m, board, t, seen, logs = _light_prep(cfg, git_repo, tmp_path, "docs/notes.md")
+    assert m.merge(t) is False                                   # the (failing) light command ran, not verify_fast
+    assert "LIGHTRAN" in board.get_task(t.id).feedback and "scripts/verify_light.sh failed" in board.get_task(t.id).feedback
+    assert f"[{t.id}] light verify (1 file, docs/eval only)" in logs
+
+
+def test_merge_of_a_code_branch_keeps_verify_fast_and_records_it(cfg, git_repo, tmp_path):
+    m, board, t, seen, logs = _light_prep(cfg, git_repo, tmp_path, "hearing/x.py")
+    assert m.merge(t) is True
+    assert any(line.startswith(f"[{t.id}] full verify: hearing/x.py") for line in logs)
+    body = seen["args"][seen["args"].index("--body") + 1] if "--body" in seen["args"] else ""
+    assert "Verify: full, scripts/verify_fast.sh (hearing/x.py" in body
+
+
+def test_merge_of_a_docs_branch_records_light_in_the_commit_body(cfg, git_repo, tmp_path):
+    m, board, t, seen, logs = _light_prep(cfg, git_repo, tmp_path, "docs/notes.md")
+    (git_repo / "scripts" / "verify_light.sh").write_text("#!/bin/sh\nexit 0\n")
+    _git(git_repo, "add", "scripts"); _git(git_repo, "commit", "-qm", "light ok"); _git(git_repo, "push", "-q", "origin", "main")
+    assert m.merge(t) is True
+    body = seen["args"][seen["args"].index("--body") + 1]
+    assert "Verify: light, scripts/verify_light.sh (1 file, docs/eval only)" in body
+
+
+def test_critical_merge_never_takes_the_light_path(cfg, git_repo, tmp_path):
+    m, board, t, seen, logs = _light_prep(cfg, git_repo, tmp_path, "docs/notes.md", importance="critical")
+    assert m.merge(t) is True                                    # verify_fast (passing) ran, not the failing light one
+    assert f"[{t.id}] full verify: critical task" in logs

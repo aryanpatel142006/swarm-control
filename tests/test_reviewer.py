@@ -333,3 +333,63 @@ def test_review_prompt_lists_the_tasks_questions_and_answers():
     assert "Questions the worker asked" in p and "control.name.exclude" in p
     assert p.index("control.name.exclude") < p.index("## Verify output")
     assert "Questions the worker asked" not in build_review_prompt(t, "diff", "ok", "INSTR")
+
+
+# ----- light verify (swarm/lightverify.py) -----
+APP_LIGHT = ["docs/**", "eval/**", "tests/**", "experiments/**", "*.md"]
+
+
+def _light_setup(cfg, git_repo, tmp_path, files, importance="normal", light_paths=APP_LIGHT):
+    cfg.verify.light_paths = light_paths
+    cfg.verify.light_command = "scripts/verify_light.sh"
+    # on main before the branch forks, so they are not part of the branch's diff
+    (git_repo / "scripts" / "verify_full.sh").write_text("#!/bin/sh\necho RAN_FULL; exit 0\n")
+    (git_repo / "scripts" / "verify_light.sh").write_text("#!/bin/sh\necho RAN_LIGHT; exit 0\n")
+    import subprocess
+    subprocess.run(["git", "-C", str(git_repo), "add", "scripts"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "verify scripts"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "push", "-q", "origin", "main"], check=True)
+    board = InMemoryBoard()
+    ws = Workspace(git_repo, tmp_path / "wt", gh=lambda a, c: CmdResult(0, "", ""))
+    t = board.create_task(Task(id="", title="Docs", type="docs", importance=importance, status=Status.REVIEW,
+                               agent="claude-a", scope=["docs/**"]))
+    wt = ws.provision(t.id)
+    for rel in files:
+        (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+        (wt / rel).write_text("x\n")
+    ws.commit_all(wt, "change")
+    ws.push(wt, t.branch)
+    ws.dispose(wt)
+    logs = []
+    adapter = FakeReviewAdapter({"verdict": "approve", "summary": "ok", "findings": []})
+    rev = Reviewer(cfg, board, ws, adapter_factory=lambda a: adapter, log=logs.append, prompt_text="R")
+    return rev, t, adapter, logs
+
+
+def test_docs_only_branch_gets_light_verify_in_review(cfg, git_repo, tmp_path):
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["docs/research/a.md", "eval/prep_x.py",
+                                                                   "tests/test_prep_x.py", "NOTES.md"])
+    assert rev.process(t).status is Status.MERGE_READY
+    assert "RAN_LIGHT" in adapter.prompts[0] and "RAN_FULL" not in adapter.prompts[0]
+    assert "light verify: scripts/verify_light.sh" in adapter.prompts[0]
+    assert f"[{t.id}] light verify (4 files, docs/eval only)" in logs
+
+
+def test_one_hearing_file_means_full_verify_in_review(cfg, git_repo, tmp_path):
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["docs/a.md", "hearing/core.py"])
+    rev.process(t)
+    assert "RAN_FULL" in adapter.prompts[0] and "RAN_LIGHT" not in adapter.prompts[0]
+    assert any(line.startswith(f"[{t.id}] full verify: hearing/core.py") for line in logs)
+
+
+def test_critical_task_always_gets_full_verify(cfg, git_repo, tmp_path):
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["docs/a.md"], importance="critical")
+    rev.process(t)
+    assert "RAN_FULL" in adapter.prompts[0]
+    assert f"[{t.id}] full verify: critical task" in logs
+
+
+def test_without_light_paths_review_is_always_full(cfg, git_repo, tmp_path):
+    rev, t, adapter, logs = _light_setup(cfg, git_repo, tmp_path, ["docs/a.md"], light_paths=None)
+    rev.process(t)
+    assert "RAN_FULL" in adapter.prompts[0] and logs == [l for l in logs if "light verify" not in l]

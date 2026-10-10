@@ -217,6 +217,38 @@ once; raise `parallel` only when the host has slots to spare. Restart `swarm ser
 </details>
 
 <details>
+<summary><b>Light verify for docs/eval-only branches</b></summary>
+
+A branch that changes only docs and offline eval code does not need the full verify in review (selective-hearing,
+Oct 10: about 30 tasks waited 20+ minutes in Merge Ready for one of laptop-a's 2 verify slots). With
+`verify.light_paths` set, review and merge list the branch's files against its merge base with main
+(`git diff --name-only --no-renames`, so a move counts both paths). When every file matches a light glob and none
+matches a protected glob, they run `verify.light_command` instead of the full verify:
+
+```yaml
+verify:
+  fast: scripts/verify_fast.sh
+  full: scripts/verify_full.sh
+  light_paths: ["docs/**", "eval/**", "tests/**", "experiments/**", "*.md"]
+  light_command: scripts/verify_fast.sh      # default: verify.fast
+  protected_paths: []                        # extends the built-in never-light list
+```
+
+- Never light: `hearing/**`, `config/**`, `scripts/**`, `web/**`, `.swarm/**`, `pyproject.toml`, `requirements*`,
+  `.github/**` (built in) plus `verify.protected_paths`; a critical task; an empty diff. Protected wins over light.
+- The reviewer runs the light command instead of `verify.full` (its flaky rerun and the check on main use the same
+  command). The merger runs it instead of `verify.fast`, so with the default light command the merge step is
+  unchanged.
+- Globs: with a `/` they match the whole path (`**` across directories, `*` inside one segment); without a `/` they
+  match the basename anywhere, so `*.md` is every Markdown file and `requirements*` also protects
+  `eval/requirements.txt`.
+- serve logs `[T-x] light verify (N files, docs/eval only)` or `[T-x] full verify: <first non-light path>`, and the
+  squash commit body ends with a `Verify: light|full, <command> (...)` line.
+- Absent or empty `light_paths` = always the full verify (the old behavior). The keys are read when serve starts
+  or reloads its config; a new swarm-control version needs a serve restart.
+</details>
+
+<details>
 <summary><b>Toolbox: plugins, skills and MCP servers per task</b></summary>
 
 Workers get the tools their task type needs and nothing else, on every CLI:
@@ -269,6 +301,7 @@ swarm/
 ├── runner.py            claim → worktree → prompt → agent CLI → verify → PR → report
 ├── serve.py             the control loop: reap, retry, review, merge, promote, reroute
 ├── reviewer.py, merge.py cross-family review, rebase and merge
+├── lightverify.py       docs/eval-only branches get the light verify in review and merge
 ├── relay.py             questions and answers between agents and humans
 ├── retro.py, night.py   self-improvement and unattended practice cycles
 ├── usage.py             token and cost ledger, caps and cooldowns

@@ -37,6 +37,12 @@ class VerifyConfig:
     # A normal verify queued behind `swarm-lock --exclusive` measurements for longer than this proceeds without a
     # slot and says so (swarm/hostlock.py, Q-478). 0 = wait for as long as the exclusive holders run.
     exclusive_max_minutes: float = 25.0
+    # Light verify (swarm/lightverify.py): a branch whose every changed file matches `light_paths` and none a
+    # protected glob runs `light_command` (default: `fast`) in review and merge instead of the full verify.
+    # None/[] = always full (the default). `protected_paths` extends the built-in never-light list.
+    light_paths: list[str] | None = None
+    light_command: str | None = None
+    protected_paths: list[str] | None = None
 
 
 @dataclass
@@ -380,7 +386,11 @@ def load_config(path: Path | str) -> Config:
                                                         "verify.placeholder_files"),
                             stray_files=_str_list(verify_raw.get("stray_files"), "verify.stray_files"),
                             scratch_patterns=_str_list(verify_raw.get("scratch_patterns"), "verify.scratch_patterns"),
-                            exclusive_max_minutes=max(0.0, float(verify_raw.get("exclusive_max_minutes", 25)))),
+                            exclusive_max_minutes=max(0.0, float(verify_raw.get("exclusive_max_minutes", 25))),
+                            light_paths=_str_list(verify_raw.get("light_paths"), "verify.light_paths"),
+                            light_command=(str(verify_raw["light_command"]) if verify_raw.get("light_command")
+                                           else None),
+                            protected_paths=_str_list(verify_raw.get("protected_paths"), "verify.protected_paths")),
         task_limits=task_limits, hosts=hosts, agents=agents, routing=routing,
         docs_by_type={k: list(v or []) for k, v in (raw.get("docs_by_type") or {}).items()},
         reviewer=_role(raw.get("reviewer"), agents, "reviewer"),
