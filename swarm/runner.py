@@ -860,6 +860,52 @@ class Runner:
                 f"this branch, so {check}. Base: {self.ws.remote}/{self.cfg.main_branch} at {base} (diff against "
                 "that SHA, not a local `main`).")
 
+    def _restore_wip(self, task: Task, wt: Path, *, blocked: bool = False) -> str:
+        """Uncommitted work an earlier attempt left when its worktree was removed (saved by Workspace.dispose under
+        refs/swarm/wip/<task>/, Q-623): apply the newest back as uncommitted changes and return the prompt note
+        naming the ref and its files; when it does not apply (or the sync left conflicts), leave the worktree alone
+        and name the ref. "" when nothing was saved. Never raises."""
+        try:
+            refs = self.ws.wip_refs(task.id)
+            if not refs:
+                return ""
+            ref = refs[0]
+            sha = self.ws.git(wt, "rev-parse", "--short=12", ref, check=False).out.strip()
+            every = self.ws.wip_files(wt, ref)
+            if not every and not blocked:        # this branch already has all of it
+                self.ws.mark_wip_applied(ref)
+                return ""
+            # only in-scope files come back (an out-of-scope scratch file would flag the run); the rest stay in the ref
+            files = [f for f in every if in_scope(f, task.scope) or f.startswith(HARNESS_PATHS)]
+            left = [f for f in every if f not in files]
+            ok = False if blocked else self.ws.apply_wip(wt, ref, files)[0]
+
+            def listing(names: list[str]) -> str:
+                return (", ".join(f"`{f}`" for f in names[:30])
+                        + (f" and {len(names) - 30} more" if len(names) > 30 else ""))
+            shown = listing(files)
+            older = (" Older saved work of this task: " + ", ".join(f"`{x}`" for x in refs[1:5]) + ".") if refs[1:] else ""
+            if ok:
+                self.ws.mark_wip_applied(ref)
+                kept = ref.replace(self.ws.WIP_NS + "/", self.ws.WIP_APPLIED_NS + "/", 1)
+                self.log(f"[{task.id}] restored uncommitted work from {ref} ({len(files)} file(s))")
+                rest = (f" Not restored (outside this task's scope; in the commit if you need them): {listing(left)}."
+                        if left else "")
+                return (f"The previous attempt's uncommitted work was saved to `{ref}` (commit {sha}) when its "
+                        f"worktree was removed, and the harness put it back here as uncommitted changes: "
+                        f"{shown or 'no in-scope file'}. Check `git status` / `git diff` and continue from it; do not "
+                        f"rewrite it. The commit stays at `{kept}` (`git show {sha} --stat`).{rest}" + older)
+            shown = listing(every)
+            why = "the merge of main left conflicts" if blocked else "it does not apply cleanly on this HEAD"
+            self.log(f"[{task.id}] saved uncommitted work {ref} not restored: {why}")
+            return (f"The previous attempt's uncommitted work was saved to `{ref}` (commit {sha}) when its worktree "
+                    f"was removed; the harness did not put it back because {why}. Files: {shown}. See "
+                    f"`git diff HEAD...{ref}`, take files with `git checkout {ref} -- <path>`, and continue from "
+                    "them; do not rewrite them." + older)
+        except Exception as e:  # noqa: BLE001 - a restore must not stop the run
+            self.log(f"[{task.id}] could not restore saved uncommitted work: {e!r}")
+            return ""
+
     def _stop_previous_lock_jobs(self, task: Task) -> list[str]:
         """Before a new attempt: stop `swarm-lock` jobs an earlier attempt of this task left running (Q-521).
         The worker CLI of that attempt is gone (checked just before); its detached measurement is not. Never raises."""
@@ -994,6 +1040,9 @@ class Runner:
                 task.feedback, synced=synced, conflicts=conflicts,
                 markers=self.ws.conflict_marker_files(wt) if reuse else [],
                 main_ref=f"{self.ws.remote}/{self.cfg.main_branch}")
+            wip_note = self._restore_wip(task, wt, blocked=bool(conflicts))
+            if wip_note:
+                task.feedback = (task.feedback.rstrip() + "\n\n" + wip_note).strip()
             if stopped_jobs:
                 note = ("The harness stopped background jobs an earlier attempt of this task left running under "
                         "`swarm-lock` (they would have held the measurement lock next to this run): "
@@ -1055,6 +1104,8 @@ class Runner:
                                     references_note=references_note, automerged_note=automerged_note,
                                     questions_note=questions_note,
                                     orchestrator_host=orch_host)
+            if wip_note:      # this attempt's prompt only: on the board it would mislead later rounds
+                task.feedback = task.feedback.replace(wip_note, "").strip()
             pf = wt / ".swarm-run" / "prompt.md"
             pf.write_text(prompt)
             spec = RunSpec(prompt_file=pf, model=model, effort=effort, max_turns=turns,
@@ -1097,7 +1148,9 @@ class Runner:
                 # replaces whatever this run left there.
                 self.log(f"[{task.id}] claim moved to another run; leaving the worktree to it")
             else:
-                self.ws.dispose(wt)
+                kept = self.ws.dispose(wt, save_wip=True)   # never discard uncommitted work (Q-623)
+                if kept:
+                    self.log(f"[{task.id}] uncommitted work kept at {kept} before removing the worktree")
             self._bump_agent_row(task.agent, result_usage=None)
 
     def _run_phase(self, task_id: str, phase: str, pid: int | None = None, agent: str | None = None) -> None:

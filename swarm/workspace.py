@@ -142,7 +142,7 @@ class Workspace:
         path = self.worktree_path(task_id)
         branch = f"task/{task_id}"
         if path.exists():
-            self.dispose(path)
+            self.dispose(path, save_wip=True)   # an earlier run's leftover: keep its uncommitted work (Q-623)
         self.git(self.repo_root, "worktree", "prune")
         self.worktree_root.mkdir(parents=True, exist_ok=True)
         remote_branch = f"{self.remote}/{branch}"
@@ -212,11 +212,130 @@ class Workspace:
         (path / ".swarm-run").mkdir(exist_ok=True)
         return path
 
-    def dispose(self, path: Path) -> None:
+    def dispose(self, path: Path, *, save_wip: bool = False) -> str | None:
+        """Remove a worktree. With `save_wip`, uncommitted work on a task branch is first kept as a commit under
+        refs/swarm/wip/<task>/<stamp> (Q-623: T-209's reaped attempt lost its new files in eval/ and tests/ when the
+        runner removed the worktree, and attempt 2 rewrote them). Returns that ref, or the directory the worktree was
+        moved to when the save failed (nothing is deleted then), or None when there was nothing to keep."""
+        kept = None
+        if save_wip and path.exists():
+            try:
+                kept = self.save_wip(path)
+            except Exception:  # noqa: BLE001 - could not save: move the worktree aside instead of deleting it
+                kept = self._set_aside(path)
+                if kept:
+                    return kept
         r = self.git(self.repo_root, "worktree", "remove", "--force", str(path), check=False)
         if not r.ok and path.exists():
             shutil.rmtree(path, ignore_errors=True)
             self.git(self.repo_root, "worktree", "prune", check=False)
+        return kept
+
+    # ----- uncommitted work between attempts (Q-623) -----
+    WIP_NS = "refs/swarm/wip"
+    WIP_APPLIED_NS = "refs/swarm/wip-applied"
+    WIP_MAX_FILE = 50 * 1024 * 1024    # bigger untracked files (downloads, audio) are named in the commit, not stored
+
+    def save_wip(self, path: Path) -> str | None:
+        """Commit the worktree's uncommitted, non-ignored changes (tracked edits, deletions and untracked files) with
+        a throwaway index, parent HEAD, and point refs/swarm/wip/<task>/<UTC stamp> at it. The worktree, its index and
+        its branch are left as they were. None for a clean, detached or non-task worktree. Raises when git fails."""
+        branch = self.git(path, "symbolic-ref", "-q", "--short", "HEAD", check=False).out.strip()
+        if not branch.startswith("task/"):
+            return None
+        task_id = branch[len("task/"):]
+        if not self.git(path, "status", "--porcelain", "--untracked-files=all").out.strip():
+            return None
+        head = self.git(path, "rev-parse", "HEAD").out.strip()
+        index = self.git(path, "rev-parse", "--path-format=absolute", "--git-path", "index").out.strip()
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="swarm-wip-") as tmp:
+            tmp_index = Path(tmp) / "index"
+            if index and Path(index).is_file():
+                shutil.copyfile(index, tmp_index)
+            env = {"GIT_INDEX_FILE": str(tmp_index)}
+
+            def git(*args: str) -> CmdResult:
+                r = run_cmd(["git", "-C", str(path), *args], cwd=path, env=env)
+                if not r.ok:
+                    raise RuntimeError(f"git {' '.join(args)} failed: {r.err.strip() or r.out.strip()}")
+                return r
+            git("add", "-u")
+            untracked = [f for f in git("ls-files", "--others", "--exclude-standard", "-z").out.split("\0") if f]
+            keep, skipped = [], []
+            for f in untracked:
+                try:
+                    big = (path / f).lstat().st_size > self.WIP_MAX_FILE
+                except OSError:
+                    continue
+                (skipped if big else keep).append(f)
+            for i in range(0, len(keep), 200):
+                git("add", "-f", "--", *keep[i:i + 200])
+            tree = git("write-tree").out.strip()
+        if tree == self.git(path, "rev-parse", "HEAD^{tree}").out.strip():
+            return None
+        msg = f"{task_id}: uncommitted work saved by the runner before its worktree was removed"
+        if skipped:
+            msg += "\n\nNot stored (over 50 MB): " + ", ".join(skipped[:20])
+        sha = self.git(path, "-c", "user.email=swarm@local", "-c", "user.name=swarm", "commit-tree", tree,
+                       "-p", head, "-m", msg).out.strip()
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        ref, n = f"{self.WIP_NS}/{task_id}/{stamp}", 1
+        while self.git(self.repo_root, "rev-parse", "--verify", "--quiet", ref, check=False).ok:
+            n += 1
+            ref = f"{self.WIP_NS}/{task_id}/{stamp}-{n}"
+        self.git(self.repo_root, "update-ref", ref, sha)
+        return ref
+
+    def _set_aside(self, path: Path) -> str | None:
+        dest = self.worktree_root / ".kept" / f"{path.name}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(dest))
+        except OSError:
+            return None
+        self.git(self.repo_root, "worktree", "prune", check=False)
+        return str(dest)
+
+    def wip_refs(self, task_id: str) -> list[str]:
+        """Saved, not yet restored uncommitted work of a task, newest first."""
+        r = self.git(self.repo_root, "for-each-ref", "--sort=-refname", "--format=%(refname)",
+                     f"{self.WIP_NS}/{task_id}/", check=False)
+        return [ln.strip() for ln in r.out.splitlines() if ln.strip()] if r.ok else []
+
+    def wip_files(self, wt: Path, ref: str) -> list[str]:
+        """Files the saved work changes relative to the merge base of HEAD and the saved commit."""
+        r = self.git(wt, "-c", "core.quotepath=off", "diff", "--name-only", f"HEAD...{ref}", check=False)
+        return [f for f in r.out.splitlines() if f] if r.ok else []
+
+    def apply_wip(self, wt: Path, ref: str, files: list[str] | None = None) -> tuple[bool, list[str]]:
+        """Put saved work back into `wt` as uncommitted changes: the diff from the merge base of HEAD and the saved
+        commit (so commits the new branch already has are not applied twice), limited to `files` when given.
+        Nothing changes when it does not apply cleanly. Returns (applied, files)."""
+        if files is None:
+            files = self.wip_files(wt, ref)
+        if not files:
+            return True, []
+        spec = [f":(literal){f}" for f in files]
+        patch = subprocess.run(["git", "-C", str(wt), "diff", "--binary", f"HEAD...{ref}", "--", *spec],
+                               capture_output=True, timeout=300)
+        if patch.returncode != 0:
+            return False, files
+        if not patch.stdout.strip():
+            return True, []
+        for args in (["apply", "--check"], ["apply"]):
+            r = subprocess.run(["git", "-C", str(wt), *args], input=patch.stdout, capture_output=True, timeout=300)
+            if r.returncode != 0:
+                return False, files
+        return True, files
+
+    def mark_wip_applied(self, ref: str) -> None:
+        """Move a restored ref to refs/swarm/wip-applied/… (kept, never offered again)."""
+        sha = self.git(self.repo_root, "rev-parse", ref, check=False).out.strip()
+        if sha:
+            self.git(self.repo_root, "update-ref", ref.replace(self.WIP_NS + "/", self.WIP_APPLIED_NS + "/", 1), sha,
+                     check=False)
+            self.git(self.repo_root, "update-ref", "-d", ref, check=False)
 
     def commit_all(self, path: Path, message: str) -> bool:
         self.git(path, "add", "-A")

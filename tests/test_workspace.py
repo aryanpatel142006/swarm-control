@@ -334,3 +334,48 @@ def test_pr_merge_passes_an_explicit_squash_message(git_repo, tmp_path):
     assert args[args.index("--subject") + 1] == "T-1 · x (#7)"
     body = args[args.index("--body") + 1]
     assert body == "* T-1: a"
+
+
+def test_provision_saves_a_stale_worktrees_uncommitted_work_to_a_ref(git_repo, tmp_path):
+    """Q-623: replacing a task worktree must not discard what the last attempt left uncommitted."""
+    ws = Workspace(git_repo, tmp_path / "wt")
+    p1 = ws.provision("T-009")
+    (p1 / "README.md").write_text("edited\n")
+    (p1 / "new.txt").write_text("untracked\n")
+    (p1 / ".swarm-run" / "notes.md").write_text("runtime files are not work\n")
+    p2 = ws.provision("T-009")
+    assert not (p2 / "new.txt").exists()
+    wips = ws.wip_refs("T-009")
+    assert len(wips) == 1
+    files = _git(git_repo, "diff", "--name-only", f"{wips[0]}^", wips[0]).split()
+    assert sorted(files) == ["README.md", "new.txt"]
+    ok, restored = ws.apply_wip(p2, wips[0])
+    assert ok and sorted(restored) == ["README.md", "new.txt"]
+    assert (p2 / "new.txt").read_text() == "untracked\n" and (p2 / "README.md").read_text() == "edited\n"
+    assert _git(p2, "status", "--porcelain").strip()          # back as uncommitted changes, nothing committed
+    ws.dispose(p2)
+
+
+def test_dispose_of_a_clean_or_detached_worktree_saves_nothing(git_repo, tmp_path):
+    ws = Workspace(git_repo, tmp_path / "wt")
+    p = ws.provision("T-010")
+    assert ws.dispose(p, save_wip=True) is None
+    d = ws.provision_detached("_main-verify")
+    (d / "junk.txt").write_text("x")
+    assert ws.dispose(d, save_wip=True) is None
+    assert ws.wip_refs("T-010") == []
+
+
+def test_apply_wip_leaves_the_worktree_alone_when_it_does_not_apply(git_repo, tmp_path):
+    ws = Workspace(git_repo, tmp_path / "wt")
+    p1 = ws.provision("T-011")
+    (p1 / "README.md").write_text("attempt one\n")
+    ws.dispose(p1, save_wip=True)
+    p2 = ws.provision("T-011")
+    (p2 / "README.md").write_text("attempt two, committed\n")
+    ws.commit_all(p2, "T-011: other edit")
+    ref = ws.wip_refs("T-011")[0]
+    ok, files = ws.apply_wip(p2, ref)
+    assert not ok and files == ["README.md"]
+    assert (p2 / "README.md").read_text() == "attempt two, committed\n" and not _git(p2, "status", "--porcelain").strip()
+    ws.dispose(p2)

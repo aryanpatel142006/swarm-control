@@ -2028,3 +2028,45 @@ def test_runner_never_claims_a_task_pinned_to_another_host(cfg, git_repo, tmp_pa
     assert [x.id for x in r.pending_tasks()] == [ok.id]
     r.tick()
     assert board.get_task(t.id).status is Status.READY and not adapter.specs[1:]
+
+
+def test_reaped_attempt_keeps_uncommitted_work_for_the_next_attempt(cfg, git_repo, tmp_path):
+    """Q-623 (T-209): serve reaped a running attempt, the runner abandoned its publish and removed the worktree with
+    the worker's uncommitted files; attempt 2 started without them. The runner saves them to a named ref first and
+    the next attempt gets them back (uncommitted) with the ref named in its prompt."""
+    r, board = make_runner(cfg, git_repo, tmp_path, None)
+    t = ready_task(board)
+
+    class Reaped(FakeAdapter):
+        def run(self, spec):
+            out = super().run(spec)
+            reaped = board.get_task(t.id)           # what serve.reap() writes
+            reaped.status, reaped.attempts, reaped.claim_nonce = Status.READY, reaped.attempts + 1, ""
+            reaped.flags = list(dict.fromkeys(reaped.flags + ["resume"]))
+            board.update_task(reaped, ["status", "attempts", "claim_nonce", "flags"])
+            return out
+
+    first = Reaped(files={"src/a.py": "attempt one\n", "src/new/b.py": "new file\n"},
+                   structured={"status": "done", "summary": "s"})
+    r.adapter_factory = lambda a: first
+    r.run_task(t)
+    assert not r.ws.worktree_path(t.id).exists()
+    refs = _git(git_repo, "for-each-ref", "--format=%(refname)", f"refs/swarm/wip/{t.id}/").split()
+    assert len(refs) == 1                                    # the uncommitted work is kept under a named ref
+    seen = {}
+
+    class Second(FakeAdapter):
+        def run(self, spec):
+            for rel in ("src/a.py", "src/new/b.py"):
+                p = spec.cwd / rel
+                seen[rel] = p.read_text() if p.exists() else None
+            return super().run(spec)
+
+    second = Second(structured={"status": "done", "summary": "s"})
+    r.adapter_factory = lambda a: second
+    r.run_task(board.get_task(t.id))
+    assert seen == {"src/a.py": "attempt one\n", "src/new/b.py": "new file\n"}
+    assert refs[0] in second.prompts[0] and "src/new/b.py" in second.prompts[0]
+    # restored, so it is not offered again; the commit stays reachable under the applied namespace
+    assert not _git(git_repo, "for-each-ref", f"refs/swarm/wip/{t.id}/").strip()
+    assert _git(git_repo, "for-each-ref", f"refs/swarm/wip-applied/{t.id}/").strip()
