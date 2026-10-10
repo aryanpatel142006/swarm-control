@@ -12,7 +12,8 @@ from typing import Callable
 from .board.base import Board, fresh_flags
 from .config import Config
 from .models import AUTH_LOST_NOTE, IMPORTANCES, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, usage_limited, utcnow
-from .router import context_from_board, escalate_importance, is_available, model_for, route, tier_for
+from .router import (TYPE_OVERRIDE_FLAG, context_from_board, escalate_importance, is_available, model_for, route,
+                     tier_for)
 from .status import render_headline, render_status
 from .workspace import Workspace
 
@@ -247,6 +248,8 @@ class Server:
             return False
         if t.pinned_host and a.host != t.pinned_host:
             return False      # a pinned task waits for its host's agents, whatever happened to its owner (T-216)
+        if not a.takes(t.type):
+            return False      # outside the agent's task_types allowlist (T-354 went to muse-c, Oct 10)
         row = ctx.rows.get(agent)
         if is_available(a, row, importance=t.importance, now=ctx.now):
             return True
@@ -730,19 +733,24 @@ class Server:
             unknown = t.agent not in self.cfg.agents
             cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
             offline = bool(row and row.status == "offline")
-            if not unknown and not offline and not cooling:
+            # on an agent whose task_types allowlist excludes this type (and not put there by `swarm assign --force`)
+            disallowed = (not unknown and not self.cfg.agents[t.agent].takes(t.type)
+                          and TYPE_OVERRIDE_FLAG not in t.flags)
+            if not unknown and not offline and not cooling and not disallowed:
                 continue
-            if cooling and t.importance == "critical" and not usage_limited(row, now):
+            if cooling and not disallowed and t.importance == "critical" and not usage_limited(row, now):
                 # critical work waits for the strongest agent only while someone capable is NOT idle
                 others_idle = any(a.name != t.agent and ctx.queue_depth.get(a.name, 0) == 0
                                   and is_available(a, ctx.rows.get(a.name), importance="critical", now=now)
-                                  and a.strengths.get(t.type, 3) >= 3 for a in self.cfg.agents.values())
+                                  and a.strengths.get(t.type, 3) >= 3 and a.takes(t.type)
+                                  for a in self.cfg.agents.values())
                 if not others_idle:
                     continue
-            agent, model, effort = route(t, self.cfg, ctx, exclude={t.agent} if (cooling or offline) else None)
+            agent, model, effort = route(t, self.cfg, ctx,
+                                         exclude={t.agent} if (cooling or offline or disallowed) else None)
             if agent == t.agent:
                 continue
-            if not self._target_ok(t, agent, ctx, leaving_dead=unknown or offline):
+            if not self._target_ok(t, agent, ctx, leaving_dead=unknown or offline or disallowed):
                 if cooling:
                     self._log_waiting(t, ctx)
                 continue
@@ -771,6 +779,8 @@ class Server:
         moved = 0
         for idle_agent in idle:
             def may_take(t: Task) -> bool:
+                if not idle_agent.takes(t.type):
+                    return False      # outside its task_types allowlist, idle or not (T-354, Oct 10)
                 donor = self.cfg.agents[t.agent]
                 mine, theirs = idle_agent.strengths.get(t.type, 3), donor.strengths.get(t.type, 3)
                 saturated = running.get(t.agent, 0) >= donor.parallel

@@ -194,6 +194,9 @@ cheaper provider. `routing.importance_to_tier` maps importance to a model tier; 
 evidence-based exceptions (for example, critical frontend work runs on the model that measured best at frontend).
 Idle agents steal work from saturated ones, a returning agent triggers a redistribution, and a rate-limited agent's
 tasks move straight to another agent with capacity. Override any task with `swarm assign`, or drag its card in Notion.
+`agents.<name>.task_types` (e.g. `[research, docs, eval]`; family keys like `ml` work) is a hard allowlist: routing,
+stealing, redistribution, reroute and `swarm add` never give that agent other types, reroute moves queued ones off it,
+and `swarm assign` refuses them unless `--force`. Low strengths alone do not keep an agent off a type.
 </details>
 
 <details>

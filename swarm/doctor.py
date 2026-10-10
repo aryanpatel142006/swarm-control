@@ -124,7 +124,30 @@ def context_checks(cfg: Config) -> list[Check]:
            for k in mapping if k not in valid]
     checks.append(Check("type keys", not bad,
                         "all *_by_type keys are task types" if not bad else "unknown keys: " + ", ".join(bad)))
+    checks.append(task_types_check(cfg))
     return checks
+
+
+def task_types_check(cfg: Config) -> Check:
+    """agents.<name>.task_types: every entry a task type or family, never empty, and every task type still has an
+    agent that may take it (otherwise those tasks are never routed)."""
+    from .models import TASK_TYPES
+    valid = set(TASK_TYPES) | {t.split("_", 1)[0] for t in TASK_TYPES}
+    problems = []
+    for a in cfg.agents.values():
+        if a.task_types is None:
+            continue
+        if not a.task_types:
+            problems.append(f"agents.{a.name}.task_types is empty (it would never get a task; drop the key for any type)")
+        unknown = [k for k in a.task_types if k not in valid]
+        if unknown:
+            problems.append(f"agents.{a.name}.task_types: unknown {', '.join(unknown)}")
+    orphans = [t for t in TASK_TYPES if not any(a.takes(t) for a in cfg.agents.values())]
+    if orphans:
+        problems.append("no agent may take type " + ", ".join(orphans))
+    limited = sorted(a.name for a in cfg.agents.values() if a.task_types is not None)
+    ok_detail = (f"allowlists valid ({', '.join(limited)})" if limited else "no allowlists (every agent takes any type)")
+    return Check("agent task_types", not problems, ok_detail if not problems else "; ".join(problems))
 
 
 def sleep_warning(*, run=run_cmd, platform: str = sys.platform, cwd: Path | None = None) -> str | None:

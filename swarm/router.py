@@ -7,6 +7,9 @@ from datetime import datetime
 from .config import AgentConfig, Config
 from .models import IMPORTANCES, AgentRow, Status, Task, usage_limited, utcnow
 
+# `swarm assign --force` put the task on an agent outside its task_types allowlist: reroute leaves it there
+TYPE_OVERRIDE_FLAG = "type-override"
+
 PROVIDER_COST_RANK = {"generic": 0, "gemini": 1, "antigravity": 1, "grok": 2, "perplexity": 2, "codex": 3, "claude": 4}
 
 
@@ -69,13 +72,17 @@ def is_available(agent: AgentConfig, row: AgentRow | None, *, importance: str, n
 
 
 def route(task: Task, cfg: Config, ctx: RouteContext, *, exclude: set[str] | None = None) -> tuple[str, str, str | None]:
-    agents = [a for a in cfg.agents.values() if not exclude or a.name not in exclude] or list(cfg.agents.values())
+    # an agent with a task_types allowlist never gets other types, whatever its strengths (T-354 went to muse-c)
+    allowed = [a for a in cfg.agents.values() if a.takes(task.type)]
+    if not allowed:   # nobody may take this type: leave the task where it is (`swarm doctor` reports the gap)
+        return task.agent, task.model, task.effort
+    agents = [a for a in allowed if not exclude or a.name not in exclude] or allowed
     if task.pinned_host:   # a pinned task only ever goes to that host's agents
         on_host = [a for a in agents if a.host == task.pinned_host] \
-            or [a for a in cfg.agents.values() if a.host == task.pinned_host]
+            or [a for a in allowed if a.host == task.pinned_host]
         if not on_host:
             # this config has no agent on that host (T-217, Oct 10: owner codex-sol-b only exists in laptop-b's
-            # config): keep the owner and let the task wait for its host instead of handing it to another one
+            # config), or none there takes this type: keep the owner and let the task wait instead of handing it on
             return task.agent, task.model, task.effort
         agents = on_host
     candidates = [a for a in agents

@@ -412,6 +412,9 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
         console.print(f"[yellow]lint: {n}[/yellow]")
     t.status = Status.READY if all(d in done for d in t.depends_on) else Status.BACKLOG
     t.agent, t.model, t.effort = route(t, _cfg(), context_from_board(board, _cfg()))
+    if not t.agent:
+        console.print(f"[yellow]no configured agent may take type {type}{' on ' + host if host else ''} "
+                      "(agents' task_types / --host): the task is unassigned; use `swarm assign`[/yellow]")
     t = board.create_task(t)
     console.print(f"{t.id} {t.status.value} → {t.agent} / {t.model} / {t.effort}: {t.title}")
 
@@ -420,7 +423,8 @@ def add(title: str, type: str = typer.Option("backend", "--type"), importance: s
 def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str = typer.Option(None),
            effort: str = typer.Option(None),
            force: bool = typer.Option(False, "--force", help="If another agent is already running the task, stop "
-                                                             "that run and re-queue it for the new agent.")):
+                                                             "that run and re-queue it for the new agent. Also "
+                                                             "overrides the agent's task_types allowlist.")):
     """Override routing for one task."""
     board = make_board(_cfg(), state.memory)
     t = board.get_task(task_id)
@@ -428,7 +432,20 @@ def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str =
         raise typer.Exit(code=_fail(f"{task_id} not found"))
     if agent not in _cfg().agents:
         raise typer.Exit(code=_fail(f"unknown agent {agent}"))
+    from .router import TYPE_OVERRIDE_FLAG
     fields = ["agent", "model", "effort"]
+    allowed = _cfg().agents[agent].takes(t.type)
+    if not allowed and not force:
+        raise typer.Exit(code=_fail(
+            f"{agent} only takes task types {', '.join(_cfg().agents[agent].task_types or [])} (task_types in "
+            f"config); {t.id} is type {t.type}. Pick another agent, or re-run with --force to override."))
+    if not allowed and TYPE_OVERRIDE_FLAG not in t.flags:
+        t.flags = t.flags + [TYPE_OVERRIDE_FLAG]      # serve's reroute leaves a forced assignment where it is
+        fields.append("flags")
+        console.print(f"[yellow]{t.id}: type {t.type} is outside {agent}'s task_types; assigned anyway (--force)[/yellow]")
+    elif allowed and TYPE_OVERRIDE_FLAG in t.flags:
+        t.flags = [f for f in t.flags if f != TYPE_OVERRIDE_FLAG]
+        fields.append("flags")
     # A Running task is held by a claim nonce the runner re-reads every 30 s; changing only the agent field
     # leaves the old runner working (T-062 kept running on claude-a after `assign claude-a2`, Oct 5 2026).
     if t.status is Status.RUNNING and t.agent != agent:

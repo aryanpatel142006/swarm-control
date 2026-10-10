@@ -88,6 +88,16 @@ class AgentConfig:
     # minutes of heartbeat silence before serve calls this agent offline; None = the project-wide
     # heartbeat_stale_minutes. For agents that write their own row on a slower cadence than a runner (muse-b, Oct 10)
     heartbeat_stale_minutes: int | None = None
+    # allowlist of task types (or families: `ml` covers ml_audio) this agent may be given, by routing, rebalance,
+    # redistribute, reroute, `swarm add` and `swarm assign` (unless --force). None = any type. Low strengths alone did
+    # not keep Muse agents off app code: T-354 (frontend) went to muse-c twice (Aryan, Oct 10)
+    task_types: list[str] | None = None
+
+    def takes(self, task_type: str) -> bool:
+        """True when this agent may be given a task of this type (its own key or its family key)."""
+        if self.task_types is None:
+            return True
+        return task_type in self.task_types or task_type.split("_", 1)[0] in self.task_types
 
 
 @dataclass
@@ -383,6 +393,7 @@ def load_config(path: Path | str) -> Config:
             mcp=[str(m) for m in (a.get("mcp") or [])],
             heartbeat_stale_minutes=(int(a["heartbeat_stale_minutes"]) if a.get("heartbeat_stale_minutes") is not None
                                      else None),
+            task_types=_str_list(a.get("task_types"), f"agents.{name}.task_types"),
         )
     if not agents:
         raise ConfigError("at least one agent is required")
