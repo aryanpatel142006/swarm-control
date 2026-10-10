@@ -446,3 +446,58 @@ def test_holder_entries_record_the_process_start_time(tmp_path):
         h = json.loads((d / "verify-0.holder").read_text())
         assert h["pid"] == os.getpid() and h["pstart"] == hostlock._proc_start(os.getpid())
 
+
+def _wait_for(pred, timeout=15.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_sigterm_while_waiting_exits_without_running_the_command(tmp_path):
+    """Q-523: killing a queued swarm-lock started the batch it wrapped as an orphan."""
+    import signal
+    d = tmp_path / "locks"
+    marker = tmp_path / "ran"
+    env = {**os.environ}
+    env.pop(HELD_ENV, None)
+    root = str(Path(__file__).resolve().parent.parent)
+    for exclusive in (False, True):
+        with verify_slot(d, 1):                     # the machine is busy: the wrapper queues
+            p = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "1",
+                                  "--wait", "60", *(["--exclusive"] if exclusive else []), "--",
+                                  "touch", str(marker)], cwd=root, env=env, stderr=subprocess.PIPE, text=True)
+            assert _wait_for(lambda: not exclusive or list(d.glob(hostlock.PENDING_PREFIX + "*")))
+            time.sleep(1.0)                         # it is in the wait loop now
+            p.send_signal(signal.SIGTERM)
+            _, err = p.communicate(timeout=15)
+        assert p.returncode == 128 + signal.SIGTERM, err
+        assert "not run" in err
+        time.sleep(0.3)
+        assert not marker.exists()                  # the command never started, not even after the slot freed
+        assert not list(d.glob(hostlock.PENDING_PREFIX + "*"))
+
+
+def test_sigterm_while_running_stops_the_command_tree(tmp_path):
+    import signal
+    d = tmp_path / "locks"
+    pidfile = tmp_path / "grandchild.pid"
+    env = {**os.environ}
+    env.pop(HELD_ENV, None)
+    root = str(Path(__file__).resolve().parent.parent)
+    p = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "1", "--exclusive",
+                          "--", "sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"], cwd=root, env=env,
+                         stderr=subprocess.PIPE, text=True)
+    assert _wait_for(lambda: pidfile.exists() and pidfile.read_text().strip())
+    gc = int(pidfile.read_text().strip())
+    p.send_signal(signal.SIGTERM)
+    p.communicate(timeout=20)
+    assert _wait_for(lambda: not hostlock._alive(gc) or _is_zombie(gc), 15)
+    assert not (d / "verify-0.holder").exists()
+
+
+def _is_zombie(pid):
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return out.startswith("Z") or not out

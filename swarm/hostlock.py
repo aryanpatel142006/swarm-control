@@ -463,6 +463,61 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 os.close(fd)
 
 
+class _Cancelled(BaseException):
+    """SIGTERM/SIGINT/SIGHUP reached `swarm-lock` while it waited for a slot: leave without running the command."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def descendants(pid: int) -> list[int]:
+    """Every live descendant of `pid` (children first), from one `ps` snapshot."""
+    try:
+        r = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids: dict[int, list[int]] = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(0), []):
+            if c not in out and c != pid:
+                out.append(c)
+                todo.append(c)
+    return out
+
+
+def stop_tree(pid: int, *, grace_s: float = 10.0, include_root: bool = True) -> list[int]:
+    """SIGTERM `pid` and its descendants, then SIGKILL whatever is still alive after `grace_s`. Returns the pids
+    signalled. The tree is listed before the root goes, so grandchildren reparented to init are still found."""
+    import signal
+    tree = descendants(pid)
+    targets = ([pid] if include_root else []) + tree
+    for t in targets:
+        with contextlib.suppress(OSError):
+            os.kill(t, signal.SIGTERM)
+    end = time.monotonic() + grace_s
+    while time.monotonic() < end and any(_alive(t) and not _zombie(t) for t in targets):
+        time.sleep(0.1)
+    for t in targets:
+        if _alive(t) and not _zombie(t):
+            with contextlib.suppress(OSError):
+                os.kill(t, signal.SIGKILL)
+    return targets
+
+
+def _zombie(pid: int) -> bool:
+    try:
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.stdout.strip().startswith("Z")
+
+
 def write_wrapper(bin_dir: Path, python: str | None = None) -> Path:
     """`<bin_dir>/swarm-lock`: a shell wrapper around this module with the harness's own interpreter, so a worker
     (any shell, any venv) can run `swarm-lock -- <cmd>` without knowing where swarm-control lives."""
@@ -532,19 +587,53 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             record = None
     label = ("measurement" if a.exclusive else "verify") + f": {' '.join(cmd)[:80]}"
-    with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
-                     record=record, honor_hold=not a.ignore_hold,
-                     exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes) as held:
-        waited = time.monotonic() - started
-        if waited >= 5:
-            log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"
-                + (" (the runner adds this back to the run's time limit)" if record else ""))
-        env = {**os.environ, HELD_ENV: "1"} if held else dict(os.environ)
-        try:
-            return subprocess.call(cmd, env=env)
-        except FileNotFoundError:
-            log(f"command not found: {cmd[0]}")
-            return 127
+    import signal
+    # Q-523: a queued swarm-lock that was killed must not start its command later, and a running one must take its
+    # command tree with it (a detached batch kept the machine busy next to the restarted one). While waiting, the
+    # signal raises _Cancelled (the slot code's finally removes the pending file); once the command runs, the
+    # signal is passed on to the command's whole process tree. SIGHUP stays ignored under nohup.
+    child: dict[str, subprocess.Popen | None] = {"p": None}
+    stopping = {"sig": 0}
+
+    def on_signal(signum, _frame):
+        if child["p"] is None:
+            raise _Cancelled(signum)
+        if not stopping["sig"]:
+            stopping["sig"] = signum
+            stop_tree(child["p"].pid, grace_s=10.0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        with contextlib.suppress(ValueError, OSError):
+            if signal.getsignal(sig) is not signal.SIG_IGN:
+                signal.signal(sig, on_signal)
+    try:
+        with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
+                         record=record, honor_hold=not a.ignore_hold,
+                         exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes) as held:
+            waited = time.monotonic() - started
+            if waited >= 5:
+                log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"
+                    + (" (the runner adds this back to the run's time limit)" if record else ""))
+            env = {**os.environ, HELD_ENV: "1"} if held else dict(os.environ)
+            try:
+                child["p"] = subprocess.Popen(cmd, env=env)
+            except FileNotFoundError:
+                log(f"command not found: {cmd[0]}")
+                return 127
+            while True:
+                try:
+                    rc = child["p"].wait()
+                    break
+                except _Cancelled:      # raced: the signal came between Popen and child["p"] being set
+                    stop_tree(child["p"].pid, grace_s=10.0)
+            if stopping["sig"]:
+                log(f"stopped by signal {stopping['sig']}; the command's process tree was terminated")
+                return 128 + stopping["sig"]
+            return rc
+    except _Cancelled as c:
+        log(f"cancelled by signal {c.signum} while waiting for {'the machine' if a.exclusive else 'a slot'}; "
+            "the command was not run")
+        return 128 + c.signum
 
 
 if __name__ == "__main__":
