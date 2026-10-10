@@ -426,6 +426,11 @@ class Server:
             return "[answer typed on the board (sender not recorded; unverified)]"
         return origin_label(*parse_sender(q.answered_by), self.cfg.orchestrator_host or self.host)
 
+    def _blocks(self, q: Question, t: Task) -> bool:
+        from .relay import blocks_task
+        rev = getattr(getattr(self.cfg, "reviewer", None), "agent", "")
+        return blocks_task(q, t, (rev,))
+
     def relay(self) -> int:
         n = 0
         ctx = None
@@ -436,7 +441,11 @@ class Server:
             # re-read by page id right before writing: a lookup by id can return the row as it was before the
             # orchestrator's last change, and writing `flags` from it dropped T-361's host pin (Oct 10 2026)
             t = self._fresh(t) if t else None
-            if q.kind == "blocking" and t and t.status is Status.BLOCKED and any(f.startswith("merge_failed") for f in t.flags):
+            blocking = q.kind == "blocking"
+            if blocking and t and not self._blocks(q, t):
+                blocking = False    # another agent's blocking question about this task: fyi for blocking purposes
+                self.log(f"[{t.id}] {q.id} asked by {q.asked_by or '?'}: [foreign→fyi] not a blocker for {t.agent or 'this task'}")
+            if blocking and t and t.status is Status.BLOCKED and any(f.startswith("merge_failed") for f in t.flags):
                 # a merge that gave up: the human either merged by hand or wants the merge retried
                 if "merged" in q.answer.lower():
                     t.status = Status.DONE
@@ -446,17 +455,17 @@ class Server:
                 t.claim_nonce = ""
                 self.board.update_task(t, ["status", "flags", "claim_nonce"])
                 self.log(f"[{t.id}] merge question answered → {t.status.value}")
-            elif q.kind == "blocking" and t and t.status is Status.BLOCKED and q.answer.strip().lower().startswith("cut"):
+            elif blocking and t and t.status is Status.BLOCKED and q.answer.strip().lower().startswith("cut"):
                 t.status = Status.CUT
                 self.board.update_task(t, ["status"])
                 self.log(f"[{t.id}] cut by answer to {q.id}")
-            elif (q.kind == "blocking" and t and t.status is Status.BLOCKED and t.pr_url
+            elif (blocking and t and t.status is Status.BLOCKED and t.pr_url
                   and q.answer.strip().lower().startswith("accept")):
                 # the human overrides the reviewer: ship what is on the branch (T-010, Oct 5 2026)
                 t.status, t.feedback, t.claim_nonce = Status.MERGE_READY, "", ""
                 self.board.update_task(t, ["status", "feedback", "claim_nonce"])
                 self.log(f"[{t.id}] accepted as is by answer to {q.id} → merge")
-            elif q.kind == "blocking":
+            elif blocking:
                 if t and t.status is Status.BLOCKED:
                     t.feedback = f"{self.answer_label(q)} Human answer to \"{q.text}\": {q.answer}"[:1900]
                     t.flags = list(dict.fromkeys(t.flags + ["resume"]))

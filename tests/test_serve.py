@@ -229,6 +229,37 @@ def test_relay_cut_answer_cuts_the_task(cfg, git_repo, tmp_path):
     assert board.get_task(t.id).status is Status.CUT
 
 
+def test_foreign_blocking_question_does_not_cut_or_unblock_the_task(cfg, git_repo, tmp_path):
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    t = board.create_task(Task(id="", title="b", status=Status.BLOCKED, agent="muse-c"))
+    q = board.create_question(Question(id="", text="[muse-b -> muse-c] hi", kind="blocking", task_id=t.id,
+                                       asked_by="muse-b", answer="cut it"))
+    assert srv.relay() == 1
+    assert board.get_task(t.id).status is Status.BLOCKED
+    assert board.list_questions()[0].status == "Applied"
+
+
+def test_blocking_question_from_own_agent_host_orchestrator_or_serve_still_blocks(cfg, git_repo, tmp_path):
+    for who in ("claude-a", "claude-a@laptop-a", "orchestrator@laptop-a", "orchestrator", "serve", "reviewer"):
+        srv, board, clock = make(cfg, git_repo, tmp_path)
+        t = board.create_task(Task(id="", title="b", status=Status.BLOCKED, agent="claude-a"))
+        board.create_question(Question(id="", text="which?", kind="blocking", task_id=t.id, asked_by=who,
+                                       answer="cut it"))
+        assert srv.relay() == 1
+        assert board.get_task(t.id).status is Status.CUT, who
+
+
+def test_blocks_task_rules():
+    from swarm.relay import blocks_task
+    t = Task(id="T-1", title="x", agent="claude-a3")
+    mk = lambda who, kind="blocking": Question(id="Q", text="x", kind=kind, asked_by=who, task_id="T-1")
+    assert blocks_task(mk("claude-a3"), t) and blocks_task(mk("orchestrator@laptop-a"), t)
+    assert blocks_task(mk(""), t) and blocks_task(mk("serve"), t)
+    assert blocks_task(mk("codex-x"), t, ("codex-x",))
+    assert not blocks_task(mk("muse-b"), t) and not blocks_task(mk("muse-b@laptop-c"), t)
+    assert not blocks_task(mk("claude-a3", "fyi"), t)
+
+
 def test_rebalance_moves_queued_work_to_idle_equal_agent(cfg, git_repo, tmp_path):
     srv, board, clock = make(cfg, git_repo, tmp_path)
     board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=utcnow()))   # checked in

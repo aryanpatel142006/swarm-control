@@ -37,6 +37,24 @@ def parse_sender(tag: str) -> tuple[str, str]:
     return (sender.strip(), host.strip()) if at and sender.strip() else (tag, "")
 
 
+HARNESS_ASKERS = ("serve", "reviewer")
+
+
+def blocks_task(q, task, extra_askers=()) -> bool:
+    """A blocking question only blocks (and its answer only steers) the task when its own worker asked it, the
+    harness filed it (serve, reviewer, the reviewer agent), or an orchestrator did. Another agent's blocking
+    question that merely names the task (muse-b on T-377 and T-365, Oct 10 2026) is treated as fyi. An empty
+    Asked By is a legacy row and still counts."""
+    if getattr(q, "kind", "") != "blocking":
+        return False
+    who = (q.asked_by or "").strip()
+    if not who or who.lower().startswith(ORCHESTRATOR):
+        return True
+    name = parse_sender(who)[0]
+    ok = {x for x in (getattr(task, "agent", ""), *HARNESS_ASKERS, *extra_askers) if x}
+    return who in ok or name in ok
+
+
 def cli_sender(default: str = ORCHESTRATOR) -> str:
     """Who is running `swarm tell` / `swarm answer`: a worker run (its env has SWARM_TASK_ID) is never the
     orchestrator, whatever host it is on."""
