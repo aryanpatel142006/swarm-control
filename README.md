@@ -170,6 +170,12 @@ agents:
 
 Before a human live test, the orchestrator runs `swarm hold "live test" --minutes 30`. While `~/.swarm/<project>/locks/HOLD` exists, every `swarm-lock` call (exclusive measurements and shared verifies) waits and logs the reason and until-time, so no measurement or verify runs on that laptop or replays against the shared remote GPU during the test (selective-hearing, Oct 9: a worker's replay overran the live session's tier). The hold ends by itself at its until-time (default 60 minutes), `swarm release` ends it early, `swarm status` shows a `HOLD:` line while it is active, and `swarm-lock --ignore-hold` or `SWARM_HOLD_BYPASS=1` skips the wait for the humans' own tooling. It is per machine: run it on each laptop that runs workers.
 
+### Quiet machine for measurements
+
+`swarm-lock --exclusive --max-load N -- <cmd>` takes the whole machine as usual, then also waits until the 1-minute load average is below `N` before it runs the command (selective-hearing, Oct 9-10: real-time session measurements on a Mac at load 9-13 overran their tier and measured nothing, Q-517, Q-520, Q-523). The load wait counts against the same `--wait` timeout; past it the command runs anyway and the log says the load was still high, so treat that result as perturbed. It is off unless the flag is given and only allowed with `--exclusive`.
+
+Stopping `swarm-lock`: a SIGTERM, SIGINT or SIGHUP while it is still queued exits with 128+signal and never runs the command; once the command runs, the signal stops the command's whole process tree. When the runner starts a new attempt of a task, it stops any `swarm-lock` job an earlier attempt of the same task left running (and names it in the prompt).
+
 ## Reference
 
 <details>

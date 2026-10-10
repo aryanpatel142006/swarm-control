@@ -315,13 +315,16 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 wait_s: float = DEFAULT_WAIT_S, poll_s: float = 1.0, log: Callable[[str], None] | None = None,
                 sleep: Callable[[float], None] = time.sleep, label: str = "verify",
                 record: Path | None = None, honor_hold: bool = False,
-                exclusive_cap_min: float | None = None) -> Iterator[bool]:
+                exclusive_cap_min: float | None = None, max_load: float | None = None,
+                loadavg: Callable[[], tuple] = os.getloadavg) -> Iterator[bool]:
     """Hold one slot (or all of them with exclusive=True). Yields True when held, False when the wait ran out and
     the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once. `record` is a file
     the wait is written to (the runner adds a worker's waits back to its wall-clock limit). `honor_hold`: first wait
     while a live-test hold exists (`swarm hold`), unless SWARM_HOLD_BYPASS=1; that wait does not use up `wait_s`.
     `exclusive_cap_min`: a non-exclusive waiter that has been queued behind exclusive holders for longer than this
-    proceeds without a slot (yields True, so nested wrappers do not wait again) and logs it; the holder's wait log gets the same line (Q-478)."""
+    proceeds without a slot (yields True, so nested wrappers do not wait again) and logs it; the holder's wait log gets the same line (Q-478).
+    `max_load` (exclusive only): once every slot is held, also wait until the 1-minute load average is below it, within
+    the same `wait_s`; past that the measurement runs anyway and logs the load (Q-517, Q-520, Q-523)."""
     if os.environ.get(HELD_ENV):
         yield True
         return
@@ -406,6 +409,18 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                         sleep(poll_s)
             with contextlib.suppress(OSError):
                 pending.unlink()
+            if max_load is not None and max_load > 0:
+                load_wait_started = time.monotonic()
+                while (load := float(loadavg()[0])) >= max_load:
+                    if time.monotonic() > deadline:
+                        if log:
+                            log(f"{label}: load average still {load:.1f} (>= {max_load:g}) after "
+                                f"{time.monotonic() - load_wait_started:.0f} s; running anyway - the measurement "
+                                "may be perturbed")
+                        break
+                    waiting(f"holding the machine; waiting for the 1-min load average {load:.1f} to drop below "
+                            f"{max_load:g} (--max-load)")
+                    sleep(poll_s)
         else:
             behind["last"] = time.monotonic()
             while True:
@@ -599,6 +614,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--exclusive-max-minutes", type=float,
                     default=float(os.environ.get(EXCL_CAP_ENV) or DEFAULT_EXCL_CAP_MIN),
                     help="a normal verify queued behind exclusive holders this long proceeds (0 = never)")
+    ap.add_argument("--max-load", type=float, default=None,
+                    help="with --exclusive: after taking the machine, wait (within --wait) until the 1-min load "
+                         "average is below this before running")
     ap.add_argument("--ignore-hold", action="store_true",
                     help="do not wait for a live-test hold (`swarm hold`); SWARM_HOLD_BYPASS=1 does the same")
     ap.add_argument("--snippet", action="store_true",
@@ -608,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.snippet:
         print(SNIPPET, end="")
         return 0
+    if a.max_load is not None and not a.exclusive:
+        ap.error("--max-load needs --exclusive (it is for measurements)")
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd:
         ap.error("no command given (swarm-lock [--exclusive] -- <cmd> …)")
@@ -646,7 +666,7 @@ def main(argv: list[str] | None = None) -> int:
                 signal.signal(sig, on_signal)
     try:
         with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
-                         record=record, honor_hold=not a.ignore_hold,
+                         record=record, honor_hold=not a.ignore_hold, max_load=a.max_load,
                          exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes) as held:
             waited = time.monotonic() - started
             if waited >= 5:

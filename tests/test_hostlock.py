@@ -501,3 +501,30 @@ def test_sigterm_while_running_stops_the_command_tree(tmp_path):
 def _is_zombie(pid):
     out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
     return out.startswith("Z") or not out
+
+
+def test_exclusive_max_load_waits_for_a_quiet_machine(tmp_path):
+    """Q-517, Q-520, Q-521, Q-523: session-level measurements on a loaded Mac measured nothing."""
+    d = tmp_path / "locks"
+    loads = iter([9.0, 7.5, 3.0])
+    logs = []
+    with verify_slot(d, 1, exclusive=True, wait_s=5, poll_s=0.01, log=logs.append, max_load=4.0,
+                     loadavg=lambda: (next(loads), 0, 0)) as held:
+        assert held is True
+    assert any("load" in m and "9.0" in m for m in logs)
+    # bounded by the wait: past it the measurement runs anyway and says so
+    logs.clear()
+    with verify_slot(d, 1, exclusive=True, wait_s=0.2, poll_s=0.01, log=logs.append, max_load=4.0,
+                     loadavg=lambda: (12.0, 0, 0)) as held:
+        assert held is True                         # it holds the machine; only the load did not drop
+    assert any("still" in m and "12.0" in m for m in logs)
+    # off by default
+    with verify_slot(d, 1, exclusive=True, wait_s=0.2, poll_s=0.01, loadavg=lambda: (99.0, 0, 0)) as held:
+        assert held is True
+
+
+def test_max_load_flag_needs_exclusive(tmp_path):
+    import pytest
+    with pytest.raises(SystemExit):
+        hostlock.main(["--dir", str(tmp_path), "--max-load", "4", "--", "true"])
+    assert hostlock.main(["--dir", str(tmp_path / "l"), "--exclusive", "--max-load", "1000", "--", "true"]) == 0
