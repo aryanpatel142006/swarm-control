@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from .models import Report, Task, utcnow
+from .strict_schema import drop_nulls
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -70,6 +71,8 @@ def parse_report(structured: dict | None, worktree: Path, *, changed_files: list
                 data = loaded if isinstance(loaded, dict) and "status" in loaded else None
             except ValueError:
                 data = None
+    if data is not None:
+        data = drop_nulls(data)   # a strict-mode Codex reply sets each unused optional field to null
     if data is None:
         summary = "Report missing; synthesized from the diff." if changed_files else "Report missing and no files changed."
         if error:

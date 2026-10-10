@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from ..models import RunResult, Usage
+from ..strict_schema import to_openai_strict
 from ..workspace import run_cmd
 from .base import RATE_LIMIT_RE, Adapter, RunSpec, is_auth_lost, is_usage_limit, parse_reset_at
 
@@ -63,7 +64,8 @@ class CodexAdapter(Adapter):
         if spec.schema:
             schema_path = spec.cwd / ".swarm-run" / "schema.json"
             schema_path.parent.mkdir(exist_ok=True)
-            schema_path.write_text(json.dumps(spec.schema))
+            # newer CLIs send this to OpenAI structured outputs in strict mode (codex-c, Oct 10); older ones accept it too
+            schema_path.write_text(json.dumps(to_openai_strict(spec.schema)))
             argv += ["--output-schema", str(schema_path)]
         argv += list(spec.extra_args) + ["-"]
         return argv, spec.prompt_file.read_bytes()

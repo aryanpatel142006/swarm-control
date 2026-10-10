@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,12 +178,25 @@ def probe_models(cfg: Config, agent_name: str, tmp_dir: Path, *, board=None, smo
     return checks
 
 
+def ensure_git_repo(path: Path) -> bool:
+    """`git init` `path` unless it already is a repository's top level. Codex CLI 0.162 refuses to run outside a
+    trusted (git) directory, which failed `doctor --smoke codex-c` on laptop-c (Q-896, Oct 10)."""
+    if (path / ".git").exists():
+        return True
+    try:
+        r = subprocess.run(["git", "init", "-q", str(path)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
 def smoke_agent(cfg: Config, agent_name: str, tmp_dir: Path, model: str | None = None) -> Check:
     from .adapters import get_adapter
     from .adapters.base import RunSpec
     a = cfg.agents[agent_name]
     tmp_dir.mkdir(parents=True, exist_ok=True)
     (tmp_dir / ".swarm-run").mkdir(exist_ok=True)
+    ensure_git_repo(tmp_dir)
     pf = tmp_dir / "smoke.md"
     pf.write_text("Reply with exactly this JSON and nothing else, then stop: "
                   '{"status":"done","summary":"smoke ok"}. If you cannot return structured output, '

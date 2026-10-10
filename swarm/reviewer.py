@@ -19,6 +19,7 @@ from .lightverify import VerifyChoice, choose_verify
 from .models import AUTH_LOST_NOTE, QUESTION_TEXT_CAP, USAGE_LIMIT_NOTE, AgentRow, Question, Status, Task, utcnow
 from .prompt import PROMPTS_DIR
 from .report import REVIEW_SCHEMA, earlier_questions, earlier_questions_note
+from .strict_schema import drop_nulls
 from .runner import RATE_LIMIT_COOLDOWN_MIN, STRUCTURED_PROVIDERS, USAGE_LIMIT_COOLDOWN_MIN
 from .workspace import CmdResult, Workspace
 
@@ -44,6 +45,8 @@ def parse_verdict(structured: dict | None, worktree: Path) -> Verdict:
                 data = loaded if isinstance(loaded, dict) and "verdict" in loaded else None
             except ValueError:
                 data = None
+    if data is not None:
+        data = drop_nulls(data)   # strict-mode Codex: unused optional fields come back as null
     if data is None or data.get("verdict") not in ("approve", "request_changes", "escalate"):
         return Verdict("escalate", "reviewer produced no usable verdict", [])
     return Verdict(data["verdict"], str(data.get("summary") or ""),

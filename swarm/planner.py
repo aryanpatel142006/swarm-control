@@ -11,6 +11,7 @@ from .board.base import Board
 from .config import Config
 from .models import IMPORTANCES, SIZES, TASK_TYPES, Status, Task
 from .prompt import PROMPTS_DIR, read_doc
+from .strict_schema import drop_nulls
 from .policy import apply_task_lint, main_exists
 from .router import context_from_board, route, scopes_overlap
 from .runner import STRUCTURED_PROVIDERS
@@ -69,6 +70,7 @@ def parse_proposals(structured: dict | None, worktree: Path) -> list[dict]:
                 data = None
     if data is None:
         return []
+    data = drop_nulls(data)   # strict-mode Codex: unused optional fields come back as null
     out = []
     for raw in data["tasks"]:
         if not isinstance(raw, dict) or not raw.get("title"):
