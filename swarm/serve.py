@@ -189,7 +189,8 @@ class Server:
         n = 0
         for t in self.board.list_tasks(status=[Status.RUNNING]):
             row = rows.get(t.agent or "")
-            alive = bool(row and row.last_heartbeat and (now - beat(row)) < stale)
+            alive = bool(row and row.last_heartbeat
+                         and (now - beat(row)) < timedelta(minutes=self.cfg.stale_minutes_for(t.agent or "")))
             if not alive and outage:
                 continue
             listed = bool(row and t.id in [x.strip() for x in row.current_task.split(",") if x.strip()])
@@ -207,7 +208,8 @@ class Server:
         for name, row in rows.items():
             if name == "serve":
                 continue
-            if row.last_heartbeat and (now - beat(row)) >= stale and (row.status != "offline" or row.current_task):
+            quiet = timedelta(minutes=self.cfg.stale_minutes_for(name))
+            if row.last_heartbeat and (now - beat(row)) >= quiet and (row.status != "offline" or row.current_task):
                 row.status, row.current_task = "offline", ""
                 self.board.upsert_agent(row)
         return n

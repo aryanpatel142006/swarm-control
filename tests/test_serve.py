@@ -722,3 +722,21 @@ def test_an_old_runners_short_rate_limit_on_a_used_up_plan_becomes_a_usage_limit
     row = board.get_agent("codex-a")
     assert usage_limited(row, now) and row.cooldown_until == now + timedelta(hours=2, minutes=10)
     assert srv.upgrade_limits() == 0          # once
+
+
+def test_reap_honours_a_per_agent_heartbeat_window(cfg, git_repo, tmp_path):
+    # muse-b (Oct 10) writes its own row about every 17 min: the project's 10-min window kept flipping it offline
+    cfg.agents["codex-a"].heartbeat_stale_minutes = 30
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-a", status="running", last_heartbeat=now - timedelta(minutes=17),
+                                current_task="T-001"))
+    board.upsert_agent(AgentRow(name="claude-a", status="idle", last_heartbeat=now - timedelta(minutes=17)))
+    t = board.create_task(Task(id="", title="slow beat", status=Status.RUNNING, agent="codex-a"))
+    srv.reap()
+    assert board.get_agent("codex-a").status == "running"            # inside its own 30-min window
+    assert board.get_task(t.id).status is Status.RUNNING
+    assert board.get_agent("claude-a").status == "offline"           # project default still applies to others
+    clock["now"] += timedelta(minutes=15)
+    srv.reap()
+    assert board.get_agent("codex-a").status == "offline"

@@ -312,3 +312,21 @@ def test_add_names_an_open_task_that_cites_the_same_file(project_dir):
     assert r.exit_code == 0, r.output
     assert "T-001 is open and names scripts/gpu_up.sh" in r.output and "--depends T-001" in r.output
     assert "Harness notes" in board.get_task("T-002").description
+
+
+def test_agents_sync_restores_a_removed_row_that_is_back_in_config(project_dir, monkeypatch):
+    # muse-c (Oct 10): a configured agent's row said 'removed' with a stale note, and agents-sync never undid it
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import AgentRow
+    from swarm import cli as c
+    board = InMemoryBoard()
+    board.upsert_agent(AgentRow(name="codex-a", status="removed", current_task="T-3",
+                                note="renamed to codex-z (stale pre-rename row)"))
+    board.upsert_agent(AgentRow(name="claude-a", status="running", note="claude 2.1 · best=opus"))
+    monkeypatch.setattr(c, "make_board", lambda cfg, memory=False: board)
+    c.state.cfg = None; c.state.config_path = project_dir / ".swarm" / "config.yaml"; c.state.memory = True
+    c.agents_sync()
+    back = board.get_agent("codex-a")
+    assert back.status == "offline" and back.current_task == "" and back.note == ""
+    live = board.get_agent("claude-a")
+    assert live.status == "running" and live.note == "claude 2.1 · best=opus"   # live rows keep their note

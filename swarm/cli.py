@@ -334,6 +334,10 @@ def agents_sync():
     for a in _cfg().agents.values():
         row = board.get_agent(a.name) or AgentRow(name=a.name, status="offline")   # offline until its first heartbeat
         row.provider, row.host = a.provider, a.host
+        if row.status == "removed":   # back in config (or never really gone): offline until its next heartbeat
+            row.status, row.current_task, row.cooldown_until, row.note = "offline", "", None, ""
+        elif row.note == "removed from config":   # a self-heartbeating agent kept the retirement note (muse-b, Oct 10)
+            row.note = ""
         board.upsert_agent(row)
     for row in board.list_agents():      # agents dropped from config must not look alive or routable
         if row.name != "serve" and row.name not in _cfg().agents and row.status != "removed":

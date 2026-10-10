@@ -27,7 +27,7 @@ verify:
   full: scripts/verify_full.sh      # run by the reviewer
   # Lines a task adds to docs/text files are rejected (Changes Requested, lines named) when they hold a placeholder.
   # Defaults below; [] turns the check off; add "**/*.py" to placeholder_files to check code too (off by default).
-  # placeholders: ['\bTBD\b', 'TODO\(fill\)', '\{\{', '<fill', '\bXXX\b', '(?i)\blorem\b']
+  # placeholders: ['\bTBD\b', 'TODO\(fill\)', '\{\{', '<fill', '\bXXX\b', '(?i)\blorem\s+ipsum\b']
   # placeholder_files: ['**/*.md', '**/*.markdown', '**/*.rst', '**/*.txt', '**/*.adoc', 'docs/**']
   # Backup/merge leftovers a task must not add (regexes; [] turns it off):
   # stray_files: ['\.[A-Za-z0-9]+-e$', '\.orig$', '\.rej$', '\.bak$', '~$', '\.sw[op]$', '(^|/)\.DS_Store$']

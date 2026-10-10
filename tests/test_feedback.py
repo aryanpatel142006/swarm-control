@@ -164,3 +164,11 @@ def test_a_project_step_that_failed_after_green_pytest_is_named(cfg=None):
     fb = verify_feedback(out, script="scripts/verify_full.sh", code=1)
     assert "the failing step is in this output" in fb and "demo replay regressed or failed" in fb
     assert failing_step_line("verify_fast: PASS\n3 passed in 1.0s\n") == ""
+
+
+def test_lorem_is_flagged_only_as_lorem_ipsum():
+    # 'lorem-like copy' is a real phrase in a design doc; only the filler text itself is a placeholder (Oct 10)
+    added = {"docs/DESIGN.md": [(1, "Avoid lorem-like copy in empty states."), (2, "Lorem Ipsum dolor sit amet"),
+                                (3, "lorem  ipsum"), (4, "the word lorem alone")]}
+    hits = placeholder_hits(added, patterns=DEFAULT_PLACEHOLDER_PATTERNS, files=DEFAULT_PLACEHOLDER_FILES)
+    assert [n for _, n, _ in hits] == [2, 3]

@@ -171,7 +171,7 @@ def reconcile_sync_feedback(feedback: str, *, synced: bool, conflicts: list[str]
 
 
 # ----- placeholder tokens (Q-160, Q-162) -----
-DEFAULT_PLACEHOLDER_PATTERNS = [r"\bTBD\b", r"TODO\(fill\)", r"\{\{", r"<fill", r"\bXXX\b", r"(?i)\blorem\b"]
+DEFAULT_PLACEHOLDER_PATTERNS = [r"\bTBD\b", r"TODO\(fill\)", r"\{\{", r"<fill", r"\bXXX\b", r"(?i)\blorem\s+ipsum\b"]   # bare "lorem" flagged "lorem-like copy" (Oct 10)
 DEFAULT_PLACEHOLDER_FILES = ["**/*.md", "**/*.markdown", "**/*.rst", "**/*.txt", "**/*.adoc", "docs/**"]
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _INLINE_CODE = re.compile(r"`[^`\n]*`")

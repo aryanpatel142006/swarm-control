@@ -74,6 +74,9 @@ class AgentConfig:
     extra_args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)      # extra environment for the CLI (e.g. CLAUDE_CONFIG_DIR for a 2nd account)
     mcp: list[str] = field(default_factory=list)          # MCP server names this agent always gets
+    # minutes of heartbeat silence before serve calls this agent offline; None = the project-wide
+    # heartbeat_stale_minutes. For agents that write their own row on a slower cadence than a runner (muse-b, Oct 10)
+    heartbeat_stale_minutes: int | None = None
 
 
 @dataclass
@@ -174,6 +177,11 @@ class Config:
     def plugins_for(self, task_type: str) -> list[str]:
         """Plugins that must be installed on the host before a task of this type runs."""
         return list(dict.fromkeys(list(self.plugins_required) + by_type(self.plugins_by_type, task_type)))
+
+    def stale_minutes_for(self, agent: str) -> int:
+        """Heartbeat silence (minutes) after which serve treats this agent as gone."""
+        a = self.agents.get(agent)
+        return a.heartbeat_stale_minutes if a and a.heartbeat_stale_minutes else self.heartbeat_stale_minutes
 
     def agents_on_host(self, host: str) -> list[AgentConfig]:
         return [a for a in self.agents.values() if a.host == host]
@@ -335,6 +343,8 @@ def load_config(path: Path | str) -> Config:
             extra_args=list(a.get("extra_args") or []),
             env={str(k): str(v) for k, v in (a.get("env") or {}).items()},
             mcp=[str(m) for m in (a.get("mcp") or [])],
+            heartbeat_stale_minutes=(int(a["heartbeat_stale_minutes"]) if a.get("heartbeat_stale_minutes") is not None
+                                     else None),
         )
     if not agents:
         raise ConfigError("at least one agent is required")
