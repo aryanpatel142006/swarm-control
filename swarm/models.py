@@ -73,6 +73,7 @@ class Task:
     flags: list[str] = field(default_factory=list)
     started: datetime | None = None
     updated: datetime | None = None
+    created: datetime | None = None   # board creation time; None when the board does not say
     page_id: str = ""
 
     @property

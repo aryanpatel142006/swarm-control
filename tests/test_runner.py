@@ -2126,3 +2126,16 @@ def test_usage_limit_run_requeues_with_resume_and_the_parsed_reset(cfg, git_repo
     stored = board.get_task(t.id)
     assert stored.attempts == 1 and "resume" in stored.flags and stored.last_error.startswith("usage limit:")
     assert board.get_agent("codex-a").cooldown_until == reset
+
+
+def test_runner_skips_a_young_task_without_host_flag(cfg, git_repo, tmp_path):
+    """serve needs a tick to tag a task made on another laptop; laptop-a's workers claimed those within seconds."""
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "s"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter, host="host-a")
+    now = utcnow()
+    young = ready_task(board, agent="claude-a", created=now - timedelta(seconds=30))
+    old = ready_task(board, agent="claude-a", created=now - timedelta(minutes=5))
+    tagged = ready_task(board, agent="claude-a", flags=["host:host-a"], created=now - timedelta(seconds=30))
+    unknown = ready_task(board, agent="claude-a")          # board gave no creation time: claimable as before
+    assert {x.id for x in r.pending_tasks()} == {old.id, tagged.id, unknown.id}
+    assert young.id not in {x.id for x in r.pending_tasks()}

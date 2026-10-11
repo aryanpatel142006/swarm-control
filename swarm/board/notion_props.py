@@ -179,6 +179,8 @@ def page_to_task(page: dict) -> Task:
         last_error=r_rich(g("Last Error")), flags=_uncsv(r_rich(g("Flags"))), started=r_date(g("Started")),
         updated=datetime.fromisoformat(page["last_edited_time"].replace("Z", "+00:00"))
         if page.get("last_edited_time") else None,
+        created=datetime.fromisoformat(page["created_time"].replace("Z", "+00:00"))
+        if page.get("created_time") else None,
         page_id=page.get("id", ""),
     )
 

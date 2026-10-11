@@ -809,3 +809,39 @@ def test_infer_host_from_agent_title_and_never_running(project_dir, sample_confi
     t7 = board.get_task("T-007")                          # muse-b may not take backend: host pinned, agent not set
     assert (t7.pinned_host, t7.agent) == ("muse-cloud", None)
     assert srv.infer_hosts() == 0                         # idempotent
+
+
+# ----- laptop-c's orchestrator: Ahmad tasks without a host flag, and probe tasks (Oct 10 2026) -----
+def _cfg_with_c(project_dir, sample_config_dict):
+    import yaml
+    from swarm.config import load_config
+    sample_config_dict["hosts"]["laptop-c"] = {"max_parallel": {"generic": 1, "codex": 1}}
+    base = {"host": "laptop-c", "models": {"best": "m", "high": "m", "mid": "m", "low": "m"},
+            "command_template": "echo no >&2; exit 1"}
+    sample_config_dict["agents"]["muse-c"] = dict(base, provider="generic", task_types=["research", "docs", "eval"])
+    sample_config_dict["agents"]["codex-c"] = dict(sample_config_dict["agents"]["codex-a"], host="laptop-c")
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    return load_config(project_dir / ".swarm" / "config.yaml")
+
+
+def test_infer_host_for_ahmad_titles_and_cut_probes(project_dir, sample_config_dict, git_repo, tmp_path):
+    cfg = _cfg_with_c(project_dir, sample_config_dict)
+    srv, board, _ = make(cfg, git_repo, tmp_path)
+    board.create_task(Task(id="T-001", title="URGENT from Ahmad: survey", type="research", status=Status.READY, agent="claude-a"))
+    board.create_task(Task(id="T-002", title="Ahmad: fix the bridge", type="backend", status=Status.READY, agent="claude-a"))
+    board.create_task(Task(id="T-003", title="Run it via muse-c", type="docs", status=Status.BACKLOG))
+    board.create_task(Task(id="T-004", title="probe-ping", status=Status.READY, agent="claude-a"))
+    board.create_task(Task(id="T-005", title="Ahmad: running", type="docs", status=Status.RUNNING, agent="claude-a"))
+    board.create_task(Task(id="T-006", title="Ahmad: pinned", type="docs", status=Status.READY, agent="claude-a",
+                           flags=["host:laptop-a"]))
+    assert srv.infer_hosts() == 4
+    t1 = board.get_task("T-001")
+    assert (t1.pinned_host, t1.agent) == ("laptop-c", "muse-c")
+    t2 = board.get_task("T-002")
+    assert (t2.pinned_host, t2.agent) == ("laptop-c", "codex-c")     # muse-c may not take backend
+    t3 = board.get_task("T-003")
+    assert (t3.pinned_host, t3.agent) == ("laptop-c", "muse-c")
+    assert board.get_task("T-004").status is Status.CUT
+    assert board.get_task("T-005").pinned_host == ""
+    assert board.get_task("T-006").pinned_host == "laptop-a"
+    assert srv.infer_hosts() == 0

@@ -161,17 +161,52 @@ class Server:
             return m.group(1).lower()
         return None
 
+    # Laptop-c's orchestrator creates tasks for Ahmad with no host flag ("URGENT from Ahmad: ...", "Ahmad: ...",
+    # "... via muse-c"); laptop-a's Claude workers claimed T-412, T-415, T-423, T-425, T-428 and T-432 within seconds
+    # (Oct 10 2026). Its "probe-..." tasks are connectivity probes nobody should run.
+    AHMAD_TITLE = re.compile(r"^\s*(URGENT\s+from\s+Ahmad|Ahmad\s*:)|via\s+muse-c", re.I)
+    PROBE_TITLE = re.compile(r"^\s*probe-", re.I)
+
+    def _laptop_c_target(self, title: str, task_type: str) -> tuple[str, str | None] | None:
+        """(host, agent) for a task Ahmad's orchestrator made: muse-c when its task_types allow the type, else codex-c."""
+        if not self.AHMAD_TITLE.search(title):
+            return None
+        muse, codex = self.cfg.agents.get("muse-c"), self.cfg.agents.get("codex-c")
+        if muse is not None and muse.takes(task_type):
+            return muse.host, "muse-c"
+        if codex is not None:
+            return codex.host, "codex-c"
+        return (muse.host, None) if muse is not None else ("laptop-c", None)
+
+    def _cut_probes(self) -> int:
+        n = 0
+        for t in self.board.list_tasks(status=[Status.READY, Status.BACKLOG]):
+            if t.id and self.PROBE_TITLE.match(t.title):
+                fresh = self._fresh(t)
+                if fresh.status not in ROUTABLE:
+                    continue
+                fresh.status = Status.CUT
+                self.board.update_task(fresh, ["status"])
+                self.log(f"[{t.id}] cut: probe task '{t.title}'")
+                n += 1
+        return n
+
     def infer_hosts(self) -> int:
         """Ready/Backlog tasks without `host:` get one: the creator named in the title (its agent too when the task
         sits on an agent of another host), else the assigned agent's host. Running and later rows are never touched."""
-        n = 0
+        n = self._cut_probes()
         for t in self.board.list_tasks(status=[Status.READY, Status.BACKLOG]):
             if t.status not in ROUTABLE or t.pinned_host or not t.id:
                 continue
             creator = self._creator_from_title(t.title)
+            ahmad = self._laptop_c_target(t.title, t.type)
             agent_cfg = self.cfg.agents.get(t.agent or "")
             host, new_agent = "", None
-            if creator:
+            if ahmad:
+                host, target = ahmad
+                if target and (agent_cfg is None or agent_cfg.host != host):
+                    new_agent = target
+            elif creator:
                 host = self.cfg.agents[creator].host
                 if agent_cfg is None or agent_cfg.host != host:
                     if self.cfg.agents[creator].takes(t.type):

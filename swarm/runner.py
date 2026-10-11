@@ -53,6 +53,9 @@ STALE_DRAIN_AFTER_S = 1800
 DRAIN_LOG_EVERY_S = 60
 # A task whose worktree still has a live worker CLI that this runner cannot stop is not claimed again for this long.
 CLI_BUSY_RETRY_S = 300
+# A task with no `host:` flag younger than this is left alone: serve's infer_hosts tags it within a tick or two
+# (laptop-a's workers claimed laptop-c's untagged tasks within seconds, Oct 10 2026).
+UNTAGGED_GRACE_S = 120
 WORKTREE_PIDFILE = ".swarm-run/cli.pid"
 CARRY_FILES = ("notes.md", "report.json")      # .swarm-run files handed to the next attempt (Q-160, Q-162)
 CARRY_CAP = 6000            # per file, in the prompt only: the files themselves are kept and restored whole
@@ -570,8 +573,14 @@ class Runner:
         tasks = self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED], agent=list(self.agents))
         # a task pinned to another host is never claimed here, however it was routed to this runner's agent
         # (T-216/T-217, Oct 10: laptop-b tasks ran on laptop-a while laptop-b was offline)
+        now = self.now()
+
+        def too_new(t: Task) -> bool:     # no host flag yet and created moments ago: serve has not tagged it
+            return (not t.pinned_host and t.created is not None
+                    and (now - t.created).total_seconds() < UNTAGGED_GRACE_S)
         return [t for t in tasks if t.agent in self.agents
-                and (not t.pinned_host or self.agents[t.agent].host == t.pinned_host)]
+                and (not t.pinned_host or self.agents[t.agent].host == t.pinned_host)
+                and not too_new(t)]
 
     def tick(self) -> int:
         self._last_tick = self.now()
