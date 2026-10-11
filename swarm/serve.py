@@ -23,6 +23,7 @@ FAST_STEPS = ("assigned", "hosts", "reaped", "reconciled", "redistributed", "ret
 # Running and Done rows are never reassigned, and routing never writes a status (field note 85: T-095, approved with
 # PR #88 open, and T-102, in Review with PR #93, bounced between two cooling agents and ended Ready, Oct 6 2026).
 ROUTABLE = (Status.READY, Status.BACKLOG)
+RECENT_LIMIT_HIT_MIN = 15      # a run that hit a usage limit this recently is still the live signal (upgrade_limits)
 
 
 def _dependency_cycles(tasks: list[Task]) -> list[list[str]]:
@@ -445,18 +446,28 @@ class Server:
     def upgrade_limits(self) -> int:
         """A runner from before Oct 6 2026 records a used-up plan as a 15-minute rate limit ("rate limited: You've
         hit your usage limit ... try again at 3:12 AM"), comes back and fails the next task the same way (codex-b,
-        Oct 10). While that short cooldown runs, give the row the usage-limit cooldown the current runner writes."""
-        from .adapters.base import is_usage_limit
+        Oct 10). While that short cooldown runs, give the row the usage-limit cooldown the current runner writes.
+        Also when the old runner's cooldown is already over: it takes the first timestamp in the CLI's error text as
+        the reset time, which is the moment of the failure, so the cooldown ends at once and the runner claims the
+        task again every minute (T-479 on codex-b, Oct 11: Running -> Ready -> Running for half an hour). A task
+        claimed within RECENT_LIMIT_HIT_MIN minutes that came back with such an error counts as the live signal."""
+        from .adapters.base import is_auth_lost, is_usage_limit
         now = self.now()
         ctx = context_from_board(self.board, self.cfg, now)
+        recent = timedelta(minutes=RECENT_LIMIT_HIT_MIN)
         n, seen = 0, set()
         for t in self.board.list_tasks(status=[Status.READY, Status.CHANGES_REQUESTED]):
             row = ctx.rows.get(t.agent or "")
-            if (t.agent in seen or row is None or not (row.cooldown_until and row.cooldown_until > now)
+            cooling = bool(row and row.cooldown_until and row.cooldown_until > now)
+            just_hit = bool(t.started and abs(now - t.started) <= recent)
+            if (t.agent in seen or row is None or not (cooling or just_hit)
                     or usage_limited(row, now) or not t.last_error.startswith("rate limited: ")):
                 continue
             said = t.last_error[len("rate limited: "):]
-            if is_usage_limit(said) and self._mark_account(t.agent, USAGE_LIMIT_NOTE, said, ctx):
+            # a lost login ("401 Unauthorized: Missing bearer", Q-2012) is the same loop: cool the agent for an hour
+            # and let status raise the "login lost" risk, instead of claiming the task again every minute
+            kind = USAGE_LIMIT_NOTE if is_usage_limit(said) else AUTH_LOST_NOTE if is_auth_lost(said) else ""
+            if kind and self._mark_account(t.agent, kind, said, ctx):
                 seen.add(t.agent)
                 n += 1
         return n
@@ -521,6 +532,7 @@ class Server:
         return blocks_task(q, t, (rev,))
 
     def relay(self) -> int:
+        from .relay import keeps_blocked
         n = 0
         ctx = None
         for q in self.board.list_questions(status="Open"):
@@ -534,7 +546,10 @@ class Server:
             if blocking and t and not self._blocks(q, t):
                 blocking = False    # another agent's blocking question about this task: fyi for blocking purposes
                 self.log(f"[{t.id}] {q.id} asked by {q.asked_by or '?'}: [foreign→fyi] not a blocker for {t.agent or 'this task'}")
-            if blocking and t and t.status is Status.BLOCKED and any(f.startswith("merge_failed") for f in t.flags):
+            if blocking and t and keeps_blocked(q.answer):
+                # "stay parked" (`swarm answer --keep-blocked`): close the question, leave the task as it is
+                self.log(f"[{t.id}] {q.id} answered; kept {t.status.value} (answer says stay parked)")
+            elif blocking and t and t.status is Status.BLOCKED and any(f.startswith("merge_failed") for f in t.flags):
                 # a merge that gave up: the human either merged by hand or wants the merge retried
                 if "merged" in q.answer.lower():
                     t.status = Status.DONE

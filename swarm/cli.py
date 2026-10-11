@@ -505,7 +505,9 @@ def answer(question_id: str, text: str,
            follow_up: bool = typer.Option(False, "--follow-up", help="fyi questions: create a follow-up task"),
            kind: str = typer.Option("", "--kind", help="pick one row when two questions share an id"),
            task: str = typer.Option("", "--task", help="pick one row when two questions share an id"),
-           all_rows: bool = typer.Option(False, "--all", help="answer every row with this id")):
+           all_rows: bool = typer.Option(False, "--all", help="answer every row with this id"),
+           keep_blocked: bool = typer.Option(False, "--keep-blocked", help="blocking questions: close the question "
+                                             "but leave the task Blocked (serve does not resume it)")):
     """Answer a question (same as typing in Notion)."""
     board = make_board(_cfg(), state.memory)
     qs = [q for q in board.list_questions() if q.id == question_id]
@@ -519,8 +521,10 @@ def answer(question_id: str, text: str,
         for q in picked:
             console.print(f"  {q.id} · kind={q.kind} · task={q.task_id or '-'} · {q.status} · {q.text[:100]}")
         raise typer.Exit(code=_fail(f"{len(picked)} questions share {question_id}: add --kind/--task, or --all"))
-    from .relay import cli_sender, sender_tag
+    from .relay import KEEP_BLOCKED_MARK, cli_sender, keeps_blocked, sender_tag
     by = sender_tag(cli_sender(), state.host or os.environ.get("SWARM_HOST", ""))   # serve labels the relay with it
+    if keep_blocked and not keeps_blocked(text):
+        text = f"{KEEP_BLOCKED_MARK} {text}"
     for q in picked:
         q.answer, q.needs_follow_up, q.answered_by = text, follow_up, by
         board.update_question(q, ["answer", "needs_follow_up", "answered_by"])

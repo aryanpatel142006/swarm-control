@@ -330,3 +330,28 @@ def test_agents_sync_restores_a_removed_row_that_is_back_in_config(project_dir, 
     assert back.status == "offline" and back.current_task == "" and back.note == ""
     live = board.get_agent("claude-a")
     assert live.status == "running" and live.note == "claude 2.1 · best=opus"   # live rows keep their note
+
+
+def test_answer_keep_blocked_marks_the_answer(project_dir, monkeypatch):
+    """T-466 (Oct 11): `--keep-blocked` closes a blocking question without resuming the task."""
+    import swarm.cli as cli
+    from swarm.models import Question
+    from swarm.relay import keeps_blocked
+
+    class OneRowBoard:
+        rows = [Question(id="Q-1", text="still stuck?", kind="blocking", task_id="T-466", page_id="p1")]
+
+        def list_questions(self, status=None):
+            return list(self.rows)
+
+        def update_question(self, q, fields):
+            return q
+    board = OneRowBoard()
+    monkeypatch.setattr(cli, "make_board", lambda cfg, memory=False: board)
+    base = ["--config", str(project_dir / ".swarm" / "config.yaml"), "answer", "Q-1", "nothing to do"]
+    r = runner.invoke(app, base + ["--keep-blocked"])
+    assert r.exit_code == 0, r.output
+    ans = board.rows[0].answer
+    assert keeps_blocked(ans) and "nothing to do" in ans
+    board.rows[0].answer = ""
+    assert runner.invoke(app, base).exit_code == 0 and not keeps_blocked(board.rows[0].answer)

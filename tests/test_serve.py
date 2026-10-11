@@ -755,6 +755,78 @@ def test_an_old_runners_short_rate_limit_on_a_used_up_plan_becomes_a_usage_limit
     assert srv.upgrade_limits() == 0          # once
 
 
+def test_an_old_runners_expired_rate_limit_cooldown_still_becomes_a_usage_limit(cfg, git_repo, tmp_path):
+    """T-479 (Oct 11 2026): the old runner took the failure timestamp in the CLI's error as the reset time, so the
+    cooldown was over at once and codex-b re-claimed the task every minute. A just-claimed task that came back with a
+    usage-limit error gets the agent its real cooldown even though cooldown_until is already past."""
+    from swarm.models import usage_limited
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now, cooldown_until=now - timedelta(seconds=30),
+                                note=f"rate limited at {now.isoformat(timespec='minutes')}"))
+    err = ("rate limited: You\u2019ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or "
+           "try again in 2 hours 10 minutes.")
+    t = board.create_task(Task(id="", title="f", status=Status.READY, agent="codex-a", last_error=err,
+                               started=now - timedelta(minutes=1)))
+    assert srv.upgrade_limits() == 1
+    row = board.get_agent("codex-a")
+    assert usage_limited(row, now) and row.cooldown_until == now + timedelta(hours=2, minutes=10)
+    # an old error on a task nobody claimed recently is not a live signal
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now))
+    board.update_task(t, ["status"])
+    stale = board.get_task(t.id)
+    stale.started = now - timedelta(hours=3)
+    board.update_task(stale, ["started"])
+    assert srv.upgrade_limits() == 0
+    assert not usage_limited(board.get_agent("codex-a"), now)
+
+
+def test_a_requeued_task_that_died_on_a_lost_login_cools_the_agent_with_a_login_risk(cfg, git_repo, tmp_path):
+    """Q-2012 (Oct 11): T-479 failed with "401 Unauthorized: Missing bearer or basic authentication" and went
+    Running -> Ready -> Running. The agent gets the lost-login cooldown and status says a human must re-login."""
+    from swarm.models import auth_lost
+    from swarm.status import render_status
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    now = clock["now"]
+    board.upsert_agent(AgentRow(name="codex-a", status="idle", last_heartbeat=now, host="a"))
+    board.create_task(Task(id="", title="f", status=Status.READY, agent="codex-a", started=now - timedelta(minutes=1),
+                           last_error="rate limited: unexpected status 401 Unauthorized: Missing bearer or basic "
+                                      "authentication in header, url: https://api.openai.com/v1/responses"))
+    assert srv.upgrade_limits() == 1
+    row = board.get_agent("codex-a")
+    assert auth_lost(row, now) and row.note.startswith("auth lost")
+    assert srv.upgrade_limits() == 0
+    assert "codex-a: login lost" in render_status(cfg, board.list_tasks(), board.list_agents(), board.list_questions(), now)
+
+
+def test_answer_that_says_stay_parked_does_not_resume_a_blocked_task(cfg, git_repo, tmp_path):
+    """T-466 (Oct 11 2026): every answer to its blocking question put it back to Ready, whatever the answer said."""
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    t = board.create_task(Task(id="", title="b", status=Status.BLOCKED, agent="claude-a"))
+    for i, text in enumerate(["[keep-blocked] ack, nothing to do", "Stay parked until Joseph's GPU is back",
+                              "keep blocked: waiting on T-475"]):
+        q = board.create_question(Question(id="", text=f"still stuck {i}?", kind="blocking", task_id=t.id))
+        q.answer = text
+        board.update_question(q, ["answer"])
+        assert srv.relay() == 1
+        s = board.get_task(t.id)
+        assert s.status is Status.BLOCKED and "resume" not in s.flags and not s.feedback
+        assert board.get_task(t.id).status is Status.BLOCKED
+    assert all(x.status == "Applied" for x in board.list_questions())
+    # a normal answer still resumes it
+    q = board.create_question(Question(id="", text="go?", kind="blocking", task_id=t.id))
+    q.answer = "go ahead, use tap"
+    board.update_question(q, ["answer"])
+    srv.relay()
+    assert board.get_task(t.id).status is Status.READY
+
+
+def test_keeps_blocked_phrases():
+    from swarm.relay import keeps_blocked
+    assert keeps_blocked("[keep-blocked] x") and keeps_blocked("  Stay parked.") and keeps_blocked("keep-blocked")
+    assert not keeps_blocked("use tap, then stay parked") and not keeps_blocked("") and not keeps_blocked("cut")
+
+
 def test_reap_honours_a_per_agent_heartbeat_window(cfg, git_repo, tmp_path):
     # muse-b (Oct 10) writes its own row about every 17 min: the project's 10-min window kept flipping it offline
     cfg.agents["codex-a"].heartbeat_stale_minutes = 30

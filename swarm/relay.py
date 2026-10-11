@@ -39,6 +39,17 @@ def parse_sender(tag: str) -> tuple[str, str]:
 
 HARNESS_ASKERS = ("serve", "reviewer")
 
+# `swarm answer --keep-blocked` prefixes the answer with this marker; an answer that opens with one of the phrases
+# below is read the same way. Serve closes such a question but leaves the task Blocked (T-466, Oct 11 2026: each
+# "stay parked" answer put the task back to Ready and a worker re-ran it).
+KEEP_BLOCKED_MARK = "[keep-blocked]"
+_KEEP_BLOCKED_STARTS = (KEEP_BLOCKED_MARK, "keep blocked", "keep-blocked", "stay blocked", "stay parked")
+
+
+def keeps_blocked(answer: str) -> bool:
+    """True when a blocking question's answer says the task stays parked: relay must not resume it."""
+    return (answer or "").strip().lower().startswith(_KEEP_BLOCKED_STARTS)
+
 
 def blocks_task(q, task, extra_askers=()) -> bool:
     """A blocking question only blocks (and its answer only steers) the task when its own worker asked it, the
