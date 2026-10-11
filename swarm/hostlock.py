@@ -45,7 +45,18 @@ measurement next to another measurement measures nothing (Oct 10: T-371's batch 
 swarm-lock jobs; workers use it (or `kill <pid>`) instead of `pkill -f`, which also matched other worktrees'
 identically named `.swarm-run/batch.sh` measurements (see swarm/killguard.py).
 
-CLI: `python -m swarm.hostlock [--exclusive] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's);
+Shared mode (Oct 10, Q-1449: other tasks' heavy MPS/CPU quality evals ran with no lock at all and perturbed an
+exclusive timing measurement): `swarm-lock --shared [--max-shared N] -- <cmd>` registers as a shared holder. Up to N
+(default 3) run at once. They take no verify slot. Each holds a read lock on `shared-gate.lock` plus one of
+`shared-<i>.lock`; an `--exclusive` request takes the gate exclusively after the verify slots, so it waits until no
+shared holder runs, and its `exclusive-pending-*` marker (kept until the gate is taken) makes new shared requests queue
+behind it, so a stream of evals cannot starve it. While a measurement runs, shared requests wait (same live-test hold,
+exclusive cap and `--wait` as a normal verify; past the wait the command runs without the lock, logged).
+`SWARM_SHARED_HELD=1` marks a shared command's tree (nested `--shared` runs through); `SWARM_VERIFY_EXCLUSIVE_HELD=1`
+marks an exclusive command's tree (a nested `--shared` there would wait on its own measurement, so it runs through).
+`swarm-lock --stop` covers shared jobs too.
+
+CLI: `python -m swarm.hostlock [--exclusive | --shared [--max-shared N]] [--dir D] [--slots N] [--wait S] -- cmd args…` (exit code = cmd's);
 `swarm-lock --snippet` prints the re-exec lines a project's verify script needs to take part (Q-224).
 """
 from __future__ import annotations
@@ -66,6 +77,10 @@ from typing import Callable, Iterator
 DIR_ENV = "SWARM_VERIFY_LOCK_DIR"
 SLOTS_ENV = "SWARM_VERIFY_SLOTS"
 HELD_ENV = "SWARM_VERIFY_SLOT_HELD"
+SHARED_HELD_ENV = "SWARM_SHARED_HELD"
+EXCL_HELD_ENV = "SWARM_VERIFY_EXCLUSIVE_HELD"
+GATE_FILE = "shared-gate.lock"
+DEFAULT_MAX_SHARED = 3
 EXCL_CAP_ENV = "SWARM_VERIFY_EXCLUSIVE_MAX_MIN"
 DEFAULT_EXCL_CAP_MIN = 25.0            # a waiter queued behind exclusive holders this long proceeds (Q-478)
 PERTURBED_LOG = "perturbed.log"        # in waits/<holder task>/: the cap lines, for the measurement task's report
@@ -100,6 +115,15 @@ def ensure_lock_files(directory: Path, slots: int) -> None:
         f = directory / f"verify-{i}.lock"
         if not f.exists():
             f.touch()
+    ensure_shared_files(directory, DEFAULT_MAX_SHARED)
+
+
+def ensure_shared_files(directory: Path, max_shared: int) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in [GATE_FILE] + [f"shared-{i}.lock" for i in range(max(1, max_shared))]:
+        f = directory / name
+        if not f.exists():
+            f.touch()
 
 
 def lock_file_count(directory: Path | str) -> int:
@@ -126,6 +150,13 @@ def _open(path: Path) -> int:
         return os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
     except OSError:
         return os.open(str(path), os.O_RDONLY)   # sandboxed: the file exists, flock still works read-only
+
+
+def _try_open(path: Path) -> int | None:
+    try:
+        return _open(path)
+    except OSError:
+        return None            # the file does not exist and cannot be created (read-only sandbox)
 
 
 def _alive(pid: int) -> bool:
@@ -189,9 +220,9 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
-def _me(label: str, exclusive: bool) -> dict:
+def _me(label: str, exclusive: bool, shared: bool = False) -> dict:
     return {"pid": os.getpid(), "task": os.environ.get("SWARM_TASK_ID", ""), "label": label,
-            "exclusive": exclusive, "started": time.time(), "pstart": _proc_start(os.getpid())}
+            "exclusive": exclusive, "shared": shared, "started": time.time(), "pstart": _proc_start(os.getpid())}
 
 
 def _unlink_if_mine(path: Path) -> None:
@@ -208,6 +239,16 @@ def holders(directory: Path | str, slots: int) -> list[dict]:
         h = _read_json(Path(directory) / f"verify-{i}.holder")
         if h and _entry_alive(h) and (h["pid"], h.get("label")) not in seen:
             seen.add((h["pid"], h.get("label")))      # two harness verifies in one process are two holders
+            out.append(h)
+    return out
+
+
+def shared_holders(directory: Path | str) -> list[dict]:
+    """Live shared holders (`swarm-lock --shared` jobs), from their `shared-<i>.holder` files."""
+    out = []
+    for f in sorted(Path(directory).glob("shared-*.holder")):
+        h = _read_json(f)
+        if h and _entry_alive(h):
             out.append(h)
     return out
 
@@ -232,7 +273,8 @@ def describe(entries: list[dict], now: float | None = None) -> str:
     for h in entries:
         mins = max(0.0, (now - float(h.get("started") or now)) / 60)
         who = h.get("task") or "harness"
-        bits.append(f"{who} {h.get('label') or 'verify'}{' (exclusive)' if h.get('exclusive') else ''} "
+        bits.append(f"{who} {h.get('label') or 'verify'}{' (exclusive)' if h.get('exclusive') else ''}"
+                    f"{' (shared)' if h.get('shared') else ''} "
                     f"(pid {h.get('pid')}, {mins:.0f} min)")
     return ", ".join(bits) or "unknown holders"
 
@@ -342,7 +384,8 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 sleep: Callable[[float], None] = time.sleep, label: str = "verify",
                 record: Path | None = None, honor_hold: bool = False,
                 exclusive_cap_min: float | None = None, max_load: float | None = None,
-                loadavg: Callable[[], tuple] = os.getloadavg, quick_cap_s: float | None = None) -> Iterator[bool]:
+                loadavg: Callable[[], tuple] = os.getloadavg, quick_cap_s: float | None = None,
+                shared: bool = False, max_shared: int = DEFAULT_MAX_SHARED) -> Iterator[bool]:
     """Hold one slot (or all of them with exclusive=True). Yields True when held, False when the wait ran out and
     the caller proceeds without one. Already inside a slot (HELD_ENV set): yields True at once. `record` is a file
     the wait is written to (the runner adds a worker's waits back to its wall-clock limit). `honor_hold`: first wait
@@ -353,25 +396,38 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
     the same `wait_s`; past that the measurement runs anyway and logs the load (Q-517, Q-520, Q-523).
     `quick_cap_s` (non-exclusive only): a verify of a change that cannot perturb a measurement (verify.quick_paths)
     waits at most this long behind exclusive measurements, holding OR queued, then proceeds without a slot like the
-    cap above (Oct 10: merges of web-only tasks waited the full 1800 s behind audio measurements)."""
-    if os.environ.get(HELD_ENV):
+    cap above (Oct 10: merges of web-only tasks waited the full 1800 s behind audio measurements).
+    `shared=True` (not with exclusive): hold no verify slot; hold one of `max_shared` shared slots plus a read lock on
+    the shared gate, so any number up to `max_shared` run at once while an exclusive measurement waits for them all
+    and new shared requests queue behind a waiting measurement (Q-1449)."""
+    if shared and exclusive:
+        raise ValueError("a request is exclusive or shared, not both")
+    if shared:
+        if os.environ.get(SHARED_HELD_ENV) or os.environ.get(EXCL_HELD_ENV):
+            yield True
+            return
+    elif os.environ.get(HELD_ENV):
         yield True
         return
     directory = Path(directory)
     slots = max(1, int(slots))
+    max_shared = max(1, int(max_shared))
     try:
         ensure_lock_files(directory, slots)
+        if shared:
+            ensure_shared_files(directory, max_shared)
     except OSError:
         pass   # read-only sandbox: the runner created the files; _open falls back to O_RDONLY
     slots = _slots(directory, slots)   # every slot on the machine, whoever configured how many
     fds: list[int] = []
     held_idx: list[int] = []
+    shared_idx: list[int] = []
     deadline = time.monotonic() + wait_s
     started = time.monotonic()
-    me = _me(label, exclusive)
+    me = _me(label, exclusive, shared)
     pending = directory / f"{PENDING_PREFIX}{os.getpid()}"
     cap_s = None if exclusive_cap_min is None or exclusive_cap_min <= 0 else exclusive_cap_min * 60
-    quick_s = None if quick_cap_s is None or quick_cap_s < 0 or exclusive else float(quick_cap_s)
+    quick_s = None if quick_cap_s is None or quick_cap_s < 0 or exclusive or shared else float(quick_cap_s)
     behind = {"s": 0.0, "any": 0.0, "last": time.monotonic()}
     state = {"announced": False, "last_report": 0.0, "waiting": False, "since": 0.0, "last_record": 0.0}
 
@@ -451,6 +507,19 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                         waiting(f"waiting for the machine to be free of verify runs (exclusive, {slots} slots); "
                                 f"running now: {describe(busy)}; new verifies queue behind this measurement")
                         sleep(poll_s)
+            gate = _open(directory / GATE_FILE)         # shared holders hold it for reading: wait until none runs
+            fds.append(gate)
+            while True:
+                try:
+                    fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError
+                    busy = [h for h in shared_holders(directory) if h.get("pid") != os.getpid()]
+                    waiting(f"waiting for shared evaluations to finish (exclusive); running now: {describe(busy)}; "
+                            f"new verifies and shared runs queue behind this measurement")
+                    sleep(poll_s)
             with contextlib.suppress(OSError):
                 pending.unlink()
             if max_load is not None and max_load > 0:
@@ -465,6 +534,47 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                     waiting(f"holding the machine; waiting for the 1-min load average {load:.1f} to drop below "
                             f"{max_load:g} (--max-load)")
                     sleep(poll_s)
+        elif shared:
+            behind["last"] = time.monotonic()
+            while True:
+                queued = pending_exclusive(directory)
+                gate_busy = False
+                if not queued:
+                    gate = _try_open(directory / GATE_FILE)
+                    if gate is not None:
+                        try:
+                            fcntl.flock(gate, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            os.close(gate)
+                            gate, gate_busy = None, True
+                    if gate is not None:
+                        for i in range(max_shared):
+                            fd = _try_open(directory / f"shared-{i}.lock")
+                            if fd is None:
+                                continue
+                            try:
+                                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                fds.extend([gate, fd])
+                                shared_idx.append(i)
+                                break
+                            except BlockingIOError:
+                                os.close(fd)
+                        if not shared_idx:
+                            os.close(gate)           # every shared slot is taken: drop the gate and wait
+                    if shared_idx:
+                        break
+                if time.monotonic() > deadline:
+                    raise TimeoutError
+                check_exclusive_cap(queued)
+                if queued:
+                    waiting(f"a measurement is waiting for the machine ({describe(queued)}); this shared run starts "
+                            f"after it.{own_task_note(queued)}")
+                elif gate_busy:
+                    waiting(f"a measurement is running ({describe([h for h in holders(directory, slots) if h.get('exclusive')])}); "
+                            f"this shared run starts after it.{own_task_note(holders(directory, slots))}")
+                else:
+                    waiting(f"all {max_shared} shared slots are busy ({describe(shared_holders(directory))}); waiting.")
+                sleep(poll_s)
         else:
             behind["last"] = time.monotonic()
             while True:
@@ -494,19 +604,21 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 sleep(poll_s)
         for i in held_idx:
             _write_json(directory / f"verify-{i}.holder", me)
+        for i in shared_idx:
+            _write_json(directory / f"shared-{i}.holder", me)
         if record is not None and state["waiting"]:
             _write_json(record, {"pid": os.getpid(), "waited_s": time.monotonic() - started, "label": label})
         yield True
     except TimeoutError as e:
         capped = isinstance(e, _ExclusiveCapExceeded)
         if log and not capped and exclusive:
-            busy = [h for h in holders(directory, slots) if h.get("pid") != os.getpid()]
+            busy = [h for h in holders(directory, slots) + shared_holders(directory) if h.get("pid") != os.getpid()]
             log(f"{label}: no exclusive lock after {int(wait_s)} s; the machine is still held by {describe(busy)}")
         elif log and not capped:
             log(f"{label}: no verify slot after {int(wait_s)} s; running without one")
         for fd in fds:
             os.close(fd)
-        fds, held_idx = [], []
+        fds, held_idx, shared_idx = [], [], []
         with contextlib.suppress(OSError):
             pending.unlink()
         if record is not None:
@@ -518,6 +630,8 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
                 pending.unlink()
         for i in held_idx:
             _unlink_if_mine(directory / f"verify-{i}.holder")
+        for i in shared_idx:
+            _unlink_if_mine(directory / f"shared-{i}.holder")
         for fd in fds:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -594,7 +708,7 @@ def task_lock_jobs(directory: Path | str, task_id: str) -> list[dict]:
     is never one of them."""
     directory = Path(directory)
     out, seen = [], set()
-    files = sorted(directory.glob("verify-*.holder")) + sorted(directory.glob(PENDING_PREFIX + "*"))
+    files = sorted(directory.glob("verify-*.holder")) + sorted(directory.glob("shared-*.holder")) + sorted(directory.glob(PENDING_PREFIX + "*"))
     for f in files:
         h = _read_json(f)
         if not h or not task_id or h.get("task") != task_id or not isinstance(h.get("pid"), int):
@@ -660,6 +774,11 @@ def worker_lock_env(project: str, slots: int, exclusive_cap_min: float | None = 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="swarm-lock", description=__doc__.split("\n\n")[0])
     ap.add_argument("--exclusive", action="store_true", help="take every slot (latency measurements, live replays)")
+    ap.add_argument("--shared", action="store_true",
+                    help="register as a shared holder (quality-only evals): up to --max-shared run at once, an "
+                         "--exclusive measurement waits for them and new shared runs queue behind it")
+    ap.add_argument("--max-shared", type=int, default=None,
+                    help=f"with --shared: how many shared runs at once on this machine (default {DEFAULT_MAX_SHARED})")
     ap.add_argument("--dir", default=os.environ.get(DIR_ENV, ""))
     ap.add_argument("--slots", type=int, default=int(os.environ.get(SLOTS_ENV) or DEFAULT_SLOTS))
     ap.add_argument("--wait", type=float, default=DEFAULT_WAIT_S, help="seconds to wait before running anyway")
@@ -693,11 +812,17 @@ def main(argv: list[str] | None = None) -> int:
         if not lines:
             print(f"[swarm-lock] no swarm-lock job of {task} is running", file=sys.stderr)
         return 0
+    if a.shared and a.exclusive:
+        ap.error("--shared and --exclusive cannot be combined (timing measurements use --exclusive)")
+    if a.max_shared is not None and not a.shared:
+        ap.error("--max-shared needs --shared")
+    if a.max_shared is not None and a.max_shared < 1:
+        ap.error("--max-shared must be at least 1")
     if a.max_load is not None and not a.exclusive:
         ap.error("--max-load needs --exclusive (it is for measurements)")
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd:
-        ap.error("no command given (swarm-lock [--exclusive] -- <cmd> …)")
+        ap.error("no command given (swarm-lock [--exclusive | --shared] -- <cmd> …)")
     if not a.dir:   # not under a swarm runner: nothing to coordinate with
         return subprocess.call(cmd)
     log = lambda m: print(f"[swarm-lock] {m}", file=sys.stderr, flush=True)   # noqa: E731
@@ -711,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:
             record = wdir / f"{os.getpid()}-{time.time_ns()}.json"
         except OSError:
             record = None
-    label = ("measurement" if a.exclusive else "verify") + f": {' '.join(cmd)[:80]}"
+    label = ("measurement" if a.exclusive else "evaluation" if a.shared else "verify") + f": {' '.join(cmd)[:80]}"
     import signal
     # Q-523: a queued swarm-lock that was killed must not start its command later, and a running one must take its
     # command tree with it (a detached batch kept the machine busy next to the restarted one). While waiting, the
@@ -734,7 +859,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with verify_slot(a.dir, a.slots, exclusive=a.exclusive, wait_s=a.wait, log=log, label=label,
                          record=record, honor_hold=not a.ignore_hold, max_load=a.max_load,
-                         exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes) as held:
+                         exclusive_cap_min=None if a.exclusive else a.exclusive_max_minutes,
+                         shared=a.shared, max_shared=a.max_shared or DEFAULT_MAX_SHARED) as held:
             waited = time.monotonic() - started
             if a.exclusive and not held:
                 # never run a measurement next to other measurements: its numbers would be invalid (Oct 10: T-371's
@@ -745,7 +871,14 @@ def main(argv: list[str] | None = None) -> int:
             if waited >= 5:
                 log(f"waited {waited:.0f} s for {'the machine' if a.exclusive else 'a slot'}"
                     + (" (the runner adds this back to the run's time limit)" if record else ""))
-            env = {**os.environ, HELD_ENV: "1"} if held else dict(os.environ)
+            if a.shared:
+                env = {**os.environ, SHARED_HELD_ENV: "1"} if held else dict(os.environ)
+            elif held:
+                env = {**os.environ, HELD_ENV: "1"}
+                if a.exclusive:
+                    env[EXCL_HELD_ENV] = "1"
+            else:
+                env = dict(os.environ)
             try:
                 child["p"] = subprocess.Popen(cmd, env=env)
             except FileNotFoundError:

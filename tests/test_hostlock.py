@@ -81,8 +81,9 @@ def test_worker_lock_env_puts_swarm_lock_on_path(tmp_path):
     assert env[hostlock.SLOTS_ENV] == "3"
     assert os.access(env[hostlock.CMD_ENV], os.X_OK)
     assert env["PATH"].split(os.pathsep)[0] == os.path.dirname(env[hostlock.CMD_ENV])
-    assert sorted(p.name for p in hostlock.lock_dir("demo").iterdir()) == ["verify-0.lock", "verify-1.lock",
-                                                                           "verify-2.lock"]
+    names = sorted(p.name for p in hostlock.lock_dir("demo").iterdir())
+    assert [n for n in names if n.startswith("verify-")] == ["verify-0.lock", "verify-1.lock", "verify-2.lock"]
+    assert "shared-gate.lock" in names and "shared-0.lock" in names      # shared mode's files exist for sandboxed CLIs
 
 
 def test_config_reads_max_parallel_verify(project_dir, sample_config_dict):
@@ -689,3 +690,123 @@ def test_slot_count_is_the_larger_of_config_and_lock_files_on_disk(tmp_path):
         for _ in range(5):
             held.append(st.enter_context(verify_slot(d, 2, wait_s=0.2, poll_s=0.05)))
     assert held == [True] * 5                               # an old-count verify sees all five slots
+
+
+# ---- Oct 10, Q-1449: shared mode for heavy quality-only evals ----
+def _cli(d, *args, task="T-S", extra_env=None):
+    env = {**os.environ, "SWARM_TASK_ID": task, **(extra_env or {})}
+    for k in (HELD_ENV, hostlock.SHARED_HELD_ENV, hostlock.EXCL_HELD_ENV):
+        env.pop(k, None)
+    root = str(Path(__file__).resolve().parent.parent)
+    return [sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "2", *args], root, env
+
+
+def test_shared_runs_up_to_max_at_once_and_take_no_verify_slot(tmp_path):
+    d = tmp_path / "locks"
+    with contextlib.ExitStack() as st:
+        got = [st.enter_context(verify_slot(d, 2, shared=True, max_shared=3, wait_s=0.5, poll_s=0.02))
+               for _ in range(3)]
+        assert got == [True] * 3
+        assert len(hostlock.shared_holders(d)) == 3
+        with verify_slot(d, 2, shared=True, max_shared=3, wait_s=0.2, poll_s=0.05) as fourth:
+            assert fourth is False                 # the fourth waits, then runs without the lock like a verify
+        with verify_slot(d, 2, wait_s=0.5, poll_s=0.05) as v:
+            assert v is True                       # verify slots are untouched by shared holders
+    assert hostlock.shared_holders(d) == []
+    with verify_slot(d, 2, shared=True, max_shared=1, wait_s=0.2) as again:
+        assert again is True                       # released on exit
+
+
+def test_exclusive_waits_for_shared_holders_and_gets_the_machine_after(tmp_path):
+    d = tmp_path / "locks"
+    with verify_slot(d, 2, shared=True):
+        logs = []
+        with verify_slot(d, 2, exclusive=True, wait_s=0.3, poll_s=0.05, log=logs.append) as ex:
+            assert ex is False
+        assert any("shared evaluations" in m for m in logs)
+        assert not list(d.glob(hostlock.PENDING_PREFIX + "*"))
+    with verify_slot(d, 2, exclusive=True, wait_s=1, poll_s=0.05) as ex:
+        assert ex is True
+
+
+def test_shared_waits_while_a_measurement_runs(tmp_path):
+    d = tmp_path / "locks"
+    with verify_slot(d, 2, exclusive=True, label="measurement: x"):
+        logs = []
+        with verify_slot(d, 2, shared=True, wait_s=0.3, poll_s=0.05, log=logs.append) as s:
+            assert s is False
+        assert any("measurement" in m and "shared run starts after" in m for m in logs)
+    with verify_slot(d, 2, shared=True, wait_s=1, poll_s=0.05) as s:
+        assert s is True
+
+
+def test_new_shared_requests_queue_behind_a_waiting_exclusive(tmp_path):
+    d = tmp_path / "locks"
+    root, env = str(Path(__file__).resolve().parent.parent), {**os.environ}
+    for k in (HELD_ENV, hostlock.SHARED_HELD_ENV, hostlock.EXCL_HELD_ENV):
+        env.pop(k, None)
+    marker = tmp_path / "ex_ran"
+    late = tmp_path / "late_ran"
+    with verify_slot(d, 2, shared=True):               # a running shared evaluation
+        ex = subprocess.Popen([sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--slots", "2", "--wait", "30",
+                               "--exclusive", "--", "touch", str(marker)], cwd=root, env=env,
+                              stderr=subprocess.DEVNULL)
+        try:
+            assert _wait_for(lambda: list(d.glob(hostlock.PENDING_PREFIX + "*")))
+            logs = []
+            with verify_slot(d, 2, shared=True, wait_s=0.3, poll_s=0.05, log=logs.append) as s:
+                assert s is False                      # a second shared run does not slip in front of the measurement
+            assert any("measurement is waiting" in m for m in logs)
+            assert not marker.exists()
+        finally:
+            pass
+    assert ex.wait(timeout=30) == 0 and marker.exists()    # it ran once the first shared evaluation ended
+    assert not late.exists()
+
+
+def test_cli_shared_runs_the_command_and_nested_shared_runs_through(tmp_path):
+    d = tmp_path / "locks"
+    marker = tmp_path / "ran"
+    cmd, root, env = _cli(d, "--shared", "--max-shared", "1", "--", sys.executable, "-m", "swarm.hostlock",
+                          "--dir", str(d), "--shared", "--max-shared", "1", "--wait", "5", "--", "touch", str(marker))
+    r = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and marker.exists(), r.stderr    # the nested one would wait forever on max 1 otherwise
+
+
+def test_cli_shared_inside_exclusive_runs_through(tmp_path):
+    d = tmp_path / "locks"
+    marker = tmp_path / "ran"
+    cmd, root, env = _cli(d, "--exclusive", "--", sys.executable, "-m", "swarm.hostlock", "--dir", str(d), "--shared",
+                          "--wait", "5", "--", "touch", str(marker))
+    r = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and marker.exists(), r.stderr
+
+
+def test_cli_flag_checks(tmp_path):
+    d = tmp_path / "locks"
+    for args in (["--shared", "--exclusive"], ["--max-shared", "2"], ["--shared", "--max-shared", "0"]):
+        cmd, root, env = _cli(d, *args, "--", "true")
+        r = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, timeout=30)
+        assert r.returncode == 2, (args, r.stderr)
+
+
+def test_stop_ends_shared_jobs_too(tmp_path):
+    d = tmp_path / "locks"
+    cmd, root, env = _cli(d, "--shared", "--", "sleep", "60", task="T-A")
+    p = subprocess.Popen(cmd, cwd=root, env=env, stderr=subprocess.DEVNULL)
+    try:
+        assert _wait_for(lambda: len(hostlock.shared_holders(d)) == 1)
+        cmd2, root, env2 = _cli(d, "--stop", task="T-A")
+        r = subprocess.run(cmd2, cwd=root, env=env2, capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and "stopped" in r.stderr, r.stderr
+        assert p.wait(timeout=20) is not None
+        assert hostlock.shared_holders(d) == []
+    finally:
+        with contextlib.suppress(Exception):
+            hostlock.stop_tree(p.pid, grace_s=2)
+            p.wait(timeout=10)
+
+
+def test_rule_18_names_shared_mode():
+    text = (Path(__file__).resolve().parent.parent / "swarm" / "prompts" / "rules.md").read_text()
+    assert "swarm-lock --shared" in text and "--exclusive" in text
