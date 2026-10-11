@@ -845,3 +845,25 @@ def test_infer_host_for_ahmad_titles_and_cut_probes(project_dir, sample_config_d
     assert board.get_task("T-005").pinned_host == ""
     assert board.get_task("T-006").pinned_host == "laptop-a"
     assert srv.infer_hosts() == 0
+
+
+def test_muse_c_title_overrides_a_laptop_a_pin(project_dir, sample_config_dict, git_repo, tmp_path):
+    cfg = _cfg_with_c(project_dir, sample_config_dict)
+    srv, board, _ = make(cfg, git_repo, tmp_path)
+    board.create_task(Task(id="T-001", title="Muse C: survey", type="research", status=Status.READY, agent="claude-a2",
+                           flags=["host:laptop-a", "x"]))
+    board.create_task(Task(id="T-002", title="Muse C independent probe", type="backend", status=Status.READY,
+                           agent="claude-a"))
+    board.create_task(Task(id="T-003", title="Muse C: running", type="docs", status=Status.RUNNING, agent="claude-a2",
+                           flags=["host:laptop-a"]))
+    board.create_task(Task(id="T-004", title="Ahmad: pinned", type="docs", status=Status.READY, agent="claude-a",
+                           flags=["host:laptop-a"]))
+    assert srv.infer_hosts() == 2
+    t1 = board.get_task("T-001")
+    assert (t1.pinned_host, t1.agent, t1.flags.count("x")) == ("laptop-c", "muse-c", 1)
+    assert [f for f in t1.flags if f.startswith("host:")] == ["host:laptop-c"]
+    t2 = board.get_task("T-002")
+    assert (t2.pinned_host, t2.agent) == ("laptop-c", "codex-c")
+    assert board.get_task("T-003").pinned_host == "laptop-a"
+    assert board.get_task("T-004").pinned_host == "laptop-a"     # only Muse C titles override an explicit pin
+    assert srv.infer_hosts() == 0

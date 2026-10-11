@@ -165,11 +165,13 @@ class Server:
     # "... via muse-c"); laptop-a's Claude workers claimed T-412, T-415, T-423, T-425, T-428 and T-432 within seconds
     # (Oct 10 2026). Its "probe-..." tasks are connectivity probes nobody should run.
     AHMAD_TITLE = re.compile(r"^\s*(URGENT\s+from\s+Ahmad|Ahmad\s*:)|via\s+muse-c", re.I)
+    # "Muse C: ..." / "Muse C independent ...": laptop-c work even when its creator pinned host:laptop-a (T-439 ran on claude-a2)
+    MUSE_C_TITLE = re.compile(r"^\s*Muse[\s_-]?C\b", re.I)
     PROBE_TITLE = re.compile(r"^\s*probe-", re.I)
 
     def _laptop_c_target(self, title: str, task_type: str) -> tuple[str, str | None] | None:
         """(host, agent) for a task Ahmad's orchestrator made: muse-c when its task_types allow the type, else codex-c."""
-        if not self.AHMAD_TITLE.search(title):
+        if not (self.AHMAD_TITLE.search(title) or self.MUSE_C_TITLE.match(title)):
             return None
         muse, codex = self.cfg.agents.get("muse-c"), self.cfg.agents.get("codex-c")
         if muse is not None and muse.takes(task_type):
@@ -196,15 +198,18 @@ class Server:
         sits on an agent of another host), else the assigned agent's host. Running and later rows are never touched."""
         n = self._cut_probes()
         for t in self.board.list_tasks(status=[Status.READY, Status.BACKLOG]):
-            if t.status not in ROUTABLE or t.pinned_host or not t.id:
+            if t.status not in ROUTABLE or not t.id:
+                continue
+            ahmad = self._laptop_c_target(t.title, t.type)
+            wrong_pin = bool(ahmad and self.MUSE_C_TITLE.match(t.title) and t.pinned_host not in ("", ahmad[0]))
+            if t.pinned_host and not wrong_pin:
                 continue
             creator = self._creator_from_title(t.title)
-            ahmad = self._laptop_c_target(t.title, t.type)
             agent_cfg = self.cfg.agents.get(t.agent or "")
             host, new_agent = "", None
             if ahmad:
                 host, target = ahmad
-                if target and (agent_cfg is None or agent_cfg.host != host):
+                if target and (agent_cfg is None or agent_cfg.host != host or wrong_pin):
                     new_agent = target
             elif creator:
                 host = self.cfg.agents[creator].host
@@ -216,9 +221,10 @@ class Server:
             if not host:
                 continue
             fresh = self._fresh(t)
-            if fresh.status not in ROUTABLE or fresh.pinned_host:
+            if fresh.status not in ROUTABLE or (fresh.pinned_host and not wrong_pin):
                 continue
-            fresh.flags = fresh_flags(self.board, fresh, add=[f"host:{host}"])
+            fresh.flags = fresh_flags(self.board, fresh, add=[f"host:{host}"],
+                                      drop=(lambda f: f.startswith("host:")) if wrong_pin else None)
             fields = ["flags"]
             if new_agent:
                 fresh.agent = new_agent
