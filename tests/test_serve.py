@@ -771,3 +771,41 @@ def test_reap_honours_a_per_agent_heartbeat_window(cfg, git_repo, tmp_path):
     clock["now"] += timedelta(minutes=15)
     srv.reap()
     assert board.get_agent("codex-a").status == "offline"
+
+
+# ----- host inference for tasks made by agents on other hosts (T-398, T-400, T-406, Oct 10 2026) -----
+def _cfg_with_muse(project_dir, sample_config_dict):
+    import yaml
+    from swarm.config import load_config
+    sample_config_dict["hosts"]["muse-cloud"] = {"max_parallel": {"generic": 1}}
+    sample_config_dict["agents"]["muse-b"] = {
+        "provider": "generic", "host": "muse-cloud", "task_types": ["research", "docs", "eval"],
+        "models": {"best": "muse", "high": "muse", "mid": "muse", "low": "muse"},
+        "command_template": "echo no >&2; exit 1"}
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
+    return load_config(project_dir / ".swarm" / "config.yaml")
+
+
+def test_infer_host_from_agent_title_and_never_running(project_dir, sample_config_dict, git_repo, tmp_path):
+    cfg = _cfg_with_muse(project_dir, sample_config_dict)
+    srv, board, _ = make(cfg, git_repo, tmp_path)
+    board.create_task(Task(id="T-001", title="plain", status=Status.READY, agent="fake-b"))
+    board.create_task(Task(id="T-002", title="[muse-b] survey", type="research", status=Status.READY, agent="claude-a"))
+    board.create_task(Task(id="T-003", title="Muse B: summarise", type="docs", status=Status.BACKLOG))
+    board.create_task(Task(id="T-004", title="[muse-b/x] run", type="eval", status=Status.RUNNING, agent="claude-a"))
+    board.create_task(Task(id="T-005", title="[muse-b] pinned", type="research", status=Status.READY, agent="claude-a",
+                           flags=["host:laptop-a"]))
+    board.create_task(Task(id="T-006", title="nobody", status=Status.READY))
+    board.create_task(Task(id="T-007", title="[muse-b] code", type="backend", status=Status.READY))
+    assert srv.infer_hosts() == 4
+    assert board.get_task("T-001").pinned_host == "host-b"
+    t2 = board.get_task("T-002")
+    assert (t2.pinned_host, t2.agent, t2.model) == ("muse-cloud", "muse-b", "muse")
+    t3 = board.get_task("T-003")
+    assert (t3.pinned_host, t3.agent) == ("muse-cloud", "muse-b")
+    assert board.get_task("T-004").pinned_host == ""      # Running: untouched
+    assert board.get_task("T-005").pinned_host == "laptop-a"
+    assert board.get_task("T-006").pinned_host == ""
+    t7 = board.get_task("T-007")                          # muse-b may not take backend: host pinned, agent not set
+    assert (t7.pinned_host, t7.agent) == ("muse-cloud", None)
+    assert srv.infer_hosts() == 0                         # idempotent

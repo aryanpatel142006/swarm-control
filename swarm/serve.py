@@ -18,7 +18,7 @@ from .status import render_headline, render_status
 from .workspace import Workspace
 
 IMPACT_TO_IMPORTANCE = {"high": "high", "medium": "normal", "low": "low"}
-FAST_STEPS = ("assigned", "reaped", "reconciled", "redistributed", "retried", "relayed", "promoted", "rerouted")
+FAST_STEPS = ("assigned", "hosts", "reaped", "reconciled", "redistributed", "retried", "relayed", "promoted", "rerouted")
 # Routing (reroute, rebalance, redistribute_on_return) only ever moves queued work. Review, Merge Ready, Blocked,
 # Running and Done rows are never reassigned, and routing never writes a status (field note 85: T-095, approved with
 # PR #88 open, and T-102, in Review with PR #93, bounced between two cooling agents and ended Ready, Oct 6 2026).
@@ -144,6 +144,54 @@ class Server:
             t.id = self.board.next_task_id()
             self.board.update_task(t, ["id"])
             self.log(f"[{t.id}] assigned id to hand-made card '{t.title}'")
+            n += 1
+        return n
+
+    # A task made straight in Notion by an agent on another host (muse-b on muse-cloud, codex-b on laptop-b) has no
+    # `host:` flag, so routing handed it to laptop-a's workers, which cannot reach its inputs (T-398, T-400, T-406,
+    # Oct 10 2026). The creator is not a board field; it shows in a "[muse-b" / "[muse-b/" title tag or "Muse B:".
+    MUSE_TITLE = re.compile(r"^\s*Muse[\s_-]?B\s*:", re.I)
+
+    def _creator_from_title(self, title: str) -> str | None:
+        """The configured agent that made the task, from its title tag, else None."""
+        if self.MUSE_TITLE.match(title) and "muse-b" in self.cfg.agents:
+            return "muse-b"
+        m = re.match(r"^\s*\[([A-Za-z0-9_.-]+)\s*[/\]:]", title)
+        if m and m.group(1).lower() in self.cfg.agents:
+            return m.group(1).lower()
+        return None
+
+    def infer_hosts(self) -> int:
+        """Ready/Backlog tasks without `host:` get one: the creator named in the title (its agent too when the task
+        sits on an agent of another host), else the assigned agent's host. Running and later rows are never touched."""
+        n = 0
+        for t in self.board.list_tasks(status=[Status.READY, Status.BACKLOG]):
+            if t.status not in ROUTABLE or t.pinned_host or not t.id:
+                continue
+            creator = self._creator_from_title(t.title)
+            agent_cfg = self.cfg.agents.get(t.agent or "")
+            host, new_agent = "", None
+            if creator:
+                host = self.cfg.agents[creator].host
+                if agent_cfg is None or agent_cfg.host != host:
+                    if self.cfg.agents[creator].takes(t.type):
+                        new_agent = creator
+            elif agent_cfg is not None:
+                host = agent_cfg.host
+            if not host:
+                continue
+            fresh = self._fresh(t)
+            if fresh.status not in ROUTABLE or fresh.pinned_host:
+                continue
+            fresh.flags = fresh_flags(self.board, fresh, add=[f"host:{host}"])
+            fields = ["flags"]
+            if new_agent:
+                fresh.agent = new_agent
+                fresh.model, fresh.effort = model_for(self.cfg.agents[new_agent], tier_for(fresh, self.cfg),
+                                                      fresh.type, self.cfg)
+                fields += ["agent", "model", "effort"]
+            self.board.update_task(fresh, fields)
+            self.log(f"[{t.id}] host inferred → {host}" + (f" (agent {new_agent})" if new_agent else ""))
             n += 1
         return n
 
@@ -894,6 +942,7 @@ class Server:
         summary: dict = {"errors": 0}
         self._step(summary, "lock", lambda: (self.heartbeat_lock(), 0)[1])
         self._step(summary, "assigned", self.assign_ids)
+        self._step(summary, "hosts", self.infer_hosts)
         self._step(summary, "reaped", self.reap)
         self._step(summary, "reconciled", self.reconcile_merged)
         self._step(summary, "redistributed", self.redistribute_on_return)
