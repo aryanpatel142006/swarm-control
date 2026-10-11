@@ -60,16 +60,28 @@ class CodexAdapter(Adapter):
         else:
             sandbox = spec.sandbox or (self.cfg.sandbox if self.cfg else None) or "workspace-write"
         argv += ["--sandbox", sandbox]
+        roots: list[str] = []
         common = git_common_dir(spec.cwd)
         if common and sandbox != "danger-full-access":
-            argv += ["--add-dir", common]   # a worktree's index and locks live under the main repo's .git
+            roots.append(common)   # a worktree's index and locks live under the main repo's .git
             gitdir = git_dir(spec.cwd)   # .git/worktrees/<name>, named on its own as well (Q-921, Q-1113)
             if gitdir and gitdir != common:
-                argv += ["--add-dir", gitdir]
-            argv += ["--add-dir", str(Path(common).parent)]   # and the shared .venv lives in the main checkout (Q-003)
+                roots.append(gitdir)
+            roots.append(str(Path(common).parent))   # and the shared .venv lives in the main checkout (Q-003)
         scratch = (spec.env or {}).get("SWARM_SCRATCH")
         if scratch and sandbox != "danger-full-access":
-            argv += ["--add-dir", scratch]   # the host's disk-backed TMPDIR (hosts.<name>.scratch_dir, Q-1113)
+            roots.append(scratch)   # the host's disk-backed TMPDIR (hosts.<name>.scratch_dir, Q-1113)
+        roots = list(dict.fromkeys(roots))
+        if roots:
+            # git_writable: add-dir = `--add-dir` (Codex 0.1xx and later); config = `-c sandbox_workspace_write.writable_roots`
+            # (older CLIs, or one that ignores --add-dir); both (default) = either one takes effect. Laptop-b's Codex kept
+            # reporting "could not create .git/worktrees/T-479/index.lock: Operation not permitted" (Q-1989, Q-1992).
+            mode = (self.cfg.git_writable if self.cfg else None) or "both"
+            if mode in ("add-dir", "both"):
+                for r in roots:
+                    argv += ["--add-dir", r]
+            if mode in ("config", "both"):
+                argv += ["-c", "sandbox_workspace_write.writable_roots=[" + ", ".join(json.dumps(r) for r in roots) + "]"]
         if spec.mcp:
             # servers are registered once with `codex mcp add` (enabled = false) and switched on per run;
             # an unregistered name is skipped, never passed: a dangling entry would fail the whole run

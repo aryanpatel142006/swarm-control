@@ -154,6 +154,39 @@ def test_codex_adds_git_common_dir_as_writable(git_repo, tmp_path):
     assert (git_repo / ".git" / "worktrees" / "wt").resolve() in dirs
 
 
+def _wt_spec(git_repo, tmp_path):
+    import subprocess
+    subprocess.run(["git", "-C", str(git_repo), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "y"], check=True)
+    wt = tmp_path / "wt"
+    (wt / ".swarm-run").mkdir()
+    pf = wt / "prompt.md"
+    pf.write_text("go")
+    return RunSpec(prompt_file=pf, model="m", effort=None, max_turns=5, budget_usd=None, timeout_s=10, cwd=wt)
+
+
+def test_codex_git_dirs_writable_both_ways_by_default(git_repo, tmp_path):
+    """Q-1989/Q-1992: index.lock under .git/worktrees/<T> was denied; default passes --add-dir and writable_roots."""
+    argv, _ = CodexAdapter().build_command(_wt_spec(git_repo, tmp_path))
+    common = str((git_repo / ".git").resolve())
+    wtgit = str((git_repo / ".git" / "worktrees" / "wt").resolve())
+    cfg = [argv[i + 1] for i, a in enumerate(argv) if a == "-c" and argv[i + 1].startswith("sandbox_workspace_write.writable_roots=")]
+    assert len(cfg) == 1
+    arr = json.loads(cfg[0].split("=", 1)[1])
+    assert any(__import__("pathlib").Path(x).resolve() == __import__("pathlib").Path(common) for x in arr)
+    assert any(__import__("pathlib").Path(x).resolve() == __import__("pathlib").Path(wtgit) for x in arr)
+    assert "--add-dir" in argv
+
+
+def test_codex_git_writable_modes(git_repo, tmp_path):
+    spec_ = _wt_spec(git_repo, tmp_path)
+    only_cfg, _ = CodexAdapter(AgentConfig(name="c", provider="codex", host="h", git_writable="config")).build_command(spec_)
+    assert "--add-dir" not in only_cfg and any("writable_roots" in x for x in only_cfg)
+    only_dir, _ = CodexAdapter(AgentConfig(name="c", provider="codex", host="h", git_writable="add-dir")).build_command(spec_)
+    assert "--add-dir" in only_dir and not any("writable_roots" in x for x in only_dir)
+    full, _ = CodexAdapter(AgentConfig(name="c", provider="codex", host="h", sandbox="danger-full-access")).build_command(spec_)
+    assert "--add-dir" not in full and not any("writable_roots" in x for x in full)
+
+
 def test_codex_adds_the_host_scratch_dir(tmp_path):
     """hosts.<name>.scratch_dir reaches the worker as SWARM_SCRATCH/TMPDIR; the sandbox must let it write there."""
     a = CodexAdapter(AgentConfig(name="c", provider="codex", host="h", sandbox="workspace-write"))

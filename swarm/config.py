@@ -80,6 +80,8 @@ class AgentConfig:
     strengths: dict[str, int] = field(default_factory=dict)
     soft_cap_5h_usd: float | None = None
     sandbox: str | None = None
+    # Codex only: how the worktree's git dir and other extra roots are made writable: add-dir | config | both (default)
+    git_writable: str | None = None
     experimental: bool = False
     command_template: str | None = None
     # perplexity (swarm/adapters/perplexity.py): CLI binary, argv template ({prompt_file} {model} {cwd}) and the
@@ -382,12 +384,15 @@ def load_config(path: Path | str) -> Config:
             if unknown:
                 raise ConfigError(f"agents.{name}.args_template: unknown placeholder(s) {sorted(unknown)}; "
                                   f"use {{prompt_file}} {{model}} {{cwd}}")
+        if a.get("git_writable") and str(a["git_writable"]).strip() not in ("add-dir", "config", "both"):
+            raise ConfigError(f"agents.{name}.git_writable must be add-dir, config or both")
         if a.get("approve_args") is not None and not isinstance(a.get("approve_args"), list):
             raise ConfigError(f"agents.{name}.approve_args must be a list of arguments")
         agents[name] = AgentConfig(
             name=name, provider=provider, host=host, parallel=int(a.get("parallel", 1)),
             models=models, effort=dict(a.get("effort") or {}), strengths=strengths,
             soft_cap_5h_usd=a.get("soft_cap_5h_usd"), sandbox=a.get("sandbox"),
+            git_writable=(str(a["git_writable"]).strip() if a.get("git_writable") else None),
             experimental=bool(a.get("experimental", False)),
             command_template=a.get("command_template"),
             cli=str(a["cli"]).strip() if a.get("cli") is not None else None,
