@@ -108,3 +108,36 @@ Fixed:
 - `_still_routable` refuses a move when the task's pin changed since the listing, so reroute, rebalance and redistribute decide again on the next tick.
 
 Restart: serve must restart to pick up the relay/reap/retry/rebalance fixes and the Notion page read. The runners (claude-a, claude-a2, laptop-b) need a restart for the runner and reviewer parts. Restart them when idle, never with `pkill`. Tests: `tests/test_lost_update.py` (unblock and merge answers keep a pin set after serve's read, rebalance leaves a task pinned after the listing alone, `fresh_flags`), plus one Notion test where a lagging query hides the pin and the read by page id returns it.
+
+## swarm restart stalls claiming for up to the drain window (Oct 10 ~17:30 EDT)
+- What: orchestrator ran `swarm restart` to pick up 288de18 while T-368/T-370/T-371 were ~50-65 min in. Both runners went into "draining" and stopped claiming; T-372, T-374, T-378, T-379, T-380, T-383 sat Ready for 20-35 min with 4+ free slots.
+- Impact: ~6 tasks x 25 min idle during the frontend/voice crunch.
+- Idea: a draining runner should keep claiming into free slots until it has none in flight that need the old code, or re-exec immediately and re-adopt live worker PIDs. Until then: never `swarm restart` while a long task is running; prefer waiting for an idle moment.
+
+## Oct 10 evening backlog (from worker notes)
+- swarm-lock needs a `--hold N --marker FILE` mode for measurements done by an MCP tool (T-379, Q-1217); detached `(nohup swarm-lock ... &)` waiters stay queued invisibly.
+- Verify slots were 2 with exclusive measurements blocking all verifies; the Mac sat ~72% idle while 12 tasks waited in Review/Merge Ready (Aryan caught it). Raised slots and added a web-only verify path.
+- Foreign blocking questions (muse-b on T-377/T-365) paused other agents' tasks; harness now limits blocking to the task's own agent or the orchestrator.
+- Workers killed each other's measurements via `pkill -f "bash .swarm-run/batch.sh"` (same script name in every worktree); killguard 36e5831.
+- after_restart.sh detects running loops with `pgrep -f "swarm serve( |$)"`, which matches the orchestrator's own shell command when that command line also contains "swarm serve" (e.g. `kill $(pgrep -f "Python.*swarm serve"); ... after_restart.sh`). Result: "already running: swarm serve" while serve was down, twice on Oct 10 evening (reviews stalled a few minutes). Rule: run after_restart.sh as its own command; fix: exclude $$/parent PIDs or match the Python argv exactly.
+- Question IDs collide across laptops (~80 duplicate Q-ids by Oct 10 evening, e.g. Q-1312); answer with --task/--kind or --all; fix ID allocation after judging (T-394 note Q-1325).
+- Tasks filed from laptop-b with /Users/joeroche/... paths were routed to laptop-a Claude workers (T-400); route by path ownership or require --host when a description cites an absolute home path.
+- Scope lint flags .swarm-run/report.json as out-of-scope although rule 16 tells workers to write it (T-356, Q-1342): exempt .swarm-run/** from the scope lint.
+- Harness feedback text both forbids and requests worker fetch/rebase (codex-b on T-400, Q-1354); reconcile rules.md vs the feedback template.
+- Long detached GPU runs (90 min) exceed the 60-min worker limit; add an 'awaiting external job' parked state that auto-requeues when a sentinel file appears (T-387, Q-1361).
+- iLab sbatch rejects --cpus-per-task ('no limit'); drop it from templates (T-391).
+- Never overwrite a running bash driver in place (bash reads incrementally); copy to chain.run.sh first (T-391).
+- Reviews run verify_full on the branch head without merging main, so fixes on main (e.g. f77f1559) don't help pending branches (T-356, Q-1426); verify on a temporary merge of branch + main.
+- Frontend skill list in the worker prompt still showed the old two skills after the config change (T-388): check that skills_by_type hot-reloads for runners mid-run.
+- An 'impeccable critique + fix 7 screens' task needs ~120 min; split critique and fixes or raise the L limit for such tasks.
+- swarm assign does not clear a conflicting host: pin (T-362/T-364/T-354 kept host:laptop-c after assign to claude-a, sat unclaimed ~40 min). assign should rewrite host: to the new agent's host or refuse.
+- train_sep.py --steps default 4000 silently capped a '--minutes 90' run at 52 min (T-387); time-based runs must pass --steps 1000000.
+- Muse C's 'drafts' for T-362/T-364 never landed in git (Muse works off-repo); Claude rewrote both. Don't tell tasks to build on Muse output unless its path on main is verified.
+- Verify failures from laptop-c runs on stale code were fed back to a laptop-a task (T-354, Q-1507): feedback should name the host and skip foreign-host failures.
+- muse-b files research tasks with no host:, so laptop-a Claude workers claim them (T-398, T-406). Default host for tasks created by an agent = that agent's host.
+- Playwright MCP browser caches ES modules/CSS across goto and server restarts (T-404); recipe should open a fresh context or add ?v=<rev> per check.
+- Reused task branches carry stale artifacts from an unrelated earlier task (T-381 saw T-278 files, Q-1577); start reassigned tasks from a fresh branch when the old attempt was another agent's.
+- Named live batches (e.g. 'the T-386 batch') lived only in deleted worktrees' .swarm-run/batch.sh; tasks that first run a batch must commit it under eval/ (T-419).
+- A task's own verify overlapped its own --shared eval and wrecked timing rows (T-419); verify should take a slot that the same task's --shared runs respect.
+- Orchestrator task text cited scripts/app_check.py --mock-engine, which T-354 never shipped under that name (T-429); check flags with --help before citing them.
+- An agent (T-476 latency benchmark) ran scripts/demo.sh --gpu, whose gpu_up.sh cancelled Aryan's held A100 job 435775 (Oct 11 ~4 am). Added an AGENTS.md rule; harness should block gpu_up/scancel for workers.

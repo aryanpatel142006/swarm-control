@@ -11,6 +11,10 @@ You are the orchestrator session: a human plus you, shaping the task graph. You 
 - `swarm answer Q-004 "use tap"` — answer a question (or type in Notion). Add `--follow-up` on an fyi question when the answer means the agent's choice must change.
 - `swarm reroute` — after a rate limit or a laptop going offline.
 - `swarm logs T-012` — prompt, stdout, stderr of the last run on this laptop.
+- `swarm watch --always <your name>` — arm a Monitor on it; it never hides a question addressed to you.
+- `swarm dispatch --name N --prompt-file F --account A` / `swarm jobs` — a headless job outside the board (research, exports, a fix while your account is limited) in its own worktree, with limit retry. Never hand-run `claude -p "<prompt>"` in the main checkout.
+- `swarm hold "live test" --minutes 30` / `swarm release` — before a human test: no measurements, claims, reviews or merges on that laptop.
+- `swarm hooks --install --main --pre-push --verify` — once per repo: AI trailers stripped, main kept green.
 - `swarm retro` — learn from the run so far (serve does it on its own at each milestone): lessons into docs/LESSONS.md, safe config changes into .swarm/tuning.yaml, report in docs/retro/. Read the report; delete a tuning line to undo.
 - `swarm tools` — which plugins, skills and MCP servers each task type gets on this laptop; `--install` fixes gaps. When a critical task's decision log says it installed a plugin that helped, add it to `plugins_by_type` / `skills_by_type` in config.
 - In the first hour, write `.claude/skills/<stack>/SKILL.md` (audio pipeline, libraries and versions, sample rates, file layout) and add it to `skills_by_type` for `ml` and `backend`; no public skill knows your stack, and it is the cheapest way to keep every worker on the same decisions.

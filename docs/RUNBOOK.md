@@ -11,6 +11,7 @@
 7. Gemini laptop (optional third agent): `brew install gemini-cli`, run `gemini` once in Terminal and log in with Google, then `swarm doctor --smoke gemini-a`; expect Flash only and a small quota (the harness cools it down and reroutes when it runs out).
 7b. Perplexity agent (optional, `provider: perplexity`): add the config block from the README's "Perplexity" section (teammate joining), set `cli`/`args_template`/`approve_args` to the real command (the defaults are unverified), then `swarm doctor --smoke perplexity-b`.
 8. `swarm tools --install` on both laptops (installs the plugins in config and Playwright's Chromium). A Codex laptop also registers the MCP servers named in config once: `codex mcp add context7 -- npx -y @upstash/context7-mcp` and `codex mcp add playwright -- npx @playwright/mcp@latest --headless --isolated`, then `enabled = false` on each in `~/.codex/config.toml` (the runner enables them per run). Then `swarm doctor` on both laptops, then `swarm doctor --smoke <agent>` for every agent you will use. An agent whose smoke fails is disabled: remove it from config or fix the CLI.
+8a. Laptop A (the repo owner): `swarm hooks --install --main --pre-push --verify`. The commit-msg hook strips AI attribution trailers in every worktree and the main checkout; the pre-push gate keeps a red `verify.fast` and AI trailers off main. Runners install the commit-msg hook themselves; `swarm doctor` shows a `hook:` row. In config set `outputs_dir:` (files for people, never ~/Desktop), `accounts:` for every login a `swarm dispatch` job may use, and `model_fallbacks: {fable: opus, opus: sonnet}`.
 8. Both laptops: plug in power and disable sleep (System Settings → Battery → Options → Prevent automatic sleeping on power adapter). `caffeinate -dims` in front of every swarm command is the belt to that suspender.
 
 ## 0:00–0:45 — plan
@@ -23,6 +24,7 @@
 - Laptop A: `caffeinate -dims swarm serve` in one terminal.
 - Both laptops: `caffeinate -dims swarm run` in one terminal each. Every process pauses when a Mac sleeps; during the tryout a closed lid stretched 30-second serve ticks into hours.
 - Open the Notion board (By Status) and the Questions board.
+- Orchestrator session: arm a Monitor on `swarm watch --min-task <first id of this run> --always <your name>`. `--mute-host <laptop>` hides another laptop's chatter but never a blocking question, a harness note or a question addressed to the orchestrator.
 
 ## 0:45–1:30 — first hour rules
 
@@ -34,6 +36,10 @@
 
 - `swarm status`. Cut or split anything a RISK line names. Plan the next milestone at 70%.
 - Answer questions. Silence on an fyi question means the agent's choice stands.
+
+## Live tests
+
+- `swarm hold "live test" --minutes 30` on the laptop that runs the test, before anyone touches the demo. It pauses swarm-lock, new claims and serve's reviews/merges on that machine (`--scope` narrows it); runs in flight finish. `swarm release` after.
 
 ## T-4h
 
@@ -56,3 +62,7 @@
 | A task keeps failing | It becomes a Question after 3 attempts. Cut, split, or fix by hand. |
 | One laptop idle while the other has a queue | serve rebalances one task per tick to an idle agent of equal strength; to move a specific card, `swarm assign T-012 --agent <name>` or drag it in Notion. |
 | Two agents fight over files | Give one task a dependency on the other; the next plan lint will warn about overlaps. |
+| `RISK: main is red at <sha>` | serve's verify.fast fails on main and every task branch inherits it. File one critical bugfix task for the named check (or fix it by hand through the pre-push gate) before anything else; `swarm tell` running tasks to leave it alone. |
+| An account is limited (`Limits:` line, `usage-limit until`) | Agents: serve reroutes; with `model_fallbacks` a model-only limit keeps the agent on the fallback model. Jobs: `swarm dispatch` moves to the account's `fallback` or waits for the reset itself; `swarm jobs` shows `waiting_limit` and the retry time. |
+| You need an extra headless run outside the board | `swarm dispatch --name <n> --prompt-file <f> --account <a>`: own worktree, prompt via file, logs in `~/.swarm/<project>/jobs/<n>/`. Never run `claude -p "<prompt>"` in the main checkout. |
+| Two rows share a question id | `swarm answer` answers the one still open; if several are open it lists them, add `--task`/`--kind` or `--all`. `swarm doctor --dupes` lists every duplicate. |

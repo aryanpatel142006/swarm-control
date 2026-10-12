@@ -159,16 +159,49 @@ agents:
 | `swarm run` | Work this laptop's agents' tasks |
 | `swarm serve` | The control loop: reap, retry, review, merge, promote, reroute, status |
 | `swarm status` / `logs` / `usage` | What's happening, a task's logs, tokens and cost per agent |
-| `swarm answer` / `tell` | Answer a blocked task; send a note to a task's next attempt |
+| `swarm answer Q-x "…" [--keep-blocked] [--follow-up]` / `tell` | Answer a question (`--keep-blocked`, or an answer starting "stay parked", closes a blocking question and leaves its task parked; on an id two rows share it answers the one still open); send a note to a task's next attempt |
 | `swarm add` / `assign` / `split` / `cut` / `reroute` | Edit the plan from the terminal |
 | `swarm handoff` / `restart` | Move a task between agents; drain and restart a runner safely |
-| `swarm hold "<reason>" [--minutes N]` / `swarm release` | Live test hold: `swarm-lock` waits (exclusive and shared) until released or the hold expires |
+| `swarm hold "<reason>" [--minutes N] [--scope locks,claims,reviews]` / `swarm release` | Live test hold on this machine: `swarm-lock` waits, the runner starts no new task and serve starts no review or merge here, until released or the hold expires |
+| `swarm dispatch --name N --prompt-file F [--account A] [--push branch\|main\|none]` / `swarm jobs [N] [--stop]` | One headless agent job outside the board: own worktree, prompt via file or stdin, per-job logs, account and model fallback, waits out a limit; list jobs and their final reports |
+| `swarm hooks [--install] [--main] [--pre-push] [--verify]` | Commit-msg hook that strips AI attribution trailers (every worktree; the main checkout with `--main`), and the opt-in pre-push gate for main |
+| `swarm watch [--mute-host H] [--always WORD]` | One line per question and task change, for a Monitor; never hides a question addressed to the orchestrator |
 | `swarm retro` / `night` | Run a retro now; run unattended practice cycles |
 | `swarm tools` / `agents-sync` | Show and install plugins, skills, MCP servers; sync the Agents table with config |
 
 ### Live test hold
 
-Before a human live test, the orchestrator runs `swarm hold "live test" --minutes 30`. While `~/.swarm/<project>/locks/HOLD` exists, every `swarm-lock` call (exclusive measurements and shared verifies) waits and logs the reason and until-time, so no measurement or verify runs on that laptop or replays against the shared remote GPU during the test (selective-hearing, Oct 9: a worker's replay overran the live session's tier). The hold ends by itself at its until-time (default 60 minutes), `swarm release` ends it early, `swarm status` shows a `HOLD:` line while it is active, and `swarm-lock --ignore-hold` or `SWARM_HOLD_BYPASS=1` skips the wait for the humans' own tooling. It is per machine: run it on each laptop that runs workers.
+Before a human live test, the orchestrator runs `swarm hold "live test" --minutes 30` on the laptop that runs the test. While `~/.swarm/<project>/locks/HOLD` exists it pauses three things on that machine (its scope, from `--scope` or config `hold.scope`, default all three):
+
+- `locks`: every `swarm-lock` call (exclusive measurements and shared verifies) waits and logs the reason and until-time, so nothing measures or replays against the shared remote GPU during the test (selective-hearing, Oct 9: a worker's replay overran the live session's tier);
+- `claims`: the runner starts no new task there; runs already in flight finish (Oct 11: workers' Playwright/Chromium load pushed the live audio engine to a degraded tier although swarm-lock was held);
+- `reviews`: serve, when it runs there, starts no review or merge (each runs the full verify).
+
+The hold ends by itself at its until-time (default 60 minutes), `swarm release` ends it early, `swarm status` shows a `HOLD:` line naming what it pauses, and `swarm-lock --ignore-hold` or `SWARM_HOLD_BYPASS=1` skips the lock wait for the humans' own tooling. It is per machine: run it on each laptop whose load matters. A HOLD file written by an older version pauses `locks` only.
+
+### One-off jobs: `swarm dispatch`
+
+For work that is not a board task (a research digest, an export, a fix while the planner's account is limited), run it as a job instead of a hand-rolled `claude -p` in the main checkout:
+
+```bash
+swarm dispatch --name ab-export --prompt-file /tmp/ab.md --account pro          # detached; returns at once
+cat prompt.md | swarm dispatch --name digest --prompt-file - --cwd ~/notes --foreground
+swarm jobs                       # running, waiting for a limit, finished; first line of each report
+swarm jobs ab-export             # attempts, push result, full final report
+swarm jobs ab-export --stop      # stop it; the work is committed and the branch pushed
+```
+
+- The prompt is read from the file (or stdin) and handed to the CLI on stdin, never through a shell or argv: backticks and `$(...)` in a prompt are text (Oct 10: `tools/a2.sh` ran `claude -p "$*"` and the shell executed them).
+- Each job runs in its own worktree on `job/<name>` made from origin/main, so jobs never share a checkout (Oct 11: agents in one checkout swept each other's staged files into commits, collided on `git pull --rebase` and stashed each other's work). `--cwd DIR` runs a research job in a directory instead and pushes nothing.
+- When the agent is done the job commits what it left, strips AI trailers and lands the work: `--push branch` (default) pushes `job/<name>`; `--push main` rebases onto current origin/main, runs `verify.fast` and pushes to main, and pushes the branch instead (job failed) on a conflict or a red verify; `--push none` leaves the worktree.
+- Accounts are config `accounts:` entries (or agent names). On "You've hit your session limit · resets 3:45pm" the job marks the account limited (`~/.swarm/<project>/limits.json`), moves to a fallback account or model at once, or sleeps until the named reset and retries (up to `dispatch.max_limit_waits`). `swarm status` prints `Limits:` and `Jobs:` lines.
+- Logs: `~/.swarm/<project>/jobs/<name>/` holds `prompt.md`, `attempt-N.out/.err`, `report.md`, `job.json` and `supervisor.log`.
+
+### Commit hygiene and a green main
+
+- `swarm hooks --install` puts a commit-msg hook in the repo's hooks directory (shared by every worktree). In linked worktrees (tasks, reviews, jobs) it removes `Co-Authored-By:` lines naming an AI, `Claude-Session:` lines and "Generated with …" lines; with `--main` (or `hooks.strip_trailers_main: true`) it does the same in the main checkout. A project hook already there is kept as `commit-msg.pre-swarm` and still runs. Runners install it before every worktree; `swarm doctor` reports it and counts AI-trailer commits on main. `SWARM_KEEP_TRAILERS=1` skips it for one commit.
+- `swarm hooks --install --pre-push --verify` (or `hooks.pre_push_verify: true`) adds a pre-push gate: a push to main is refused when a pushed commit carries an AI trailer or `verify.fast` fails on the pushed commit in a throwaway worktree. Task branches are not checked. `SWARM_SKIP_PREPUSH=1` or `git push --no-verify` skip it for an emergency.
+- serve runs `verify.fast` on every new origin/main commit (`~/.swarm/<project>/main_health.json`); while it fails, `swarm status` and the dashboard headline show `RISK: main is red at <sha> (<check>: ruff RUF046 hearing/x.py; tests/test_y.py::test_z …)` (Oct 11: direct commits left main red and every task inherited it).
 
 ### Quiet machine for measurements
 
@@ -300,6 +333,26 @@ Use `provider: generic` with a `command_template` such as
 </details>
 
 <details>
+<summary><b>Accounts, fallbacks, outputs and hooks (config)</b></summary>
+
+```yaml
+accounts:                      # logins `swarm dispatch` may use; an agent name works as an account too
+  max: {provider: claude}
+  pro: {provider: claude, env: {CLAUDE_CONFIG_DIR: ~/.claude-pro}, fallback: [max]}
+dispatch: {account: max, model: opus, push: branch, verify: true, max_limit_waits: 6, minutes: 120}
+model_fallbacks: {fable: opus, opus: sonnet}   # a model-only limit ("Opus weekly limit reached") keeps the agent
+                                               # and runs the fallback model; jobs follow the same chain
+outputs_dir: ~/CODE/<event>/deliverables       # files for people go to $SWARM_OUTPUTS_DIR/<kind>/, never ~/Desktop
+hooks: {strip_trailers: true, strip_trailers_main: false, pre_push: false, pre_push_verify: false}
+hold: {scope: [locks, claims, reviews]}
+```
+
+A runner that hits a limit naming one model, with a fallback configured, records it in `~/.swarm/<project>/limits.json`
+and requeues the task to the same agent; its next run uses the fallback model and the prompt says so. Without a
+fallback the whole agent cools down as before.
+</details>
+
+<details>
 <summary><b>Testing</b></summary>
 
 `pytest` runs unit tests, adapter tests against a fake CLI, and an end-to-end run against an in-memory board and a
@@ -319,6 +372,11 @@ swarm/
 ├── reviewer.py, merge.py cross-family review, rebase and merge
 ├── lightverify.py       docs/eval-only branches get the light verify in review and merge
 ├── relay.py             questions and answers between agents and humans
+├── dispatch.py          `swarm dispatch` / `swarm jobs`: one-off jobs in their own worktrees
+├── limits.py            account and model limits on this laptop, fallback chains
+├── githooks.py          commit-msg trailer strip, pre-push gate for main
+├── mainhealth.py        verify.fast on each new main commit, the "main is red" RISK line
+├── watch.py             `swarm watch`: board changes for a Monitor
 ├── retro.py, night.py   self-improvement and unattended practice cycles
 ├── usage.py             token and cost ledger, caps and cooldowns
 ├── adapters/            claude, codex, gemini, antigravity, grok, perplexity, generic
