@@ -295,6 +295,28 @@ def test_answer_refuses_an_id_two_questions_share(project_dir, monkeypatch):
     assert r.exit_code == 0 and all(q.answer == "done" for q in board.list_questions())
 
 
+def test_answer_picks_the_one_open_row_when_an_id_is_duplicated(project_dir, monkeypatch):
+    """Q-1978 x2 (Oct 11): one row was answered and closed, the other open; `answer` refused both without --task."""
+    import swarm.cli as cli
+    from swarm.models import Question
+
+    class TwoRowBoard:
+        rows = [Question(id="Q-1978", text="old", kind="harness", task_id="T-464", page_id="p1", status="Answered",
+                         answer="earlier"),
+                Question(id="Q-1978", text="new", kind="fyi", task_id="T-470", page_id="p2", status="Open")]
+
+        def list_questions(self, status=None):
+            return list(self.rows)
+
+        def update_question(self, q, fields):
+            return q
+    board = TwoRowBoard()
+    monkeypatch.setattr(cli, "make_board", lambda cfg, memory=False: board)
+    r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "answer", "Q-1978", "ok"])
+    assert r.exit_code == 0, r.output
+    assert [q.answer for q in board.rows] == ["earlier", "ok"] and "T-470" in r.output
+
+
 def test_add_names_an_open_task_that_cites_the_same_file(project_dir):
     cfgp = str(project_dir / ".swarm" / "config.yaml")
     from swarm.board.memory import InMemoryBoard
@@ -355,3 +377,38 @@ def test_answer_keep_blocked_marks_the_answer(project_dir, monkeypatch):
     assert keeps_blocked(ans) and "nothing to do" in ans
     board.rows[0].answer = ""
     assert runner.invoke(app, base).exit_code == 0 and not keeps_blocked(board.rows[0].answer)
+
+
+def test_restart_signals_only_real_runner_processes():
+    """`pgrep -f "swarm run"` also matched `caffeinate -dims swarm run` (SIGUSR1 kills caffeinate) and any shell
+    whose command line contained the words (after_restart.sh's self-match, Oct 10)."""
+    from swarm.cli import runner_pids
+    ps = "\n".join([
+        "  101 caffeinate -dims swarm run",
+        "  102 /Users/a/sc/.venv/bin/python3.12 /Users/a/sc/.venv/bin/swarm run",
+        "  103 /bin/zsh -c kill $(pgrep -f 'swarm run'); swarm run",
+        "  104 /Users/a/sc/.venv/bin/python3.12 /Users/a/sc/.venv/bin/swarm --host laptop-a run --agent claude-a2",
+        "  105 /Users/a/sc/.venv/bin/python3.12 /Users/a/sc/.venv/bin/swarm serve",
+        "  106 /Users/a/sc/.venv/bin/python3.12 -m swarm.cli --config /x/config.yaml run",
+        "  107 grep swarm run",
+        "  108 /Users/a/sc/.venv/bin/python3.12 /Users/a/sc/.venv/bin/swarm status",
+    ])
+    assert runner_pids(ps, me=999) == [102, 104, 106]
+
+
+def test_assign_moves_a_conflicting_host_pin_to_the_new_agents_host(project_dir):
+    """T-362/T-364/T-354 kept host:laptop-c after `assign` to claude-a and sat unclaimed for 40 min (Oct 10)."""
+    import swarm.cli as cli
+    from swarm.board.memory import InMemoryBoard
+    from swarm.models import Status, Task
+    board = InMemoryBoard()
+    t = board.create_task(Task(id="", title="x", status=Status.READY, agent="fake-b", flags=["host:host-b", "resume"]))
+    cli_make = cli.make_board
+    cli.make_board = lambda cfg, memory=False: board
+    try:
+        r = runner.invoke(app, ["--config", str(project_dir / ".swarm" / "config.yaml"), "assign", t.id,
+                                "--agent", "claude-a"])
+    finally:
+        cli.make_board = cli_make
+    assert r.exit_code == 0, r.output
+    assert board.get_task(t.id).flags == ["resume", "host:host-a"] and "host:host-b" in r.output

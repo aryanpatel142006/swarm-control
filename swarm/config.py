@@ -108,6 +108,39 @@ class AgentConfig:
 
 
 @dataclass
+class HooksConfig:
+    """Git hooks the harness installs (swarm/githooks.py)."""
+    strip_trailers: bool = True              # commit-msg hook in every worktree: AI attribution trailers removed
+    strip_trailers_main: bool | None = None  # the same in the main checkout (None = leave the repo's setting alone)
+    pre_push: bool = False                   # pushes to main refuse commits that carry AI trailers
+    pre_push_verify: str | None = None       # ... and run this verify command first (true in YAML = verify.fast)
+
+
+@dataclass
+class AccountConfig:
+    """One CLI login usable by `swarm dispatch` (swarm/dispatch.py): a provider plus the environment that selects
+    the login (CLAUDE_CONFIG_DIR for a second Claude account). `fallback` lists accounts to use while this one is
+    limited."""
+    name: str
+    provider: str = "claude"
+    env: dict[str, str] = field(default_factory=dict)
+    fallback: list[str] = field(default_factory=list)
+    model: str = ""                          # default model for jobs on this account ("" = dispatch.model)
+
+
+@dataclass
+class DispatchConfig:
+    account: str = ""                        # default account ("" = the first in `accounts`)
+    model: str = "opus"
+    effort: str | None = None
+    push: str = "branch"                     # branch | main | none: where a finished job's commits go
+    verify: bool = True                      # run verify.fast before a push to main
+    max_limit_waits: int = 6                 # times a job may wait out an account limit before it gives up
+    minutes: int = 120                       # wall-clock limit of one attempt
+    turns: int = 200
+
+
+@dataclass
 class RoutingConfig:
     importance_to_tier: dict[str, str] = field(default_factory=dict)
     best_tier_only_when: dict[str, str] = field(default_factory=dict)
@@ -187,6 +220,34 @@ class Config:
     # The laptop whose `swarm tell` / `swarm answer` count as the orchestrator. Empty = the host that runs serve
     # (its row on the Agents board). Relays from any other host are labelled with their real origin (Q-561, Q-584).
     orchestrator_host: str = ""
+    hooks: HooksConfig = field(default_factory=HooksConfig)
+    # Where files meant for people go (exports, A/B audio, PDFs): `$SWARM_OUTPUTS_DIR/<kind>/`, never ~/Desktop (Aryan,
+    # Oct 12: ~35 agent outputs piled up on his Desktop). Empty = no rule. `~` and `{repo_root}` expand.
+    outputs_dir: str = ""
+    # Model fallbacks when a model (not the whole account) is limited, e.g. {opus: sonnet} (Oct 11: Opus hit its
+    # weekly limit mid-run and three sub-agents died at once). Used by the runner and by `swarm dispatch`.
+    model_fallbacks: dict[str, str] = field(default_factory=dict)
+    accounts: dict[str, AccountConfig] = field(default_factory=dict)
+    dispatch: DispatchConfig = field(default_factory=DispatchConfig)
+    # What `swarm hold` pauses on its host: locks (swarm-lock measurements and verifies), claims (the runner starts
+    # no new task), reviews (serve starts no review or merge there). Oct 11: workers' Playwright load during a live
+    # test pushed the audio engine to a degraded tier although the hold only covered swarm-lock.
+    hold_scope: list[str] = field(default_factory=lambda: ["locks", "claims", "reviews"])
+
+    def outputs_path(self) -> str:
+        if not self.outputs_dir:
+            return ""
+        return os.path.expanduser(self.outputs_dir.replace("{repo_root}", str(self.repo_root)))
+
+    def account(self, name: str) -> AccountConfig | None:
+        """An account by name; an agent name works too (its provider and env), so existing configs need no
+        `accounts:` block."""
+        if name in self.accounts:
+            return self.accounts[name]
+        a = self.agents.get(name)
+        if a is not None:
+            return AccountConfig(name=name, provider=a.provider, env=dict(a.env))
+        return None
 
     def project_env(self) -> dict[str, str]:
         return {k: v.replace("{repo_root}", str(self.repo_root)) for k, v in self.env.items()}
@@ -479,7 +540,70 @@ def load_config(path: Path | str) -> Config:
         env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
         worktree_links=_str_list(raw.get("worktree_links"), "worktree_links") or [],
         orchestrator_host=str(raw.get("orchestrator_host") or ""),
+        hooks=_hooks(raw.get("hooks"), verify_raw.get("fast")),
+        outputs_dir=str(raw.get("outputs_dir") or ""),
+        model_fallbacks={str(k): str(v) for k, v in (raw.get("model_fallbacks") or {}).items()},
+        accounts=_accounts(raw.get("accounts")),
+        dispatch=_dispatch(raw.get("dispatch")),
+        hold_scope=_hold_scope((raw.get("hold") or {}).get("scope")),
     )
+
+
+HOLD_SCOPES = ("locks", "claims", "reviews")
+
+
+def _hooks(raw, verify_fast: str | None) -> HooksConfig:
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("hooks must be a mapping")
+    ppv = raw.get("pre_push_verify")
+    if ppv is True:
+        ppv = verify_fast or None
+    elif not ppv:
+        ppv = None
+    main = raw.get("strip_trailers_main")
+    return HooksConfig(strip_trailers=bool(raw.get("strip_trailers", True)),
+                       strip_trailers_main=None if main is None else bool(main),
+                       pre_push=bool(raw.get("pre_push", False)) or bool(ppv), pre_push_verify=ppv)
+
+
+def _accounts(raw) -> dict[str, AccountConfig]:
+    out = {}
+    for name, a in (raw or {}).items():
+        a = a or {}
+        provider = str(a.get("provider", "claude"))
+        if provider not in PROVIDERS:
+            raise ConfigError(f"accounts.{name}.provider '{provider}' not in {PROVIDERS}")
+        out[str(name)] = AccountConfig(
+            name=str(name), provider=provider,
+            env={str(k): os.path.expanduser(str(v)) for k, v in (a.get("env") or {}).items()},
+            fallback=[str(x) for x in (a.get("fallback") or [])], model=str(a.get("model") or ""))
+    for acct in out.values():
+        for f in acct.fallback:
+            if f not in out:
+                raise ConfigError(f"accounts.{acct.name}.fallback names unknown account '{f}'")
+    return out
+
+
+def _dispatch(raw) -> DispatchConfig:
+    raw = raw or {}
+    push = str(raw.get("push", "branch"))
+    if push not in ("branch", "main", "none"):
+        raise ConfigError("dispatch.push must be branch, main or none")
+    return DispatchConfig(account=str(raw.get("account") or ""), model=str(raw.get("model") or "opus"),
+                          effort=raw.get("effort"), push=push, verify=bool(raw.get("verify", True)),
+                          max_limit_waits=int(raw.get("max_limit_waits", 6)),
+                          minutes=int(raw.get("minutes", 120)), turns=int(raw.get("turns", 200)))
+
+
+def _hold_scope(raw) -> list[str]:
+    if raw is None:
+        return list(HOLD_SCOPES)
+    scope = [str(x) for x in (raw if isinstance(raw, list) else [raw])]
+    bad = [x for x in scope if x not in HOLD_SCOPES]
+    if bad:
+        raise ConfigError(f"hold.scope: unknown {bad}; use {list(HOLD_SCOPES)}")
+    return scope
 
 
 def _str_lists(block) -> dict[str, list[str]]:

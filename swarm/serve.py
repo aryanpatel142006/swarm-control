@@ -68,11 +68,16 @@ def _dependency_cycles(tasks: list[Task]) -> list[list[str]]:
 class Server:
     def __init__(self, cfg: Config, board: Board, ws: Workspace, *, reviewer, merger, now=utcnow,
                  sleep: Callable[[float], None] = time.sleep, log=print, host: str = "serve",
-                 status_every_s: int = 900, review_batch: int = 2, background: bool = False):
+                 status_every_s: int = 900, review_batch: int = 2, background: bool = False,
+                 main_health: bool = False):
         self.cfg, self.board, self.ws, self.reviewer, self.merger = cfg, board, ws, reviewer, merger
         self.now, self.sleep, self.log, self.host = now, sleep, log, host
         self.status_every_s, self.review_batch, self.background = status_every_s, review_batch, background
         self._last_status = None
+        # run verify.fast on each new origin/main commit and keep the result for `swarm status` (swarm/mainhealth.py)
+        self.main_health = main_health
+        self._main_checked_at = None
+        self._hold_logged: str | None = None
         self._pr_checked: dict = {}
         self._agent_seen: dict = {}      # agent name -> last status we saw, to notice offline -> online
         # self-improvement: a retro per completed milestone (lessons + tuning committed to main)
@@ -662,7 +667,34 @@ class Server:
         except (TypeError, ValueError):
             return 1
 
+    def held(self, what: str) -> bool:
+        """A `swarm hold` on this machine (serve's host) that covers `what`; logged once per hold."""
+        from .hostlock import hold_applies, hold_text, lock_dir, read_hold
+        try:
+            hold = read_hold(lock_dir(self.cfg.project), self.now())
+        except Exception:  # noqa: BLE001
+            return False
+        if not hold_applies(hold, what):
+            return False
+        if self._hold_logged != hold.get("since"):
+            self._hold_logged = hold.get("since")
+            self.log(f"hold on this machine ({hold_text(hold)}): no new reviews or merges until it ends")
+        return True
+
+    def check_main_health(self) -> int:
+        if not self.main_health:
+            return 0
+        now = self.now()
+        if self._main_checked_at and (now - self._main_checked_at).total_seconds() < 60:
+            return 0
+        self._main_checked_at = now
+        from .mainhealth import check_main, default_health_path
+        rec = check_main(self.ws, self.cfg, default_health_path(self.cfg.project), log=self.log, now=now)
+        return 1 if rec else 0
+
     def review_pending(self) -> int:
+        if self.held("reviews"):
+            return 0
         if self.review_parallel() <= 1:   # one review after another on this thread (the behaviour before Oct 9)
             n = 0
             for t in self._by_importance(self.board.list_tasks(status=[Status.REVIEW]))[: self.review_batch]:
@@ -735,6 +767,8 @@ class Server:
             th.join(timeout)
 
     def merge_pending(self) -> int:
+        if self.held("reviews"):
+            return 0
         n = 0
         for t in self._by_importance(self.board.list_tasks(status=[Status.MERGE_READY])):
             with self._review_lock:
@@ -957,6 +991,7 @@ class Server:
         summary: dict = {}
         self._step(summary, "reviewed", self.review_pending)
         self._step(summary, "merged", self.merge_pending)
+        self._step(summary, "main checked", self.check_main_health)
         self._slow_summary = summary
 
     # ----- self-improvement -----
@@ -1018,6 +1053,7 @@ class Server:
         else:
             self._step(summary, "reviewed", self.review_pending)
             self._step(summary, "merged", self.merge_pending)
+            self._step(summary, "main checked", self.check_main_health)
         self._step(summary, "limits", self.upgrade_limits)
         self._step(summary, "rerouted", self.reroute)
         self._step(summary, "rebalanced", self.rebalance)

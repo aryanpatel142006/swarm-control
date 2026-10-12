@@ -2139,3 +2139,56 @@ def test_runner_skips_a_young_task_without_host_flag(cfg, git_repo, tmp_path):
     unknown = ready_task(board, agent="claude-a")          # board gave no creation time: claimable as before
     assert {x.id for x in r.pending_tasks()} == {old.id, tagged.id, unknown.id}
     assert young.id not in {x.id for x in r.pending_tasks()}
+
+
+class ModelLimitedAdapter(FakeAdapter):
+    """First run: Opus weekly limit; later runs succeed (Oct 11 2026: Opus ran out, Sonnet on the same account
+    still worked)."""
+
+    def __init__(self):
+        super().__init__(files={"src/a.py": "x = 1\n"}, structured={"status": "done", "summary": "ok"})
+        self.n = 0
+
+    def run(self, spec):
+        self.n += 1
+        if self.n == 1:
+            self.specs.append(spec)
+            return RunResult(ok=False, exit_code=1, stdout="", stderr="", rate_limited=True, usage_limited=True,
+                             error="Opus weekly limit reached ∙ resets Oct 14, 9am")
+        return super().run(spec)
+
+
+def test_a_model_limit_keeps_the_agent_and_runs_the_fallback_model(cfg, git_repo, tmp_path):
+    from swarm.limits import LimitStore, default_limits_path
+    cfg.model_fallbacks = {"opus": "sonnet"}
+    adapter = ModelLimitedAdapter()
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="opus", effort="high")
+    out = r.run_task(t)
+    assert out.status is Status.READY and board.get_task(t.id).attempts == 0
+    row = board.get_agent("claude-a")
+    assert row is None or row.status != "cooldown"           # the account still runs Sonnet
+    assert board.get_task(t.id).agent == "claude-a"
+    assert LimitStore(default_limits_path(cfg.project)).until("claude-a", "opus") is not None
+    r.run_task(board.get_task(t.id))
+    assert adapter.specs[-1].model == "sonnet"
+    assert "opus is limited" in adapter.prompts[-1].lower()
+
+
+def test_without_a_fallback_a_model_limit_cools_the_agent_as_before(cfg, git_repo, tmp_path):
+    adapter = ModelLimitedAdapter()
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    t = ready_task(board, agent="claude-a", model="opus", effort="high")
+    r.run_task(t)
+    assert board.get_agent("claude-a").status == "cooldown"
+
+
+def test_a_claims_hold_on_this_host_stops_new_claims(cfg, git_repo, tmp_path):
+    from swarm.hostlock import lock_dir, write_hold
+    adapter = FakeAdapter(files={"src/a.py": "x"}, structured={"status": "done", "summary": "ok"})
+    r, board = make_runner(cfg, git_repo, tmp_path, adapter)
+    ready_task(board)
+    write_hold(lock_dir(cfg.project), "live test", 30, scope=["claims"])
+    assert r.tick() == 0 and adapter.specs == []
+    write_hold(lock_dir(cfg.project), "live test", 30, scope=["locks"])
+    assert r.tick() == 1

@@ -113,6 +113,8 @@ def worker_env(wt: Path, task: Task, cfg: Config | None = None, host: str | None
         slots = cfg.hosts[host].max_parallel_verify if host in cfg.hosts else 2
         env.update(worker_lock_env(cfg.project, slots, cfg.verify.exclusive_max_minutes))
         env.update(cfg.scratch_env(host))   # disk-backed TMPDIR where /tmp is a small tmpfs (laptop-c, Q-1113)
+        if cfg.outputs_path():             # files for people, never ~/Desktop (Oct 12 2026)
+            env["SWARM_OUTPUTS_DIR"] = cfg.outputs_path()
     env.update({"PYTHONPATH": os.pathsep.join(paths + ([old] if old else [])),
                 "SWARM_TASK_ID": task.id, "SWARM_WORKTREE": str(wt)})
     return env
@@ -590,6 +592,8 @@ class Runner:
         if self.draining:
             self.finish_drain_if_idle()
             return 0
+        if self._held_for_claims():
+            return 0
         dispatched = 0
         now = self.now()
         rows = {a.name: a for a in self.board.list_agents()}
@@ -610,6 +614,47 @@ class Runner:
             self.executor.submit(self._guarded_run, task)
             dispatched += 1
         return dispatched
+
+    def _held_for_claims(self) -> bool:
+        """A `swarm hold` on this machine whose scope includes claims: no new task starts here until it ends (Oct 11
+        2026: workers' Playwright/Chromium load during a live test pushed the audio engine to a degraded tier while
+        the hold only paused swarm-lock). Runs already in flight continue. Logged once per hold."""
+        from .hostlock import hold_applies, hold_text, lock_dir, read_hold
+        try:
+            hold = read_hold(lock_dir(self.cfg.project))
+        except Exception:  # noqa: BLE001
+            return False
+        if not hold_applies(hold, "claims"):
+            return False
+        if getattr(self, "_hold_logged", None) != hold.get("since"):
+            self._hold_logged = hold.get("since")
+            self.log(f"hold on this machine ({hold_text(hold)}): no new claims until it ends or `swarm release`")
+        return True
+
+    @property
+    def limits(self):
+        if getattr(self, "_limits", None) is None:
+            from . import limits as limits_mod
+            self._limits = limits_mod.LimitStore(limits_mod.default_limits_path(self.cfg.project), now=self.now)
+        return self._limits
+
+    def _model_after_limits(self, agent: str, model: str) -> tuple[str, str]:
+        """The model this run uses: `model`, or its configured fallback while `model` is limited on this agent's
+        account (swarm/limits.py). Returns (model, note for the prompt)."""
+        if not self.cfg.model_fallbacks:
+            return model, ""
+        from .limits import pick_model
+        try:
+            picked, skipped = pick_model(agent, model, self.cfg.model_fallbacks, self.limits, self.now())
+        except Exception:  # noqa: BLE001 - a limits file problem never stops a run
+            return model, ""
+        if picked == model:
+            return model, ""
+        until = self.limits.until(agent, model)
+        note = (f"Model note: {model} is limited on this account until {until:%b %d %H:%M} UTC, so this run uses "
+                f"{picked} (config `model_fallbacks`). Keep the plan simple and verify more.")
+        self.log(f"{agent}: {', '.join(skipped)} limited; running on {picked}")
+        return picked, note
 
     def _guarded_run(self, task: Task) -> None:
         agent = task.agent        # run_task may reroute the task (task.agent changes); the slot is this agent's
@@ -1118,6 +1163,7 @@ class Runner:
             inline = {n: self.cfg.mcp_servers[n] for n in mcp if n in self.cfg.mcp_servers}
             limit = self.cfg.limit_for(task.size)
             model = task.model or agent_cfg.models["mid"]
+            model, model_note = self._model_after_limits(task.agent, model)
             effort = task.effort or agent_cfg.effort.get("mid")
             turns = worker_turns(limit.turns, effort)
             limits_line = (f"Limits for this run: {limit.minutes} minutes wall-clock"
@@ -1125,7 +1171,8 @@ class Runner:
                            + f" (time you spend waiting in `swarm-lock` for a verify slot or the exclusive measurement "
                            f"lock is added back, up to {lock_wait_cap(limit.minutes * 60) // 60} more minutes)"
                            + ". A background job still running when you stop is lost: bound long evaluations to fit, "
-                           "start them early, and record their command, PID and output path in `.swarm-run/notes.md`.")
+                           "start them early, and record their command, PID and output path in `.swarm-run/notes.md`."
+                           + (f" {model_note}" if model_note else ""))
             self._restore_carry(task.id, attempt, wt)
             from .relay import orchestrator_host
             orch_host = orchestrator_host(self.cfg, self.board)   # relay labels are checked against it (Q-584)
@@ -1583,7 +1630,31 @@ class Runner:
         self.log(f"[{task.id}] parked → {task.status.value} (resume)")
         return Outcome(task, None, result, None, task.status)
 
+    def _model_limited(self, task: Task, result: RunResult, prev_status: Status | None) -> Outcome | None:
+        """A limit on one model ("Opus weekly limit reached") with a configured fallback: the agent stays available,
+        the model is recorded as limited on this account, and the task goes back to the same agent, whose next run
+        uses the fallback model (Oct 11 2026: Opus's weekly limit killed three runs; Sonnet still had quota)."""
+        if not result.rate_limited or not self.cfg.model_fallbacks:
+            return None
+        from .limits import fallback_chain, limited_model, model_family
+        text = "\n".join([result.error or "", (result.stderr or "")[-3000:], (result.stdout or "")[-2000:]])
+        fam = limited_model(text)
+        model = task.model or fam
+        if not fam or model_family(model) != fam or len(fallback_chain(model, self.cfg.model_fallbacks)) < 2:
+            return None
+        until = self.limits.mark(task.agent, result.reset_at, result.error or "model limit", model=fam)
+        task.flags = fresh_flags(self.board, task, add=["resume"])
+        task.status, task.claim_nonce = requeue_status(prev_status), ""
+        task.last_error = f"model limit: {fam} until {until:%b %d %H:%M} UTC: {result.error[:240]}"
+        self.board.update_task(task, ["status", "claim_nonce", "flags", "last_error"])
+        self.log(f"[{task.id}] {fam} limited on {task.agent} until {until:%b %d %H:%M} UTC; the next run uses "
+                 f"{fallback_chain(model, self.cfg.model_fallbacks)[1]}")
+        return Outcome(task, None, result, None, task.status)
+
     def _rate_limited(self, task: Task, result: RunResult, *, prev_status: Status | None = None) -> Outcome:
+        model_out = self._model_limited(task, result, prev_status)
+        if model_out is not None:
+            return model_out
         now = self.now()
         limited = task.agent
         with self._hb_lock:      # a heartbeat that read the row before this write would drop the cooldown

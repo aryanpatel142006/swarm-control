@@ -6,13 +6,18 @@ from pathlib import Path
 
 import pytest
 import yaml
+from datetime import datetime, timedelta, timezone
+
+# The event window is relative to now: a fixed date made every status/headline test go red once it passed
+# (Oct 12 2026: "0.0 h remain" RISK turned the headline red).
+_NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 SAMPLE_CONFIG = {
     "project": "demo",
     "repo": "example/demo",
     "main_branch": "main",
     "worktree_root": "../demo-wt",
-    "event": {"start": "2026-10-10T12:00:00-04:00", "end": "2026-10-11T12:00:00-04:00"},
+    "event": {"start": (_NOW - timedelta(hours=12)).isoformat(), "end": (_NOW + timedelta(hours=12)).isoformat()},
     "poll_seconds": 15,
     "idle_poll_seconds": 30,
     "heartbeat_seconds": 60,
@@ -133,3 +138,9 @@ def _isolated_verify_locks(tmp_path, monkeypatch):
     root = tmp_path / "swarm-home"
     monkeypatch.setattr(hostlock, "lock_dir", lambda project: root / project / "locks")
     monkeypatch.delenv(hostlock.HELD_ENV, raising=False)
+    import swarm.limits as limits
+    monkeypatch.setattr(limits, "default_limits_path", lambda project: root / project / "limits.json")
+    import swarm.mainhealth as mainhealth
+    monkeypatch.setattr(mainhealth, "default_health_path", lambda project: root / project / "main_health.json")
+    import swarm.dispatch as dispatch
+    monkeypatch.setattr(dispatch, "jobs_root", lambda project: root / project / "jobs")

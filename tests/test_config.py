@@ -148,3 +148,50 @@ def test_host_scratch_dir_must_be_absolute_and_outside_git(project_dir, sample_c
     (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(sample_config_dict))
     with pytest.raises(ConfigError, match="inside the git checkout"):
         load_config(project_dir / ".swarm" / "config.yaml")
+
+
+def _write(project_dir, d):
+    (project_dir / ".swarm" / "config.yaml").write_text(yaml.safe_dump(d))
+    return load_config(project_dir / ".swarm" / "config.yaml")
+
+
+def test_retro_keys_have_safe_defaults(project_dir):
+    cfg = load_config(project_dir / ".swarm" / "config.yaml")
+    assert cfg.hooks.strip_trailers is True and cfg.hooks.strip_trailers_main is None
+    assert cfg.hooks.pre_push is False and cfg.hooks.pre_push_verify is None
+    assert cfg.outputs_dir == "" and cfg.outputs_path() == ""
+    assert cfg.model_fallbacks == {} and cfg.accounts == {}
+    assert cfg.dispatch.push == "branch" and cfg.hold_scope == ["locks", "claims", "reviews"]
+    # an agent name works as an account
+    acct = cfg.account("claude-a")
+    assert acct is not None and acct.provider == "claude" and cfg.account("nobody") is None
+
+
+def test_retro_keys_parse(project_dir, sample_config_dict, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/x")
+    sample_config_dict.update({
+        "hooks": {"strip_trailers_main": True, "pre_push_verify": True},
+        "outputs_dir": "~/deliverables",
+        "model_fallbacks": {"opus": "sonnet"},
+        "accounts": {"max": {}, "pro": {"env": {"CLAUDE_CONFIG_DIR": "~/.claude-pro"}, "fallback": ["max"]}},
+        "dispatch": {"account": "pro", "push": "main", "model": "sonnet"},
+        "hold": {"scope": ["claims"]},
+    })
+    cfg = _write(project_dir, sample_config_dict)
+    assert cfg.hooks.pre_push and cfg.hooks.pre_push_verify == "scripts/verify_fast.sh"
+    assert cfg.hooks.strip_trailers_main is True
+    assert cfg.outputs_path() == "/home/x/deliverables"
+    assert cfg.accounts["pro"].env["CLAUDE_CONFIG_DIR"] == "/home/x/.claude-pro"
+    assert cfg.accounts["pro"].fallback == ["max"] and cfg.dispatch.account == "pro"
+    assert cfg.dispatch.push == "main" and cfg.hold_scope == ["claims"]
+
+
+@pytest.mark.parametrize("patch,match", [
+    ({"dispatch": {"push": "origin"}}, "dispatch.push"),
+    ({"hold": {"scope": ["everything"]}}, "hold.scope"),
+    ({"accounts": {"a": {"fallback": ["b"]}}}, "unknown account"),
+])
+def test_retro_keys_are_validated(project_dir, sample_config_dict, patch, match):
+    sample_config_dict.update(patch)
+    with pytest.raises(ConfigError, match=match):
+        _write(project_dir, sample_config_dict)

@@ -56,7 +56,7 @@ def test_headline_is_green_yellow_or_red_with_the_one_thing_to_know(cfg):
     text, color = render_headline(cfg, ok_tasks, live, [], now)
     assert color == "green_background" and text.startswith("All good")
     assert "1 running" in text and "1/2 done" in text and "claude-a" in text and "codex-a" not in text.split("offline")[0]
-    assert "04:00 UTC" in text   # when it was written, so a stale banner is obvious
+    assert f"{now.strftime('%H:%M')} UTC" in text   # when it was written, so a stale banner is obvious
     q = [Question(id="Q-4", text="Tap or rail?", task_id="T-2", status="Open", impact="high")]
     text, color = render_headline(cfg, ok_tasks, live, q, now)
     assert color == "yellow_background" and text.startswith("Needs you") and "Q-4" in text and "Tap or rail?" in text
@@ -127,3 +127,39 @@ def test_a_lost_login_reads_as_auth_lost_with_a_risk_line(cfg):
     assert "RISK: codex-b: login lost; the human must re-login" in text and "laptop-b" in text
     agents[0].cooldown_until = now - timedelta(minutes=1)      # expired: no RISK, no auth-lost
     assert "login lost" not in render_status(cfg, [], agents, [], now)
+
+
+def test_status_names_a_red_main_with_its_failing_check(cfg):
+    from swarm.mainhealth import default_health_path, write_health
+    now = cfg.event_end - timedelta(hours=8)
+    write_health(default_health_path(cfg.project), sha="aa36b460deadbeef", ok=False, command="scripts/verify_fast.sh",
+                 output="hearing/tse/enrolled.py:12:5: RUF046 Value being cast to int is already an integer\n"
+                        "FAILED tests/test_judge_profile.py::test_gain - assert 22 == 18\n", now=now)
+    text = render_status(cfg, [], [], [], now)
+    risk = next(ln for ln in text.splitlines() if ln.startswith("RISK: main is red"))
+    assert "aa36b460" in risk and "ruff RUF046 hearing/tse/enrolled.py" in risk
+    assert "tests/test_judge_profile.py::test_gain" in risk
+    write_health(default_health_path(cfg.project), sha="bbbb", ok=True, command="scripts/verify_fast.sh", output="",
+                 now=now)
+    assert "main is red" not in render_status(cfg, [], [], [], now)
+
+
+def test_status_lists_account_and_model_limits_and_jobs(cfg):
+    from swarm.dispatch import Job, jobs_root
+    from swarm.limits import LimitStore, default_limits_path
+    now = cfg.event_end - timedelta(hours=8)
+    st = LimitStore(default_limits_path(cfg.project), now=lambda: now)
+    st.mark("pro", now + timedelta(minutes=30), "You've hit your session limit")
+    st.mark("claude-a", now + timedelta(days=2), "Opus weekly limit reached", model="opus")
+    root = jobs_root(cfg.project)
+    for name, status in (("a", "running"), ("b", "waiting_limit"), ("c", "done")):
+        (root / name).mkdir(parents=True)
+        (root / name / "job.json").write_text(Job(name=name, account="pro", model="opus", status=status,
+                                                  created="2026-10-11T10:00:00Z",
+                                                  retry_at="2026-10-11T15:47:00Z" if status == "waiting_limit" else ""
+                                                  ).to_json())
+    text = render_status(cfg, [], [], [], now)
+    lim = next(ln for ln in text.splitlines() if ln.startswith("Limits: "))
+    assert "pro limited until" in lim and "claude-a/opus limited until" in lim
+    jobs = next(ln for ln in text.splitlines() if ln.startswith("Jobs: "))
+    assert "1 running (a)" in jobs and "1 waiting for a limit (b, retry 15:47 UTC)" in jobs and "c" not in jobs

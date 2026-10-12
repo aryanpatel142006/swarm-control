@@ -307,7 +307,7 @@ def test_status_shows_the_hold_line(cfg, tmp_path, monkeypatch):
     assert "HOLD:" not in render_status(*args)
     hostlock.write_hold(tmp_path / "locks", "live test", 30)
     line = next(ln for ln in render_status(*args).splitlines() if ln.startswith("HOLD:"))
-    assert line.startswith("HOLD: live test until ") and line.endswith(" UTC (measurements and verifies wait)")
+    assert line.startswith("HOLD: live test until ") and line.endswith(" UTC (pauses locks, claims, reviews)")
     hostlock.clear_hold(tmp_path / "locks")
     assert "HOLD:" not in render_status(*args)
 
@@ -810,3 +810,22 @@ def test_stop_ends_shared_jobs_too(tmp_path):
 def test_rule_18_names_shared_mode():
     text = (Path(__file__).resolve().parent.parent / "swarm" / "prompts" / "rules.md").read_text()
     assert "swarm-lock --shared" in text and "--exclusive" in text
+
+
+def test_hold_scope_decides_what_waits(tmp_path):
+    import json
+    from swarm.hostlock import hold_applies, read_hold, write_hold
+    write_hold(tmp_path, "live test", 30, scope=["claims"])
+    h = read_hold(tmp_path)
+    assert hold_applies(h, "claims") and not hold_applies(h, "locks") and not hold_applies(h, "reviews")
+    # a slot is taken at once under a claims-only hold
+    with verify_slot(tmp_path, 1, honor_hold=True, wait_s=2) as held:
+        assert held
+    write_hold(tmp_path, "live test", 30)
+    assert all(hold_applies(read_hold(tmp_path), w) for w in ("locks", "claims", "reviews"))
+    # a HOLD file written before scopes existed paused swarm-lock only
+    data = json.loads((tmp_path / "HOLD").read_text())
+    data.pop("scope")
+    (tmp_path / "HOLD").write_text(json.dumps(data))
+    h = read_hold(tmp_path)
+    assert hold_applies(h, "locks") and not hold_applies(h, "claims") and not hold_applies(None, "locks")

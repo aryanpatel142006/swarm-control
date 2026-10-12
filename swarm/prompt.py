@@ -101,6 +101,11 @@ def compile_prompt(task: Task, cfg: Config, *, rules_text: str, deps_summaries: 
     host_line = (f"Host: {platform.node()} · {platform.system()} {platform.machine()} · Python {platform.python_version()}. "
                  "Measurements requested for another host are not yours to take: say so in the report.")
     parts = [f"# Worker task {task.id}", "", "## Rules", "", rules_text.strip(), "", host_line]
+    outputs = cfg.outputs_path() if hasattr(cfg, "outputs_path") else ""
+    if outputs:   # Oct 12 2026: ~35 agent outputs piled up on Aryan's Desktop
+        parts += ["", f"Outputs: files meant for people (exports, A/B audio, PDFs, videos, screenshots for a human) go "
+                      f"under `{outputs}/<kind>/` (also `$SWARM_OUTPUTS_DIR`), one directory per kind, never ~/Desktop "
+                      "or the home folder. Name the path in your report."]
     if limits_line.strip():
         parts += ["", limits_line.strip()]
     parts += ["", "## Task", "",

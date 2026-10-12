@@ -14,16 +14,9 @@ from pathlib import Path
 from typing import Callable
 
 # No AI co-author or attribution lines in any commit (project rule; T-205's squash commit on main carried a
-# `Co-Authored-By: Claude` trailer from a worker commit, Oct 10 2026).
-_AI_ATTRIBUTION_RE = re.compile(r"^[ \t]*(co-authored-by:[^\n]*(claude|anthropic)[^\n]*"
-                                r"|[^\n]*generated with \[?claude code[^\n]*)$", re.I | re.M)
-
-
-def strip_ai_attribution(text: str) -> str:
-    """The message without `Co-Authored-By:` lines naming Claude/Anthropic and "Generated with Claude Code" lines."""
-    out = _AI_ATTRIBUTION_RE.sub("", text)
-    out = re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in out.splitlines()))
-    return out.strip()
+# `Co-Authored-By: Claude` trailer from a worker commit, Oct 10 2026; `Claude-Session:` lines reached main on Oct 11).
+# One pattern for the runner's scrub, the merger's squash message and the commit-msg hook (swarm/githooks.py).
+from .githooks import ensure_hooks, has_ai_attribution, strip_ai_attribution  # noqa: E402,F401
 
 
 _MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)", re.M)
@@ -109,6 +102,9 @@ class Workspace:
         # set by the CLI: a context-manager factory holding a per-host verify slot (swarm/hostlock.py); None = no lock
         self.verify_slot: Callable[[str], object] | None = None
         self.script_env: dict[str, str] = {}      # Config.project_env(): shared data paths for verify scripts
+        # set by the CLI from config `hooks:`: install the commit-msg hook (and pre-push gate) before worktrees are
+        # made (swarm/githooks.py); None = leave the repo's hooks alone (tests, library use)
+        self.hook_options: dict | None = None
 
     # ----- git plumbing -----
     def git(self, cwd: Path, *args: str, check: bool = True, timeout: int = 300) -> CmdResult:
@@ -137,7 +133,12 @@ class Workspace:
     def _main_ref(self) -> str:
         return f"{self.remote}/{self.main_branch}"
 
+    def install_hooks(self) -> None:
+        if self.hook_options is not None:
+            ensure_hooks(self.repo_root, **self.hook_options)
+
     def provision(self, task_id: str, *, reuse_branch: bool = False) -> Path:
+        self.install_hooks()
         self.fetch()
         path = self.worktree_path(task_id)
         branch = f"task/{task_id}"
@@ -620,7 +621,7 @@ class Workspace:
         if not revs:
             return 0
         msgs = {c: self.git(path, "log", "-1", "--format=%B", c).out for c in revs}
-        if not any(_AI_ATTRIBUTION_RE.search(m) for m in msgs.values()):
+        if not any(has_ai_attribution(m) for m in msgs.values()):
             return 0
         mapped: dict[str, str] = {}
         changed = 0

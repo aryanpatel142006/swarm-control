@@ -101,7 +101,34 @@ def run_checks(cfg: Config, host: str | None, *, offline: bool = False, notion_t
             p = cfg.repo_root / rel
             checks.append(Check(label, p.exists(), str(p) if p.exists() else f"missing {rel}"))
     checks.extend(context_checks(cfg))
+    checks.extend(hook_checks(cfg))
     return checks
+
+
+def hook_checks(cfg: Config) -> list[Check]:
+    """The commit-msg hook that strips AI trailers (Claude-Session lines reached main on Oct 11 2026 in spite of every
+    prompt), the pre-push gate when config asks for it, and AI-trailer commits already on main (detail only)."""
+    from .githooks import hook_status, trailer_commits
+    try:
+        st = hook_status(cfg.repo_root)
+    except Exception as e:  # noqa: BLE001 - not a git repo yet (template just copied)
+        return [Check("git hooks", not cfg.hooks.strip_trailers, f"cannot read hooks: {e}")]
+    out = []
+    if cfg.hooks.strip_trailers:
+        detail = (f"{st['dir']}/commit-msg" + (" (main checkout too)" if st["main"] else " (worktrees only)")
+                  if st["commit-msg"] else "missing or outdated: run `swarm hooks --install`")
+        out.append(Check("hook:commit-msg", st["commit-msg"], detail))
+    if cfg.hooks.pre_push:
+        ok = st["pre-push"] and (not cfg.hooks.pre_push_verify or st["pre-push-verify"] == cfg.hooks.pre_push_verify)
+        out.append(Check("hook:pre-push", ok, (f"main pushes refuse AI trailers"
+                                               + (f" and run {st['pre-push-verify']}" if st["pre-push-verify"] else ""))
+                         if ok else "missing or outdated: run `swarm hooks --install`"))
+    hits = trailer_commits(cfg.repo_root, cfg.main_branch, cap=50)
+    if hits:
+        out.append(Check("ai trailers on main", True,
+                         f"{len(hits)} of the last 50 commits carry AI attribution lines (e.g. {hits[0][0]}); "
+                         "history is not rewritten, new ones are stripped"))
+    return out
 
 
 def context_checks(cfg: Config) -> list[Check]:

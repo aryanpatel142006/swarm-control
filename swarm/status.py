@@ -35,6 +35,27 @@ def dupe_risk(tasks: list[Task], questions: list[Question]) -> str:
             f"`swarm doctor --dupes` lists the pages; rename the newer one")
 
 
+def jobs_line(cfg: Config) -> str:
+    """'Jobs: 1 running (a) · 1 waiting for a limit (b, retry 15:47 UTC) · 1 died (c)' for `swarm dispatch` jobs."""
+    try:
+        from .dispatch import Job, jobs_root
+        root = jobs_root(cfg.project)
+        jobs = [Job.load(p) for p in sorted(root.glob("*/job.json"))] if root.exists() else []
+    except Exception:  # noqa: BLE001
+        return ""
+    groups: dict[str, list[str]] = {}
+    for j in jobs:
+        st = j.live_status()
+        if st in ("done", "failed", "cancelled"):
+            continue
+        label = j.name + (f", retry {j.retry_at[11:16]} UTC" if st == "waiting_limit" and j.retry_at else "")
+        groups.setdefault(st, []).append(label)
+    names = {"running": "running", "waiting_limit": "waiting for a limit", "finishing": "finishing",
+             "queued": "queued", "died": "died (supervisor gone; `swarm jobs <name>`)"}
+    bits = [f"{len(v)} {names.get(k, k)} ({'; '.join(v[:4])})" for k, v in groups.items()]
+    return ("Jobs: " + " · ".join(bits)) if bits else ""
+
+
 def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questions: list[Question],
                   now: datetime) -> str:
     hours_left = max(0.0, (cfg.event_end - now).total_seconds() / 3600)
@@ -73,8 +94,17 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
     from .hostlock import hold_text, lock_dir, read_hold
     active_hold = read_hold(lock_dir(cfg.project), now)
     if active_hold:   # Oct 9 2026: a measurement's GPU replay contaminated a human live test
-        lines.append(f"HOLD: {active_hold.get('reason') or 'live test'} until "
-                     f"{active_hold['until_dt'].strftime('%H:%M')} UTC (measurements and verifies wait)")
+        lines.append(f"HOLD: {hold_text(active_hold)}")
+    from .limits import LimitStore, default_limits_path, status_line
+    try:   # dispatch accounts and per-model limits on this laptop (Oct 11: Opus weekly limit, pro session limit)
+        lim = status_line(LimitStore(default_limits_path(cfg.project)), now)
+    except Exception:  # noqa: BLE001 - a broken limits file never breaks the status page
+        lim = ""
+    if lim:
+        lines.append(lim)
+    jobs = jobs_line(cfg)
+    if jobs:
+        lines.append(jobs)
     lines.append("")
     lines.append("Milestones:")
     by_ms: dict[str, list[Task]] = {}
@@ -84,6 +114,10 @@ def render_status(cfg: Config, tasks: list[Task], agents: list[AgentRow], questi
         by_ms.setdefault(t.milestone or "(no milestone)", []).append(t)
     active_agents = max(1, len([a for a in agents if a.name != "serve" and a.status != "offline"]))
     risks = [review_risk] if review_risk else []
+    from .mainhealth import default_health_path, read_health, risk_line
+    red = risk_line(read_health(default_health_path(cfg.project)))   # Oct 11: direct pushes left main red
+    if red:
+        risks.append(red)
     dupes = dupe_risk(tasks, questions)
     if dupes:
         risks.append(dupes)

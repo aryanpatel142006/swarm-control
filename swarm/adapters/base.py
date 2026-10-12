@@ -38,7 +38,13 @@ _RESET_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]
 _EPOCH_RE = re.compile(r"limit reached\|(\d{10})\b")
 _CLOCK_RE = re.compile(
     r"(?:try again at|tries? again at|resets?(?: at)?|reset at|available again at|until)\s+"
-    r"(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m\.?\b)?(?:\s*\(([A-Za-z_]+(?:/[A-Za-z_+-]+)+)\))?", re.I)
+    r"(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m\.?\b)?(?:\s*\(([A-Za-z_]+(?:/[A-Za-z_+-]+)*)\))?", re.I)
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+# Claude's weekly limits name a date: "Opus weekly limit reached ∙ resets Oct 14, 9am" (Oct 11 2026)
+_DATE_CLOCK_RE = re.compile(
+    r"(?:try again on|resets?(?: at| on)?|reset on|available again on)\s+"
+    r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?"
+    r"(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m\.?\b)?(?:\s*\(([A-Za-z_]+(?:/[A-Za-z_+-]+)*)\))?", re.I)
 _IN_RE = re.compile(
     r"(?:try again|retry|resets?|available again)(?: in| after)\s+(?:(\d+)\s*(?:h|hours?|hrs?)\b)?\s*,?\s*(?:and\s+)?"
     r"(?:(\d+)\s*(?:m|min|mins|minutes?)\b)?", re.I)
@@ -57,6 +63,11 @@ def parse_reset_at(text: str, now: datetime | None = None) -> datetime | None:
     m = _EPOCH_RE.search(text)
     if m:
         return datetime.fromtimestamp(int(m.group(1)), tz=timezone.utc)
+    m = _DATE_CLOCK_RE.search(text)
+    if m:
+        at = _date_clock(m, now)
+        if at is not None:
+            return at
     for m in _CLOCK_RE.finditer(text):
         hour, minute, ampm, zone = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower(), m.group(4)
         if not ampm and m.group(2) is None:
@@ -67,13 +78,7 @@ def parse_reset_at(text: str, now: datetime | None = None) -> datetime | None:
             hour = hour % 12 + (12 if ampm == "p" else 0)
         if hour > 23 or minute > 59:
             continue
-        tz = None
-        if zone:
-            try:
-                from zoneinfo import ZoneInfo
-                tz = ZoneInfo(zone)
-            except Exception:   # noqa: BLE001 - unknown zone name: fall back to local time
-                tz = None
+        tz = _zone(zone)
         local_now = now.astimezone(tz) if tz else now.astimezone()
         at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if at <= local_now:
@@ -83,6 +88,38 @@ def parse_reset_at(text: str, now: datetime | None = None) -> datetime | None:
     if m and (m.group(1) or m.group(2)):
         return now + timedelta(hours=int(m.group(1) or 0), minutes=int(m.group(2) or 0))
     return None
+
+
+def _zone(name: str | None):
+    if not name:
+        return None
+    if name.upper() == "UTC":
+        return timezone.utc
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:   # noqa: BLE001 - unknown zone name: local time
+        return None
+
+
+def _date_clock(m: re.Match, now: datetime) -> datetime | None:
+    month = _MONTHS.index(m.group(1).lower()[:3]) + 1
+    day, hour, minute, ampm = int(m.group(2)), int(m.group(3)), int(m.group(4) or 0), (m.group(5) or "").lower()
+    if ampm:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if ampm == "p" else 0)
+    if hour > 23 or minute > 59:
+        return None
+    tz = _zone(m.group(6))
+    local_now = now.astimezone(tz) if tz else now.astimezone()
+    try:
+        at = local_now.replace(month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
+    except ValueError:
+        return None
+    if at < local_now - timedelta(days=1):   # "resets Jan 2" read on Dec 30
+        at = at.replace(year=at.year + 1)
+    return at.astimezone(timezone.utc)
 
 
 def is_usage_limit(text: str) -> bool:
@@ -247,7 +284,11 @@ class Adapter:
             return RunResult(ok=False, exit_code=-3, stdout=out, stderr=err,
                              error="stopped: the task was handed to another agent while this run was in progress")
         result = self.parse_output(proc.returncode, out, err)
-        if not result.ok and not result.rate_limited and RATE_LIMIT_RE.search(err[-4000:] + "\n" + result.error):
+        # a CLI that stops on a limit before it starts its JSON stream prints the message on stdout ("You've hit
+        # your session limit · resets 3:45pm", Oct 11 2026); only then is stdout the CLI's own text, not the model's
+        cli_text = out[-2000:] if result.error.startswith("no result json") else ""
+        if not result.ok and not result.rate_limited and RATE_LIMIT_RE.search(
+                err[-4000:] + "\n" + result.error + "\n" + cli_text):
             result.rate_limited = True
         if result.rate_limited:
             text = result.error + "\n" + err[-4000:] + "\n" + out[-2000:]
@@ -257,9 +298,10 @@ class Adapter:
             result.auth_lost = False      # a limit names its reset; the login question waits for the next run
         elif not result.ok and not result.auth_lost and is_auth_lost(result.error + "\n" + err[-4000:]):
             result.auth_lost = True
-        if (result.rate_limited or result.auth_lost) and re.fullmatch(r"exit -?\d+", result.error.strip() or "exit 0"):
+        if (result.rate_limited or result.auth_lost) and re.fullmatch(r"exit -?\d+|no result json \(exit -?\d+\)",
+                                                                       result.error.strip() or "exit 0"):
             # the CLI said why only on stderr: the board's last_error should say it too, not "exit 1"
-            line = matching_line(err[-4000:], RATE_LIMIT_RE if result.rate_limited else AUTH_LOST_RE)
+            line = matching_line(err[-4000:] + "\n" + cli_text, RATE_LIMIT_RE if result.rate_limited else AUTH_LOST_RE)
             if line:
                 result.error = line[:500]
         return result

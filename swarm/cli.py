@@ -73,7 +73,17 @@ def _workspace(cfg: Config):
     from .workspace import Workspace
     ws = Workspace(cfg.repo_root, cfg.worktree_root, cfg.main_branch)
     configure_verify_slots(ws, cfg, state.host, log=console.print)
+    ws.hook_options = hook_options(cfg)
     return ws
+
+
+def hook_options(cfg: Config) -> dict | None:
+    """install_hooks() arguments from config `hooks:`; None when the project turned the hooks off."""
+    h = cfg.hooks
+    if not h.strip_trailers and not h.pre_push:
+        return None
+    return {"main": h.strip_trailers_main, "pre_push": h.pre_push, "pre_push_verify": h.pre_push_verify,
+            "setup": cfg.verify.setup_worktree, "main_branch": cfg.main_branch}
 
 
 def configure_verify_slots(ws, cfg: Config, host: str | None, log=print) -> None:
@@ -288,13 +298,53 @@ def tell(task_id: str, text: str):
     console.print(f"{q.id}: {q.text}")
 
 
+_VALUE_OPTS = ("--config", "--host")
+
+
+def runner_pids(ps_output: str, me: int) -> list[int]:
+    """Pids of `swarm run` processes in `ps -axo pid=,command=` output: a Python or `swarm` executable whose swarm
+    subcommand is `run`. Never caffeinate (SIGUSR1 would kill it), a shell whose command line merely contains the
+    words, or this process (the old `pgrep -f "swarm run"` matched all of those)."""
+    pids = []
+    for line in ps_output.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit() or int(parts[0]) == me:
+            continue
+        argv = parts[1].split()
+        exe = os.path.basename(argv[0])
+        if exe == "swarm":
+            rest = argv[1:]
+        elif exe.startswith("python"):
+            i = next((k for k, tok in enumerate(argv[1:], 1)
+                      if os.path.basename(tok) == "swarm" or tok in ("swarm.cli", "swarm")), None)
+            if i is None:
+                continue
+            rest = argv[i + 1:]
+        else:
+            continue
+        skip = False
+        for tok in rest:
+            if skip:
+                skip = False
+                continue
+            if tok in _VALUE_OPTS:
+                skip = True
+                continue
+            if tok.startswith("-"):
+                continue
+            if tok == "run":
+                pids.append(int(parts[0]))
+            break
+    return pids
+
+
 @app.command()
 def restart():
     """Gracefully restart the runner(s) on this laptop: they finish in-flight work, then re-exec on the current code."""
     import signal
     import subprocess
-    r = subprocess.run(["pgrep", "-f", "swarm run"], capture_output=True, text=True)
-    pids = [int(x) for x in r.stdout.split() if x.isdigit() and int(x) != os.getpid()]
+    r = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    pids = runner_pids(r.stdout, os.getpid())
     for pid in pids:
         try:
             os.kill(pid, signal.SIGUSR1)
@@ -456,6 +506,13 @@ def assign(task_id: str, agent: str = typer.Option(..., "--agent"), model: str =
         t.status, t.claim_nonce = Status.READY, ""
         fields += ["status", "claim_nonce"]
         console.print(f"[yellow]{t.id}: stopping {t.agent}'s run (it notices within 30 s) and re-queueing[/yellow]")
+    new_host = _cfg().agents[agent].host
+    if t.pinned_host and t.pinned_host != new_host:
+        # a pin to another host would leave the task unclaimed forever (T-362/T-364/T-354 sat 40 min, Oct 10)
+        console.print(f"[yellow]{t.id}: pin host:{t.pinned_host} replaced by host:{new_host} ({agent}'s host)[/yellow]")
+        t.flags = [f for f in t.flags if not f.startswith("host:")] + [f"host:{new_host}"]
+        if "flags" not in fields:
+            fields.append("flags")
     from .router import model_for, tier_for
     t.agent = agent
     default_model, default_effort = model_for(_cfg().agents[agent], tier_for(t, _cfg()), t.type, _cfg())
@@ -516,6 +573,14 @@ def answer(question_id: str, text: str,
     picked = [q for q in qs if (not kind or q.kind == kind) and (not task or q.task_id == task)]
     if not picked:
         raise typer.Exit(code=_fail(f"no {question_id} row matches --kind {kind or '*'} --task {task or '*'}"))
+    open_rows = [q for q in picked if q.status == "Open" and not q.answer]
+    if len(picked) > 1 and not all_rows and len(open_rows) == 1:
+        # the cross-laptop id race (Q-1978 twice, Oct 11): the other rows are answered already, so the open one is
+        # the only one this answer can be for
+        others = ", ".join(f"{q.task_id or '-'} ({q.status})" for q in picked if q is not open_rows[0])
+        console.print(f"{question_id} is shared with closed rows ({others}); answering the open one on "
+                      f"{open_rows[0].task_id or '-'}")
+        picked = open_rows
     if len(picked) > 1 and not all_rows:
         # two rows once shared Q-209 and `answer` closed only the first (Oct 6): never guess which one
         for q in picked:
@@ -542,13 +607,174 @@ def status():
 
 
 @app.command()
+def hooks(install: bool = typer.Option(False, "--install", help="install or refresh the hooks (config `hooks:`)"),
+          main: bool = typer.Option(None, "--main/--no-main", help="also strip AI trailers in the main checkout"),
+          pre_push: bool = typer.Option(None, "--pre-push/--no-pre-push",
+                                        help="pushes to main refuse commits that carry AI trailers"),
+          verify: bool = typer.Option(None, "--verify/--no-verify",
+                                      help="the pre-push gate also runs verify.fast on the pushed commit")):
+    """Git hooks: the commit-msg hook that strips AI attribution trailers (every worktree; the main checkout with
+    --main) and the opt-in pre-push gate for main. Without --install: show what is installed."""
+    from .githooks import hook_status, install_hooks
+    cfg = _cfg()
+    if install:
+        opts = hook_options(cfg) or {"main": None, "pre_push": False, "pre_push_verify": None,
+                                     "setup": cfg.verify.setup_worktree, "main_branch": cfg.main_branch}
+        if main is not None:
+            opts["main"] = main
+        if pre_push is not None:
+            opts["pre_push"] = pre_push
+        if verify is not None:
+            opts["pre_push_verify"] = cfg.verify.fast if verify else None
+            opts["pre_push"] = opts["pre_push"] or verify
+        install_hooks(cfg.repo_root, **opts)
+    st = hook_status(cfg.repo_root)
+    console.print(f"hooks dir: {st['dir']}")
+    console.print(f"commit-msg (strip AI trailers): {'installed' if st['commit-msg'] else 'NOT installed'}"
+                  f" · main checkout: {'yes' if st['main'] else 'no (worktrees only)'}")
+    console.print(f"pre-push gate on {cfg.main_branch}: " + ("NOT installed" if not st["pre-push"] else
+                  "refuses AI trailers" + (f", runs {st['pre-push-verify']}" if st["pre-push-verify"] else "")))
+    if not install and not st["commit-msg"]:
+        console.print("run `swarm hooks --install` (runners also install it before every worktree)")
+
+
+def _dispatcher(cfg: Config):
+    from . import dispatch as d
+    return d.Dispatcher(cfg, _workspace(cfg), adapter_factory=d.get_adapter, log=console.print)
+
+
+@app.command()
+def dispatch(name: str = typer.Option(..., "--name", help="job name: letters, digits, . _ - (its branch is job/<name>)"),
+             prompt_file: str = typer.Option(..., "--prompt-file",
+                                             help="file with the prompt, or - for stdin (never pass it on argv)"),
+             account: str = typer.Option(None, "--account", help="config `accounts:` name or an agent name"),
+             model: str = typer.Option(None, "--model"), effort: str = typer.Option(None, "--effort"),
+             push: str = typer.Option(None, "--push", help="branch (default) | main | none"),
+             verify: bool = typer.Option(None, "--verify/--no-verify", help="verify.fast before a push to main"),
+             cwd: str = typer.Option(None, "--cwd", help="run in this directory instead of a fresh worktree "
+                                                         "(research jobs; nothing is committed or pushed)"),
+             replace: bool = typer.Option(False, "--replace", help="reuse the name of a finished job"),
+             foreground: bool = typer.Option(False, "--foreground", help="run here and wait (default: detached)")):
+    """Run one headless agent job outside the board: own worktree, prompt via file/stdin, per-job logs, account and
+    model fallback, waits out a limit and retries. `swarm jobs` lists them."""
+    import sys
+    cfg = _cfg()
+    text = sys.stdin.read() if prompt_file == "-" else Path(prompt_file).expanduser().read_text()
+    d = _dispatcher(cfg)
+    try:
+        job = d.create(name, text, account=account, model=model, effort=effort, push=push, verify=verify, cwd=cwd,
+                       replace=replace)
+    except ValueError as e:
+        raise typer.Exit(code=_fail(str(e)))
+    where = d.job_dir(job.name)
+    if foreground:
+        job = d.run(job, install_signals=True)
+        console.print(f"{job.name}: {job.status}" + (f" · {job.pushed_to}" if job.pushed_to else "")
+                      + (f" · {job.error}" if job.error else "") + f" · report {where / 'report.md'}")
+        raise typer.Exit(code=0 if job.status == "done" else 1)
+    pid = d.start_background(job, host=state.host)
+    console.print(f"{job.name} started (pid {pid}) on {job.account}/{job.model} · push {job.push} · logs {where}")
+
+
+@app.command()
+def jobs(name: str = typer.Argument(None, help="one job: its details, final report and log tail"),
+         stop: bool = typer.Option(False, "--stop", help="stop that job (its CLI and supervisor); work is kept"),
+         limit: int = typer.Option(20, "--limit")):
+    """Running and finished `swarm dispatch` jobs with their final reports."""
+    cfg = _cfg()
+    d = _dispatcher(cfg)
+    if name:
+        try:
+            job = d.load(name)
+        except OSError:
+            raise typer.Exit(code=_fail(f"no job {name} under {d.root}"))
+        if stop:
+            console.print(f"{name}: stop sent" if d.stop(name) else f"{name} is not running")
+            return
+        console.print(f"{job.name} · {job.live_status()} · {job.account}/{job.model} · push {job.push} · "
+                      f"created {job.created} · finished {job.finished or '-'}", markup=False)
+        for a in job.attempts:
+            console.print(f"  attempt {a.get('n')}: {a.get('account')}/{a.get('model')} {a.get('started', '')} → "
+                          f"{a.get('finished', '…')} exit {a.get('exit', '-')}"
+                          + (f" limited until {a['limited_until']}" if a.get("limited_until") else "")
+                          + (f" {a['error'][:80]}" if a.get("error") else ""), markup=False)
+        if job.retry_at:
+            console.print(f"  waiting for a limit; retry at {job.retry_at}")
+        if job.pushed_to:
+            console.print(f"  pushed to {job.pushed_to}: " + "; ".join(job.commits[:5]), markup=False)
+        if job.error:
+            console.print(f"  error: {job.error}", markup=False)
+        rep = d.job_dir(name) / "report.md"
+        console.rule("report")
+        console.print(rep.read_text() if rep.exists() else (job.report or "(no report yet)"), markup=False,
+                      highlight=False)
+        return
+    rows = d.list_jobs()[:limit]
+    if not rows:
+        console.print(f"no jobs under {d.root}")
+        return
+    table = Table("job", "status", "account/model", "created", "attempts", "result")
+    for j in rows:
+        st = j.live_status()
+        result = (j.pushed_to or "") + (f" retry {j.retry_at[11:16]}" if st == "waiting_limit" else "")
+        first = (j.report or j.error or "").strip().splitlines()[:1]
+        table.add_row(j.name, st, f"{j.account}/{j.model}", j.created[5:16].replace("T", " "),
+                      str(len(j.attempts)), (result + (" · " if result and first else "") + (first[0] if first else ""))[:70])
+    console.print(table)
+
+
+@app.command()
+def watch(period: int = typer.Option(45, "--period", help="seconds between board reads"),
+          min_task: int = typer.Option(0, "--min-task", help="only tasks numbered at least this (T-129 → 129)"),
+          mute_host: list[str] = typer.Option([], "--mute-host", help="hide this host's task moves and chatter; "
+                                              "blocking/harness questions and asks to the orchestrator still show"),
+          always: list[str] = typer.Option([], "--always", help="a word that marks a question as addressed to you "
+                                                                "(e.g. your name); repeatable"),
+          once: bool = typer.Option(False, "--once", help="print the armed line and stop (tests, cron)")):
+    """One line per new/reopened question and task status change, for a Monitor. Never drops a question addressed
+    to the orchestrator."""
+    import time as _time
+    from .relay import orchestrator_host
+    from .watch import Watcher, snapshot
+    cfg = _cfg()
+    board = make_board(cfg, state.memory)
+    w = Watcher(cfg, local_host=state.host or "", mute_hosts=mute_host, always=always,
+                orch_host=orchestrator_host(cfg, board, fallback=state.host or ""))
+    prev = snapshot(board.list_tasks(), board.list_questions(), min_task=min_task)
+    open_q = [q for q in prev.questions.values() if q.status == "Open"]
+    must = [q for q in open_q if w.must_show(q)]
+    console.print(f"watch armed: {len(prev.tasks)} tasks, {len(prev.questions)} questions; open: {len(open_q)}"
+                  + (f"; for you: {', '.join(f'{q.id}({q.kind},{q.task_id or chr(45)})' for q in must[:12])}"
+                     if must else ""), markup=False, highlight=False, soft_wrap=True)
+    if once:
+        return
+    while True:
+        _time.sleep(period)
+        try:
+            cur = snapshot(board.list_tasks(), board.list_questions(), min_task=min_task)
+        except Exception as e:  # noqa: BLE001 - a board hiccup is one line, never the end of the watch
+            console.print(f"watch error: {type(e).__name__}: {str(e)[:120]}", markup=False)
+            continue
+        for line in w.diff(prev, cur):
+            console.print(line, markup=False, highlight=False, soft_wrap=True)
+        prev = cur
+
+
+@app.command()
 def hold(reason: str = typer.Argument(..., help='why, e.g. "live test"'),
-         minutes: float = typer.Option(60, "--minutes", help="the hold ends by itself after this long")):
-    """Live test hold: swarm-lock (measurements and verifies) waits, so nothing disturbs a human test."""
+         minutes: float = typer.Option(60, "--minutes", help="the hold ends by itself after this long"),
+         scope: str = typer.Option(None, "--scope", help="comma list of locks,claims,reviews (default: config "
+                                                         "`hold.scope`, which defaults to all three)")):
+    """Live test hold on this machine: swarm-lock waits (locks), the runner here starts no new task (claims) and
+    serve here starts no review or merge (reviews), so nothing disturbs a human test."""
     import socket
-    from .hostlock import hold_text, lock_dir, read_hold, write_hold
+    from .hostlock import HOLD_SCOPES, hold_text, lock_dir, read_hold, write_hold
     d = lock_dir(_cfg().project)
-    write_hold(d, reason, minutes, by=state.host or socket.gethostname())
+    parts = [x.strip() for x in scope.split(",") if x.strip()] if scope else list(_cfg().hold_scope)
+    bad = [x for x in parts if x not in HOLD_SCOPES]
+    if bad:
+        raise typer.Exit(code=_fail(f"--scope: unknown {', '.join(bad)}; use {','.join(HOLD_SCOPES)}"))
+    write_hold(d, reason, minutes, by=state.host or socket.gethostname(), scope=parts)
     console.print(f"HOLD set on this machine: {hold_text(read_hold(d))}. `swarm release` ends it.")
 
 
@@ -631,7 +857,7 @@ def serve(no_review: bool = typer.Option(False, "--no-review"), no_merge: bool =
     srv = Server(_cfg(), board, ws,
                  reviewer=NoReview() if no_review else Reviewer(_cfg(), board, ws, log=console.print, ledger=_ledger(_cfg())),
                  merger=NoMerge() if no_merge else Merger(_cfg(), board, ws, log=console.print),
-                 log=console.print, host=state.host or "serve", background=not once)
+                 log=console.print, host=state.host or "serve", background=not once, main_health=True)
     if once:
         srv.acquire_lock()
         summary = srv.tick()

@@ -290,14 +290,20 @@ def _parse_iso(v: object) -> datetime | None:
         return None
 
 
+HOLD_SCOPES = ("locks", "claims", "reviews")
+
+
 def write_hold(directory: Path | str, reason: str, minutes: float = DEFAULT_HOLD_MINUTES, *,
-               by: str = "", now: datetime | None = None) -> dict:
-    """Start a live-test hold: measurements and verifies wait until it is released or `minutes` have passed."""
+               by: str = "", now: datetime | None = None, scope: list[str] | tuple | None = None) -> dict:
+    """Start a live-test hold on this machine until it is released or `minutes` have passed. `scope` says what
+    waits: locks (swarm-lock measurements and verifies), claims (the runner starts no new task here), reviews (serve
+    starts no review or merge here); default all three (Oct 11 2026: workers' Playwright load during a live test
+    pushed the audio engine to a degraded tier although swarm-lock was held)."""
     now = now or datetime.now(timezone.utc)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     data = {"reason": reason, "since": _iso(now), "until": _iso(now + timedelta(minutes=minutes)),
-            "by": by or socket.gethostname()}
+            "by": by or socket.gethostname(), "scope": [x for x in (scope or HOLD_SCOPES) if x in HOLD_SCOPES]}
     (directory / HOLD_FILE).write_text(json.dumps(data))
     return data
 
@@ -325,8 +331,19 @@ def clear_hold(directory: Path | str) -> bool:
         return False
 
 
+def hold_applies(hold: dict | None, what: str) -> bool:
+    """True when an active hold covers `what` (locks, claims, reviews). A hold written before scopes existed covers
+    locks only, as it always did."""
+    if not hold:
+        return False
+    scope = hold.get("scope")
+    return what in (scope if isinstance(scope, list) else ["locks"])
+
+
 def hold_text(hold: dict) -> str:
-    return f"{hold.get('reason') or 'live test'} until {hold['until_dt'].strftime('%H:%M')} UTC"
+    scope = hold.get("scope") if isinstance(hold.get("scope"), list) else ["locks"]
+    return (f"{hold.get('reason') or 'live test'} until {hold['until_dt'].strftime('%H:%M')} UTC"
+            f" (pauses {', '.join(scope) or 'nothing'})")
 
 
 def task_wait_seconds(directory: Path | str, task_id: str, now: float | None = None) -> float:
@@ -485,7 +502,7 @@ def verify_slot(directory: Path | str, slots: int = DEFAULT_SLOTS, *, exclusive:
 
     try:
         if honor_hold and os.environ.get(HOLD_BYPASS_ENV) != "1":
-            while (hold := read_hold(directory)) is not None:
+            while hold_applies(hold := read_hold(directory), "locks"):
                 waiting(f"live test hold on this machine and the shared GPU ({hold_text(hold)}); waiting for "
                         f"`swarm release` or the until-time. A measurement or verify must not disturb a human test.")
                 sleep(poll_s)

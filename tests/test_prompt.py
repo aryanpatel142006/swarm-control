@@ -106,3 +106,16 @@ def test_merge_conflicts_section_comes_before_feedback(cfg):
                        conflicts_note="- web/a.css")
     assert "## Merge conflicts: resolve these first" in p
     assert p.index("Merge conflicts") < p.index("reviewer note")
+
+
+def test_outputs_dir_reaches_the_prompt_and_the_worker_env(cfg, tmp_path):
+    """Oct 12 2026: ~35 agent outputs landed on Aryan's Desktop; files for people go under outputs_dir/<kind>/."""
+    from swarm.runner import worker_env
+    t = Task(id="T-9", title="Export A/B", type="eval", size="S")
+    assert "SWARM_OUTPUTS_DIR" not in compile_prompt(t, cfg, rules_text="R", deps_summaries={},
+                                                     structured_output_supported=True)
+    cfg.outputs_dir = str(tmp_path / "deliverables")
+    text = compile_prompt(t, cfg, rules_text="R", deps_summaries={}, structured_output_supported=True)
+    assert f"{tmp_path / 'deliverables'}/<kind>/" in text and "never ~/Desktop" in text
+    env = worker_env(tmp_path, t, cfg, "host-a")
+    assert env["SWARM_OUTPUTS_DIR"] == str(tmp_path / "deliverables")

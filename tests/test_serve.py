@@ -939,3 +939,39 @@ def test_muse_c_title_overrides_a_laptop_a_pin(project_dir, sample_config_dict, 
     assert board.get_task("T-003").pinned_host == "laptop-a"
     assert board.get_task("T-004").pinned_host == "laptop-a"     # only Muse C titles override an explicit pin
     assert srv.infer_hosts() == 0
+
+
+def test_serve_checks_new_main_commits_and_status_turns_red(cfg, git_repo, tmp_path):
+    """Oct 11 2026: direct pushes left verify_fast red on main; every task inherited it and status said nothing."""
+    import subprocess
+    from swarm.mainhealth import default_health_path, read_health
+    from swarm.status import render_status
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    cfg.verify.fast = "scripts/verify_fast.sh"
+    srv.main_health = True
+    (git_repo / "scripts" / "verify_fast.sh").write_text(
+        "#!/bin/sh\necho 'hearing/x.py:3:1: RUF046 cast'\necho 'FAILED tests/test_a.py::test_b - boom'\nexit 1\n")
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-qam", "red main"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "push", "-q", "origin", "main"], check=True)
+    srv.tick()
+    h = read_health(default_health_path(cfg.project))
+    assert h and h["ok"] is False and "ruff RUF046 hearing/x.py" in h["failing"]
+    assert "RISK: main is red at" in render_status(cfg, [], [], [], clock["now"])
+    calls = []
+    srv.ws.provision_detached = lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(AssertionError("rerun"))
+    srv._main_checked_at = None
+    srv.tick()                           # same sha: not checked again
+    assert calls == []
+
+
+def test_a_hold_with_reviews_scope_pauses_reviews_and_merges_on_serves_host(cfg, git_repo, tmp_path):
+    from swarm.hostlock import lock_dir, write_hold
+    srv, board, clock = make(cfg, git_repo, tmp_path)
+    board.create_task(Task(id="", title="r", status=Status.REVIEW, agent="claude-a", importance="high"))
+    board.create_task(Task(id="", title="m", status=Status.MERGE_READY, agent="claude-a"))
+    write_hold(lock_dir(cfg.project), "live test", 30, scope=["claims", "reviews"])
+    srv.tick()
+    assert srv.reviewer.seen == [] and srv.merger.seen == []
+    write_hold(lock_dir(cfg.project), "live test", 30, scope=["locks"])
+    srv.tick()
+    assert srv.reviewer.seen and srv.merger.seen
