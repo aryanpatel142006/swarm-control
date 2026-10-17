@@ -34,26 +34,21 @@ swarm-control turns a written plan into small, independent tasks and hands each 
 **fresh, size-capped session**. Cheap work goes to cheap models; critical work gets the strongest one. Every task ends
 as a reviewed, tested pull request, and the humans steer from a Notion board instead of babysitting terminals.
 
-## What it did on a real project
+## In action
 
 swarm-control was built for **HackRU Fall 2026** as the tool our team uses to build its hackathon project,
-*selective-hearing* (a real-time speech-isolation and captioning engine: noise suppression, active-speaker detection,
-transcription). Numbers from the run, all from the harness's own ledger and [field notes](docs/field-notes/):
+*selective-hearing* (a real-time speech-isolation and captioning engine). This is the real board from that run:
 
-| | |
-|---|---|
-| **36 hours** after `swarm init` | milestones M0–M5 built: ~50 tasks merged, 80 commits on `main`, 470+ tests in the project |
-| **$3.42 per merged task** | laptop A's ledger: $147 across 300 agent runs, including retries and reviews |
-| **Agents in the swarm** | Claude Code on two accounts, Codex and Antigravity on a teammate's laptop |
-| **41 incidents logged** | nearly every one became a tested code fix, a planner rule, or a rule in the orchestrator skill |
-
-And an unattended overnight practice run (`swarm night`), before the real project:
-
-| | |
-|---|---|
-| **7 cycles, 30 of 35 tasks merged** | each cycle builds a small app from scratch; the last four merged every task on its first attempt |
-| **~$1 per merged task** | $32 over 57 runs, with 93% of prompt tokens served from cache |
-| **~25 harness fixes overnight** | each landed on `main` with a test, from what the cycles exposed |
+<table>
+<tr>
+<td width="44%"><img src="docs/images/notion-dashboard.jpg" alt="The live Notion dashboard: status line and the Agents table with heartbeats and current tasks"></td>
+<td width="56%"><img src="docs/images/notion-tasks.jpg" alt="The Tasks table: every task with its status, agent, importance, type, size and milestone"></td>
+</tr>
+<tr>
+<td align="center"><sub>The real dashboard mid-run: a live status line written by <code>swarm serve</code>, and each agent's heartbeat and current task</sub></td>
+<td align="center"><sub>The Tasks board: every task with the agent it was routed to, its importance, type, size and milestone</sub></td>
+</tr>
+</table>
 
 ## How it works
 
